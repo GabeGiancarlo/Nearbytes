@@ -51,13 +51,39 @@ export interface CryptoOperations {
 }
 
 /**
+ * Gets the Web Crypto API SubtleCrypto instance
+ * Works in both browser and Node.js environments
+ */
+function getCryptoSubtle(): SubtleCrypto {
+  // Try globalThis.crypto first (browser, Node.js 18+)
+  if (globalThis.crypto?.subtle) {
+    return globalThis.crypto.subtle;
+  }
+
+  // Fallback to Node.js crypto.webcrypto (Node.js 15+)
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const nodeCrypto = require('crypto');
+    if (nodeCrypto.webcrypto?.subtle) {
+      return nodeCrypto.webcrypto.subtle;
+    }
+  } catch {
+    // require might not work in all environments
+  }
+
+  throw new Error('Web Crypto API not available');
+}
+
+/**
  * Creates a concrete implementation of CryptoOperations using Web Crypto API
  * @returns CryptoOperations implementation
- * @throws CryptoError if Web Crypto API is not available
+ * @throws Error if Web Crypto API is not available
  */
 export function createCryptoOperations(): CryptoOperations {
-  const crypto = globalThis.crypto?.subtle;
-  if (!crypto) {
+  // Verify Web Crypto API is available
+  try {
+    getCryptoSubtle();
+  } catch (error) {
     throw new Error('Web Crypto API not available');
   }
 
