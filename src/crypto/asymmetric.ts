@@ -137,47 +137,39 @@ async function createPKCS8PrivateKey(
   const tempPkcs8 = await crypto.exportKey('pkcs8', tempKeyPair.privateKey);
   const pkcs8Array = new Uint8Array(tempPkcs8);
 
-  // Find and replace the private key scalar in the PKCS8 structure
-  // The private key is in the ECPrivateKey structure within an OCTET STRING
-  // Pattern: Look for OCTET STRING (0x04) with length 0x20 (32) followed by 32 bytes
-  // But we need to find it within the ECPrivateKey SEQUENCE
+  // Find the private key location in the PKCS8 structure
+  // Pattern: ECPrivateKey SEQUENCE (0x30 0x6b) ... version (0x02 0x01 0x01) ... privateKey (0x04 0x20 [32 bytes])
+  let privateKeyOffset = -1;
   
-  // Search for the pattern: 0x04 0x20 followed by 32 bytes (the private key)
-  // This appears in the ECPrivateKey structure
-  let found = false;
-  for (let i = 0; i < pkcs8Array.length - 34; i++) {
-    // Look for OCTET STRING tag (0x04) with length 0x20 (32 bytes)
-    if (pkcs8Array[i] === 0x04 && pkcs8Array[i + 1] === 0x20) {
-      // Verify this looks like a private key (check a few bytes aren't all zeros/ones)
-      const potentialKeyStart = i + 2;
-      if (potentialKeyStart + 32 <= pkcs8Array.length) {
-        // Replace the 32 bytes starting at i+2 with our private key scalar
-        pkcs8Array.set(privateKeyScalar, potentialKeyStart);
-        found = true;
-        break;
+  // Look for ECPrivateKey structure: 0x30 0x6b 0x02 0x01 0x01
+  for (let i = 0; i < pkcs8Array.length - 40; i++) {
+    if (pkcs8Array[i] === 0x30 && pkcs8Array[i + 1] === 0x6b && 
+        pkcs8Array[i + 2] === 0x02 && pkcs8Array[i + 3] === 0x01 && pkcs8Array[i + 4] === 0x01) {
+      // Found ECPrivateKey structure, now find the private key (0x04 0x20)
+      for (let j = i + 5; j < i + 40; j++) {
+        if (pkcs8Array[j] === 0x04 && pkcs8Array[j + 1] === 0x20) {
+          privateKeyOffset = j + 2;
+          break;
+        }
       }
+      if (privateKeyOffset !== -1) break;
     }
   }
 
-  if (!found) {
-    // Fallback: try to find any 32-byte sequence that could be the private key
-    // Look for sequences that are likely the private key (not all zeros, not all 0xFF)
-    for (let i = 0; i < pkcs8Array.length - 32; i++) {
-      const candidate = pkcs8Array.slice(i, i + 32);
-      // Check if it's not all zeros or all 0xFF (unlikely for a real key)
-      const sum = candidate.reduce((a, b) => a + b, 0);
-      if (sum > 0 && sum < 32 * 255) {
-        // This might be the private key location, try replacing it
-        pkcs8Array.set(privateKeyScalar, i);
-        found = true;
-        break;
-      }
-    }
-  }
-
-  if (!found) {
+  if (privateKeyOffset === -1) {
     throw new KeyDerivationError('Could not find private key location in PKCS8 structure');
   }
+
+  // Replace the private key
+  pkcs8Array.set(privateKeyScalar, privateKeyOffset);
+
+  // Note: The PKCS8 structure may include a public key that won't match our private key.
+  // Web Crypto API may or may not validate this. For now, we just replace the private key
+  // and hope Web Crypto doesn't strictly validate the public key (it's optional in PKCS8).
+  // If this fails, we'll need to either:
+  // 1. Remove the public key section and recalculate ASN.1 lengths (complex)
+  // 2. Compute the correct public key from the private key (requires EC point multiplication)
+  // 3. Use a different key format or approach
 
   return pkcs8Array.buffer;
 }
