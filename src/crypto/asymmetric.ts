@@ -279,7 +279,7 @@ export async function signPR(data: Uint8Array, privateKey: PrivateKey): Promise<
     const dataHashBytes = hexToBytes(dataHash);
 
     // Create PKCS8 private key using workaround
-    const pkcs8 = await createPKCS8PrivateKey(crypto, privateKey);
+    const pkcs8 = createPKCS8PrivateKey(crypto, privateKey);
 
     // Import private key
     const cryptoKey = await crypto.importKey(
