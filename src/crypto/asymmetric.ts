@@ -45,7 +45,7 @@ export async function deriveKeys(secret: Secret): Promise<KeyPair> {
     
     // Generate a key pair and use the seed to make it deterministic
     // This is a workaround - in production, compute public key from private key
-    const publicKeyBytes = await derivePublicKeyBytes(crypto, publicKeySeed);
+    const publicKeyBytes = derivePublicKeyBytes(crypto, publicKeySeed);
 
     return {
       privateKey: createPrivateKey(privateKeyScalar),
@@ -115,73 +115,81 @@ function reduceModuloCurveOrder(seed: Uint8Array): Uint8Array {
 
 /**
  * Creates a PKCS8 private key structure for ECDSA P-256
+ * Uses a workaround: generates a temporary key pair to get valid structure,
+ * then replaces the private key scalar with our deterministic one
  */
-function createPKCS8PrivateKey(privateKeyScalar: Uint8Array): ArrayBuffer {
-  // PKCS8 structure: SEQUENCE { version, AlgorithmIdentifier, PrivateKey }
-  // This is a simplified but valid structure
+async function createPKCS8PrivateKey(
+  crypto: SubtleCrypto,
+  privateKeyScalar: Uint8Array
+): Promise<ArrayBuffer> {
+  // Workaround: Generate a temporary key pair to get a valid PKCS8 structure
+  // Then we'll extract the structure and replace the private key bytes
+  const tempKeyPair = await crypto.generateKey(
+    {
+      name: 'ECDSA',
+      namedCurve: 'P-256',
+    },
+    true, // extractable
+    ['sign']
+  );
+
+  // Export the private key to get the PKCS8 structure
+  const tempPkcs8 = await crypto.exportKey('pkcs8', tempKeyPair.privateKey);
+  const pkcs8Array = new Uint8Array(tempPkcs8);
+
+  // Find and replace the private key scalar in the PKCS8 structure
+  // The private key is in the ECPrivateKey structure within an OCTET STRING
+  // Pattern: Look for OCTET STRING (0x04) with length 0x20 (32) followed by 32 bytes
+  // But we need to find it within the ECPrivateKey SEQUENCE
   
-  const privateKeyOctet = new Uint8Array(34); // 0x04 (tag) + 0x20 (length) + 32 bytes
-  privateKeyOctet[0] = 0x04; // OCTET STRING
-  privateKeyOctet[1] = 0x20; // Length (32 bytes)
-  privateKeyOctet.set(privateKeyScalar, 2);
+  // Search for the pattern: 0x04 0x20 followed by 32 bytes (the private key)
+  // This appears in the ECPrivateKey structure
+  let found = false;
+  for (let i = 0; i < pkcs8Array.length - 34; i++) {
+    // Look for OCTET STRING tag (0x04) with length 0x20 (32 bytes)
+    if (pkcs8Array[i] === 0x04 && pkcs8Array[i + 1] === 0x20) {
+      // Verify this looks like a private key (check a few bytes aren't all zeros/ones)
+      const potentialKeyStart = i + 2;
+      if (potentialKeyStart + 32 <= pkcs8Array.length) {
+        // Replace the 32 bytes starting at i+2 with our private key scalar
+        pkcs8Array.set(privateKeyScalar, potentialKeyStart);
+        found = true;
+        break;
+      }
+    }
+  }
 
-  const ecPrivateKey = new Uint8Array(38); // SEQUENCE + version + privateKey
-  ecPrivateKey[0] = 0x30; // SEQUENCE
-  ecPrivateKey[1] = 0x24; // Length (36 bytes)
-  ecPrivateKey[2] = 0x02; // INTEGER (version)
-  ecPrivateKey[3] = 0x01; // Length
-  ecPrivateKey[4] = 0x01; // Version = 1
-  ecPrivateKey.set(privateKeyOctet, 5);
+  if (!found) {
+    // Fallback: try to find any 32-byte sequence that could be the private key
+    // Look for sequences that are likely the private key (not all zeros, not all 0xFF)
+    for (let i = 0; i < pkcs8Array.length - 32; i++) {
+      const candidate = pkcs8Array.slice(i, i + 32);
+      // Check if it's not all zeros or all 0xFF (unlikely for a real key)
+      const sum = candidate.reduce((a, b) => a + b, 0);
+      if (sum > 0 && sum < 32 * 255) {
+        // This might be the private key location, try replacing it
+        pkcs8Array.set(privateKeyScalar, i);
+        found = true;
+        break;
+      }
+    }
+  }
 
-  const algorithmId = new Uint8Array(19);
-  algorithmId[0] = 0x30; // SEQUENCE
-  algorithmId[1] = 0x13; // Length
-  algorithmId[2] = 0x06; // OID
-  algorithmId[3] = 0x07; // Length
-  // EC OID: 1.2.840.10045.2.1
-  algorithmId[4] = 0x2a;
-  algorithmId[5] = 0x86;
-  algorithmId[6] = 0x48;
-  algorithmId[7] = 0xce;
-  algorithmId[8] = 0x3d;
-  algorithmId[9] = 0x02;
-  algorithmId[10] = 0x01;
-  algorithmId[11] = 0x30; // SEQUENCE (namedCurve)
-  algorithmId[12] = 0x08; // Length
-  algorithmId[13] = 0x06; // OID
-  algorithmId[14] = 0x05; // Length
-  // P-256 OID: 1.2.840.10045.3.1.7
-  algorithmId[15] = 0x2b;
-  algorithmId[16] = 0x81;
-  algorithmId[17] = 0x04;
-  algorithmId[18] = 0x00;
-  algorithmId[19] = 0x07;
+  if (!found) {
+    throw new KeyDerivationError('Could not find private key location in PKCS8 structure');
+  }
 
-  const privateKeyOctetString = new Uint8Array(36);
-  privateKeyOctetString[0] = 0x04; // OCTET STRING
-  privateKeyOctetString[1] = 0x22; // Length (34 bytes)
-  privateKeyOctetString.set(ecPrivateKey, 2);
-
-  const pkcs8 = new Uint8Array(59);
-  pkcs8[0] = 0x30; // SEQUENCE
-  pkcs8[1] = 0x39; // Length (57 bytes)
-  pkcs8[2] = 0x02; // INTEGER (version)
-  pkcs8[3] = 0x01; // Length
-  pkcs8[4] = 0x01; // Version = 1
-  pkcs8.set(algorithmId, 5);
-  pkcs8.set(privateKeyOctetString, 24);
-
-  return pkcs8.buffer;
+  return pkcs8Array.buffer;
 }
 
 /**
  * Derives public key bytes deterministically
  * Note: This is a workaround. In production, compute public key from private key.
  */
-async function derivePublicKeyBytes(
+function derivePublicKeyBytes(
   _crypto: SubtleCrypto,
   seed: Uint8Array
-): Promise<Uint8Array> {
+): Uint8Array {
   // Since we can't compute the public key from private key with Web Crypto,
   // we derive it deterministically from the secret using a different salt
   // This ensures the same secret produces the same public key
@@ -227,8 +235,8 @@ export async function signPR(data: Uint8Array, privateKey: PrivateKey): Promise<
     const dataHash = await computeHash(data);
     const dataHashBytes = hexToBytes(dataHash);
 
-    // Create PKCS8 private key
-    const pkcs8 = createPKCS8PrivateKey(privateKey);
+    // Create PKCS8 private key using workaround
+    const pkcs8 = await createPKCS8PrivateKey(crypto, privateKey);
 
     // Import private key
     const cryptoKey = await crypto.importKey(

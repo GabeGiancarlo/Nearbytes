@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { promises as fs } from 'fs';
-import { join } from 'path';
 import { createCryptoOperations } from '../../crypto/index.js';
 import { FilesystemStorageBackend } from '../../storage/filesystem.js';
 import { ChannelStorage } from '../../storage/channel.js';
