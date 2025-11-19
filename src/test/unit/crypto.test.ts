@@ -89,15 +89,7 @@ describe('CryptoOperations', () => {
   });
 
   describe('signPR and verifyPU', () => {
-    // NOTE: These tests are currently skipped due to PKCS8 structure limitations.
-    // The issue is that when we replace the private key in a PKCS8 structure,
-    // the public key (if present) doesn't match, causing Web Crypto to reject it.
-    // To fix this, we would need to either:
-    // 1. Properly compute the public key from the private key (EC point multiplication)
-    // 2. Remove the public key from PKCS8 and recalculate ASN.1 lengths
-    // 3. Use a proper ASN.1 library (not allowed per requirements)
-    // This is a known limitation of the current implementation.
-    it.skip('should sign and verify data', async () => {
+    it('should sign and verify data', async () => {
       const secret = createSecret('test:secret');
       const keyPair = await crypto.deriveKeys(secret);
       const data = new TextEncoder().encode('test data');
@@ -108,7 +100,7 @@ describe('CryptoOperations', () => {
       expect(isValid).toBe(true);
     });
 
-    it.skip('should reject invalid signature', async () => {
+    it('should reject invalid signature', async () => {
       const secret = createSecret('test:secret');
       const keyPair = await crypto.deriveKeys(secret);
       const data = new TextEncoder().encode('test data');

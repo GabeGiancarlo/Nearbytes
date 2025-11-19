@@ -18,8 +18,7 @@ describe('NearBytes Workflow', () => {
     }
   });
 
-  // NOTE: This test is skipped due to PKCS8 signing limitations (see crypto.test.ts)
-  it.skip('should complete full workflow: setup -> store -> retrieve', async () => {
+  it('should complete full workflow: setup -> store -> retrieve', async () => {
     const secret = createSecret('test:channel:password');
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(TEST_DATA_DIR);
@@ -44,8 +43,7 @@ describe('NearBytes Workflow', () => {
     expect(retrievedData).toEqual(testData);
   });
 
-  // NOTE: This test is skipped due to PKCS8 signing limitations (see crypto.test.ts)
-  it.skip('should store and retrieve multiple events', async () => {
+  it('should store and retrieve multiple events', async () => {
     const secret = createSecret('test:channel:password');
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(TEST_DATA_DIR);

@@ -53,3 +53,23 @@ export function base64ToBytes(base64: string): Uint8Array {
   }
 }
 
+/**
+ * Converts a base64url string to a Uint8Array
+ * @param base64url - Base64url string (uses - and _ instead of + and /)
+ * @returns Byte array
+ * @throws Error if base64url string is invalid
+ */
+export function base64UrlToBytes(base64url: string): Uint8Array {
+  try {
+    // Convert base64url to base64
+    let base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+    // Add padding if needed
+    while (base64.length % 4) {
+      base64 += '=';
+    }
+    return new Uint8Array(Buffer.from(base64, 'base64'));
+  } catch (error) {
+    throw new Error(`Invalid base64url string: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+

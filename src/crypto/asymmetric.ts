@@ -4,12 +4,11 @@ import { createPrivateKey, createPublicKey, createSymmetricKey } from '../types/
 import { createSignature } from '../types/events.js';
 import { KeyDerivationError, SigningError, VerificationError } from './errors.js';
 import { computeHash } from './hash.js';
-import { hexToBytes, bytesToHex } from '../utils/encoding.js';
+import { hexToBytes, bytesToHex, base64UrlToBytes } from '../utils/encoding.js';
 
 const PBKDF2_ITERATIONS = 100000;
 const PBKDF2_HASH = 'SHA-256';
 const PRIVATE_KEY_SALT = new TextEncoder().encode('nearbytes-private-key-v1');
-const PUBLIC_KEY_SALT = new TextEncoder().encode('nearbytes-public-key-v1');
 const SYMMETRIC_KEY_SALT = new TextEncoder().encode('nearbytes-sym-key-derivation-v1');
 
 // ECDSA P-256 curve order (n) in hex
@@ -38,14 +37,32 @@ export async function deriveKeys(secret: Secret): Promise<KeyPair> {
     const privateKeySeed = await deriveSeed(crypto, secretBytes, PRIVATE_KEY_SALT, 32);
     const privateKeyScalar = reduceModuloCurveOrder(privateKeySeed);
 
-    // Derive public key deterministically from secret
-    // Since Web Crypto doesn't support EC point multiplication, we derive
-    // the public key separately but deterministically
-    const publicKeySeed = await deriveSeed(crypto, secretBytes, PUBLIC_KEY_SALT, 32);
-    
-    // Generate a key pair and use the seed to make it deterministic
-    // This is a workaround - in production, compute public key from private key
-    const publicKeyBytes = derivePublicKeyBytes(crypto, publicKeySeed);
+    // Create PKCS8 structure and import it
+    const pkcs8 = createPKCS8PrivateKey(crypto, privateKeyScalar);
+    const privateCryptoKey = await crypto.importKey(
+      'pkcs8',
+      pkcs8,
+      {
+        name: 'ECDSA',
+        namedCurve: 'P-256',
+      },
+      true, // extractable
+      ['sign']
+    );
+
+    // Export private key as JWK to get the public key coordinates
+    const jwk = await crypto.exportKey('jwk', privateCryptoKey);
+    if (!jwk.x || !jwk.y) {
+      throw new KeyDerivationError('Failed to extract public key coordinates from JWK');
+    }
+
+    // Convert JWK coordinates to raw format (0x04 + x + y)
+    const xBytes = base64UrlToBytes(jwk.x);
+    const yBytes = base64UrlToBytes(jwk.y);
+    const publicKeyBytes = new Uint8Array(65);
+    publicKeyBytes[0] = 0x04; // Uncompressed point
+    publicKeyBytes.set(xBytes, 1);
+    publicKeyBytes.set(yBytes, 33);
 
     return {
       privateKey: createPrivateKey(privateKeyScalar),
@@ -114,100 +131,134 @@ function reduceModuloCurveOrder(seed: Uint8Array): Uint8Array {
 }
 
 /**
- * Creates a PKCS8 private key structure for ECDSA P-256
- * Uses a workaround: generates a temporary key pair to get valid structure,
- * then replaces the private key scalar with our deterministic one
+ * Creates a PKCS8 private key structure for ECDSA P-256 from scratch
+ * Constructs a minimal valid PKCS8 structure without public key
  */
-async function createPKCS8PrivateKey(
-  crypto: SubtleCrypto,
-  privateKeyScalar: Uint8Array
-): Promise<ArrayBuffer> {
-  // Workaround: Generate a temporary key pair to get a valid PKCS8 structure
-  // Then we'll extract the structure and replace the private key bytes
-  const tempKeyPair = await crypto.generateKey(
-    {
-      name: 'ECDSA',
-      namedCurve: 'P-256',
-    },
-    true, // extractable
-    ['sign']
-  );
-
-  // Export the private key to get the PKCS8 structure
-  const tempPkcs8 = await crypto.exportKey('pkcs8', tempKeyPair.privateKey);
-  const pkcs8Array = new Uint8Array(tempPkcs8);
-
-  // Find the private key location in the PKCS8 structure
-  // Pattern: ECPrivateKey SEQUENCE (0x30 0x6b) ... version (0x02 0x01 0x01) ... privateKey (0x04 0x20 [32 bytes])
-  let privateKeyOffset = -1;
-  
-  // Look for ECPrivateKey structure: 0x30 0x6b 0x02 0x01 0x01
-  for (let i = 0; i < pkcs8Array.length - 40; i++) {
-    if (pkcs8Array[i] === 0x30 && pkcs8Array[i + 1] === 0x6b && 
-        pkcs8Array[i + 2] === 0x02 && pkcs8Array[i + 3] === 0x01 && pkcs8Array[i + 4] === 0x01) {
-      // Found ECPrivateKey structure, now find the private key (0x04 0x20)
-      for (let j = i + 5; j < i + 40; j++) {
-        if (pkcs8Array[j] === 0x04 && pkcs8Array[j + 1] === 0x20) {
-          privateKeyOffset = j + 2;
-          break;
-        }
-      }
-      if (privateKeyOffset !== -1) break;
-    }
-  }
-
-  if (privateKeyOffset === -1) {
-    throw new KeyDerivationError('Could not find private key location in PKCS8 structure');
-  }
-
-  // Replace the private key
-  pkcs8Array.set(privateKeyScalar, privateKeyOffset);
-
-  // Note: The PKCS8 structure may include a public key that won't match our private key.
-  // Web Crypto API may or may not validate this. For now, we just replace the private key
-  // and hope Web Crypto doesn't strictly validate the public key (it's optional in PKCS8).
-  // If this fails, we'll need to either:
-  // 1. Remove the public key section and recalculate ASN.1 lengths (complex)
-  // 2. Compute the correct public key from the private key (requires EC point multiplication)
-  // 3. Use a different key format or approach
-
-  return pkcs8Array.buffer;
-}
-
-/**
- * Derives public key bytes deterministically
- * Note: This is a workaround. In production, compute public key from private key.
- */
-function derivePublicKeyBytes(
+function createPKCS8PrivateKey(
   _crypto: SubtleCrypto,
-  seed: Uint8Array
-): Uint8Array {
-  // Since we can't compute the public key from private key with Web Crypto,
-  // we derive it deterministically from the secret using a different salt
-  // This ensures the same secret produces the same public key
+  privateKeyScalar: Uint8Array
+): ArrayBuffer {
+  // Construct PKCS8 structure from scratch
+  // Structure:
+  // SEQUENCE {
+  //   version INTEGER (1)
+  //   AlgorithmIdentifier SEQUENCE {
+  //     algorithm OID (EC: 1.2.840.10045.2.1)
+  //     parameters SEQUENCE {
+  //       namedCurve OID (P-256: 1.2.840.10045.3.1.7)
+  //     }
+  //   }
+  //   PrivateKey OCTET STRING {
+  //     ECPrivateKey SEQUENCE {
+  //       version INTEGER (1)
+  //       privateKey OCTET STRING (32 bytes)
+  //     }
+  //   }
+  // }
   
-  // For P-256, public key is 65 bytes: 0x04 (uncompressed) + 32 bytes x + 32 bytes y
-  // We'll derive 64 bytes and prepend 0x04
-  const publicKeyMaterial = seed.slice(0, 64);
-  if (publicKeyMaterial.length < 64) {
-    // If seed is shorter, pad it
-    const padded = new Uint8Array(64);
-    padded.set(publicKeyMaterial);
-    // Fill remainder deterministically
-    for (let i = publicKeyMaterial.length; i < 64; i++) {
-      padded[i] = seed[i % seed.length] ^ (i & 0xff);
-    }
-    const result = new Uint8Array(65);
-    result[0] = 0x04; // Uncompressed point
-    result.set(padded, 1);
-    return result;
+  // Calculate sizes based on actual PKCS8 structure analysis
+  // Real structure: 138 bytes total, 135 bytes content (with public key)
+  // Without public key (70 bytes): 68 bytes total, 65 bytes content
+  
+  const privateKeySize = 32;
+  
+  // ECPrivateKey SEQUENCE content (without public key):
+  // - version INTEGER: 3 bytes (0x02 0x01 0x01)
+  // - privateKey OCTET STRING: 34 bytes (0x04 0x20 + 32 bytes)
+  // Total content: 37 bytes
+  const ecPrivateKeyContentSize = 37;
+  // ECPrivateKey SEQUENCE: 1 (tag) + 1 (length) + 37 (content) = 39 bytes
+  const ecPrivateKeySeqSize = 39;
+  
+  // OCTET STRING containing ECPrivateKey
+  // The length field value is the size of the ECPrivateKey SEQUENCE (39 bytes)
+  const octetStringLengthValue = ecPrivateKeySeqSize;
+  
+  // AlgorithmIdentifier SEQUENCE content: EC OID (9 bytes) + P-256 OID (10 bytes) = 19 bytes
+  // Note: Parameters is just an OID, not a SEQUENCE containing an OID
+  const algorithmIdContentSize = 19;
+  // AlgorithmIdentifier SEQUENCE: 1 (tag) + 1 (length) + 19 (content) = 21 bytes
+  const algorithmIdSeqSize = 21;
+  
+  // Version INTEGER: 3 bytes
+  const versionSize = 3;
+  
+  // OCTET STRING: 1 (tag) + 1 (length) + 39 (ECPrivateKey) = 41 bytes
+  const octetStringSize = 1 + 1 + ecPrivateKeySeqSize;
+  
+  // Outer SEQUENCE content: 3 + 21 + 41 = 65 bytes
+  const outerSeqContentSize = versionSize + algorithmIdSeqSize + octetStringSize;
+  
+  // Allocate buffer with some extra space for safety
+  const lengthByteSize = outerSeqContentSize < 128 ? 1 : 2;
+  const totalSize = 1 + lengthByteSize + outerSeqContentSize;
+  const pkcs8 = new Uint8Array(totalSize);
+  let offset = 0;
+  
+  // Outer SEQUENCE
+  pkcs8[offset++] = 0x30; // SEQUENCE
+  if (outerSeqContentSize < 128) {
+    pkcs8[offset++] = outerSeqContentSize;
+  } else {
+    pkcs8[offset++] = 0x81;
+    pkcs8[offset++] = outerSeqContentSize - 1;
   }
   
-  const result = new Uint8Array(65);
-  result[0] = 0x04; // Uncompressed point
-  result.set(publicKeyMaterial, 1);
-  return result;
+  // Version INTEGER (1)
+  pkcs8[offset++] = 0x02; // INTEGER
+  pkcs8[offset++] = 0x01; // Length
+  pkcs8[offset++] = 0x00; // Value (version 0 for PKCS8)
+  
+  // AlgorithmIdentifier SEQUENCE
+  pkcs8[offset++] = 0x30; // SEQUENCE
+  pkcs8[offset++] = algorithmIdContentSize;
+  
+  // algorithm OID: EC (1.2.840.10045.2.1)
+  pkcs8[offset++] = 0x06; // OID
+  pkcs8[offset++] = 0x07; // Length
+  pkcs8[offset++] = 0x2a; // 1.2.840.10045.2.1
+  pkcs8[offset++] = 0x86;
+  pkcs8[offset++] = 0x48;
+  pkcs8[offset++] = 0xce;
+  pkcs8[offset++] = 0x3d;
+  pkcs8[offset++] = 0x02;
+  pkcs8[offset++] = 0x01;
+  
+  // parameters: namedCurve OID: P-256 (1.2.840.10045.3.1.7)
+  // Note: This is just an OID, not a SEQUENCE containing an OID
+  pkcs8[offset++] = 0x06; // OID
+  pkcs8[offset++] = 0x08; // Length
+  pkcs8[offset++] = 0x2a; // 1.2.840.10045.3.1.7
+  pkcs8[offset++] = 0x86;
+  pkcs8[offset++] = 0x48;
+  pkcs8[offset++] = 0xce;
+  pkcs8[offset++] = 0x3d;
+  pkcs8[offset++] = 0x03;
+  pkcs8[offset++] = 0x01;
+  pkcs8[offset++] = 0x07;
+  
+  // PrivateKey OCTET STRING
+  pkcs8[offset++] = 0x04; // OCTET STRING
+  pkcs8[offset++] = octetStringLengthValue;
+  
+  // ECPrivateKey SEQUENCE
+  pkcs8[offset++] = 0x30; // SEQUENCE
+  pkcs8[offset++] = ecPrivateKeyContentSize;
+  
+  // version INTEGER (1)
+  pkcs8[offset++] = 0x02; // INTEGER
+  pkcs8[offset++] = 0x01; // Length
+  pkcs8[offset++] = 0x01; // Value (version 1 for ECPrivateKey)
+  
+  // privateKey OCTET STRING
+  pkcs8[offset++] = 0x04; // OCTET STRING
+  pkcs8[offset++] = 0x20; // Length (32 bytes)
+  pkcs8.set(privateKeyScalar, offset);
+  offset += privateKeySize;
+  
+  return pkcs8.buffer;
 }
+
 
 /**
  * Signs data using ECDSA P-256
