@@ -1,4 +1,4 @@
-import type { Hash, SignedEvent, EventPayload } from '../types/events.js';
+import type { Hash, SignedEvent } from '../types/events.js';
 import type { PublicKey } from '../types/keys.js';
 
 /**

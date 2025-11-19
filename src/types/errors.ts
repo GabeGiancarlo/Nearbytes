@@ -13,6 +13,7 @@ export class DomainError extends Error {
  * Error thrown when cryptographic operations fail
  */
 export class CryptoError extends DomainError {
+  public readonly cause?: Error;
   constructor(message: string, cause?: Error) {
     super(message);
     this.cause = cause;
@@ -23,6 +24,7 @@ export class CryptoError extends DomainError {
  * Error thrown when storage operations fail
  */
 export class StorageError extends DomainError {
+  public readonly cause?: Error;
   constructor(message: string, cause?: Error) {
     super(message);
     this.cause = cause;

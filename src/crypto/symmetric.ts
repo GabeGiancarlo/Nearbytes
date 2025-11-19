@@ -1,4 +1,4 @@
-import type { SymmetricKey, EncryptedData } from '../types/keys.js';
+import type { SymmetricKey } from '../types/keys.js';
 import type { EncryptedData as EncryptedDataType } from '../types/events.js';
 import { createSymmetricKey } from '../types/keys.js';
 import { createEncryptedData } from '../types/events.js';
@@ -60,18 +60,20 @@ export async function encryptSym(
 
     // Generate random IV
     const iv = new Uint8Array(IV_LENGTH);
-    crypto.getRandomValues(iv);
+    globalThis.crypto.getRandomValues(iv);
 
     // Import key
+    const keyArray = new Uint8Array(key);
     const cryptoKey = await crypto.importKey(
       'raw',
-      key,
+      keyArray,
       { name: ALGORITHM, length: KEY_LENGTH },
       false, // not extractable
       ['encrypt']
     );
 
     // Encrypt
+    const dataArray = new Uint8Array(data);
     const encryptedBuffer = await crypto.encrypt(
       {
         name: ALGORITHM,
@@ -79,7 +81,7 @@ export async function encryptSym(
         tagLength: TAG_LENGTH * 8, // in bits
       },
       cryptoKey,
-      data
+      dataArray
     );
 
     const encrypted = new Uint8Array(encryptedBuffer);
@@ -128,9 +130,10 @@ export async function decryptSym(
     const ciphertext = encrypted.slice(IV_LENGTH);
 
     // Import key
+    const keyArray = new Uint8Array(key);
     const cryptoKey = await crypto.importKey(
       'raw',
-      key,
+      keyArray,
       { name: ALGORITHM, length: KEY_LENGTH },
       false, // not extractable
       ['decrypt']

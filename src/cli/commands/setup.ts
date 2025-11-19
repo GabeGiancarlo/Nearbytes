@@ -2,7 +2,6 @@ import type { Command } from 'commander';
 import { createCryptoOperations } from '../../crypto/index.js';
 import { FilesystemStorageBackend } from '../../storage/filesystem.js';
 import { setupChannel } from '../../domain/operations.js';
-import { createSecret } from '../../types/keys.js';
 import { green, red } from '../output/colors.js';
 import { validateSecret } from '../validation.js';
 

@@ -1,5 +1,4 @@
 import type { Hash } from '../../types/events.js';
-import { bytesToHex } from '../../utils/encoding.js';
 
 export type OutputFormat = 'json' | 'table' | 'plain';
 

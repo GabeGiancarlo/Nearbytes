@@ -8,7 +8,6 @@ import { hexToBytes, bytesToHex } from '../utils/encoding.js';
 
 const PBKDF2_ITERATIONS = 100000;
 const PBKDF2_HASH = 'SHA-256';
-const KEY_DERIVATION_SALT = new TextEncoder().encode('nearbytes-key-derivation-v1');
 const PRIVATE_KEY_SALT = new TextEncoder().encode('nearbytes-private-key-v1');
 const PUBLIC_KEY_SALT = new TextEncoder().encode('nearbytes-public-key-v1');
 const SYMMETRIC_KEY_SALT = new TextEncoder().encode('nearbytes-sym-key-derivation-v1');
@@ -38,21 +37,6 @@ export async function deriveKeys(secret: Secret): Promise<KeyPair> {
     // Derive private key seed
     const privateKeySeed = await deriveSeed(crypto, secretBytes, PRIVATE_KEY_SALT, 32);
     const privateKeyScalar = reduceModuloCurveOrder(privateKeySeed);
-
-    // Create PKCS8 private key
-    const pkcs8PrivateKey = createPKCS8PrivateKey(privateKeyScalar);
-
-    // Import private key to get CryptoKey
-    const cryptoPrivateKey = await crypto.importKey(
-      'pkcs8',
-      pkcs8PrivateKey,
-      {
-        name: 'ECDSA',
-        namedCurve: 'P-256',
-      },
-      true,
-      ['sign']
-    );
 
     // Derive public key deterministically from secret
     // Since Web Crypto doesn't support EC point multiplication, we derive
@@ -84,12 +68,22 @@ async function deriveSeed(
   salt: Uint8Array,
   lengthBytes: number
 ): Promise<Uint8Array> {
-  const seedKey = await crypto.importKey('raw', secretBytes, 'PBKDF2', false, ['deriveBits']);
+  // Create new Uint8Array to avoid branded type issues
+  const secretBytesArray = new Uint8Array(secretBytes);
+  const saltArray = new Uint8Array(salt);
+  
+  const seedKey = await crypto.importKey(
+    'raw',
+    secretBytesArray,
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
 
   const seedBits = await crypto.deriveBits(
     {
       name: 'PBKDF2',
-      salt: salt,
+      salt: saltArray,
       iterations: PBKDF2_ITERATIONS,
       hash: PBKDF2_HASH,
     },
@@ -185,7 +179,7 @@ function createPKCS8PrivateKey(privateKeyScalar: Uint8Array): ArrayBuffer {
  * Note: This is a workaround. In production, compute public key from private key.
  */
 async function derivePublicKeyBytes(
-  crypto: SubtleCrypto,
+  _crypto: SubtleCrypto,
   seed: Uint8Array
 ): Promise<Uint8Array> {
   // Since we can't compute the public key from private key with Web Crypto,
@@ -249,13 +243,14 @@ export async function signPR(data: Uint8Array, privateKey: PrivateKey): Promise<
     );
 
     // Sign the hash
+    const dataHashArray = new Uint8Array(dataHashBytes);
     const signatureBuffer = await crypto.sign(
       {
         name: 'ECDSA',
         hash: 'SHA-256',
       },
       cryptoKey,
-      dataHashBytes
+      dataHashArray
     );
 
     return createSignature(new Uint8Array(signatureBuffer));
@@ -295,9 +290,10 @@ export async function verifyPU(
       throw new VerificationError(`Invalid public key length: expected 65 bytes, got ${publicKey.length}`);
     }
 
+    const publicKeyArray = new Uint8Array(publicKey);
     const cryptoKey = await crypto.importKey(
       'raw',
-      publicKey,
+      publicKeyArray,
       {
         name: 'ECDSA',
         namedCurve: 'P-256',
@@ -307,14 +303,16 @@ export async function verifyPU(
     );
 
     // Verify signature
+    const signatureArray = new Uint8Array(signature);
+    const dataHashArray = new Uint8Array(dataHashBytes);
     return await crypto.verify(
       {
         name: 'ECDSA',
         hash: 'SHA-256',
       },
       cryptoKey,
-      signature,
-      dataHashBytes
+      signatureArray,
+      dataHashArray
     );
   } catch (error) {
     if (error instanceof VerificationError) {
@@ -341,9 +339,10 @@ export async function deriveSymKey(privateKey: PrivateKey): Promise<SymmetricKey
     }
 
     // Use HKDF to derive symmetric key from private key
+    const privateKeyArray = new Uint8Array(privateKey);
     const baseKey = await crypto.importKey(
       'raw',
-      privateKey,
+      privateKeyArray,
       'HKDF',
       false,
       ['deriveBits']

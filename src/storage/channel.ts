@@ -1,10 +1,9 @@
-import type { PublicKey, Hash, EncryptedData } from '../types/keys.js';
-import type { Hash as HashType, SignedEvent } from '../types/events.js';
+import type { PublicKey } from '../types/keys.js';
+import type { Hash as HashType, SignedEvent, EncryptedData } from '../types/events.js';
 import type { StorageBackend, ChannelPathMapper } from '../types/storage.js';
 import { createHash } from '../types/events.js';
 import { StorageError } from '../types/errors.js';
 import { serializeEvent, deserializeEvent, serializeEventPayload } from './serialization.js';
-import { bytesToHex } from '../utils/encoding.js';
 import { computeHash } from '../crypto/hash.js';
 
 /**

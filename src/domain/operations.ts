@@ -4,8 +4,8 @@ import type { CryptoOperations } from '../crypto/index.js';
 import type { StorageBackend, ChannelPathMapper } from '../types/storage.js';
 import { ChannelStorage } from '../storage/channel.js';
 import { defaultPathMapper } from '../types/storage.js';
-import { createHash, createEncryptedData } from '../types/events.js';
-import { createSecret } from '../types/keys.js';
+import { createEncryptedData } from '../types/events.js';
+import { createSymmetricKey } from '../types/keys.js';
 import { computeHash } from '../crypto/hash.js';
 import { serializeEventPayload } from '../storage/serialization.js';
 
@@ -128,7 +128,8 @@ export async function retrieveData(
   const keyEncryptionKey = await crypto.deriveSymKey(keyPair.privateKey);
 
   // 5. Decrypt the symmetric key
-  const symmetricKey = await crypto.decryptSym(signedEvent.payload.encryptedKey, keyEncryptionKey);
+  const symmetricKeyBytes = await crypto.decryptSym(signedEvent.payload.encryptedKey, keyEncryptionKey);
+  const symmetricKey = createSymmetricKey(symmetricKeyBytes);
 
   // 6. Retrieve encrypted data
   const encryptedData = await channelStorage.retrieveEncryptedData(signedEvent.payload.hash);

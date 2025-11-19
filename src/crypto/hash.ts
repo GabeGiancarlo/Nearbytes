@@ -16,7 +16,8 @@ export async function computeHash(data: Uint8Array): Promise<Hash> {
       throw new HashError('Web Crypto API not available');
     }
 
-    const hashBuffer = await crypto.digest('SHA-256', data);
+    const dataArray = new Uint8Array(data);
+    const hashBuffer = await crypto.digest('SHA-256', dataArray);
     const hashBytes = new Uint8Array(hashBuffer);
     const hashHex = bytesToHex(hashBytes);
 
