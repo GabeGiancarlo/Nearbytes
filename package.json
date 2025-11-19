@@ -1,0 +1,48 @@
+{
+  "name": "nearbytes-crypto",
+  "version": "1.0.0",
+  "description": "NearBytes cryptographic storage protocol - immutable data collections with end-to-end encryption",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "nearbytes": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"*.{json,md}\"",
+    "start": "node dist/cli/index.js",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [
+    "cryptography",
+    "storage",
+    "encryption",
+    "content-addressed",
+    "immutable",
+    "protocol"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "commander": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "@vitest/coverage-v8": "^1.0.0",
+    "eslint": "^8.54.0",
+    "prettier": "^3.1.0",
+    "typescript": "^5.3.2",
+    "vitest": "^1.0.0"
+  }
+}
+
