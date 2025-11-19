@@ -12,4 +12,5 @@ coverage/
 .env.local
 *.test.ts.snap
 .nyc_output/
+test-data/
 
