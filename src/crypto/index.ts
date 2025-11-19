@@ -60,17 +60,6 @@ function getCryptoSubtle(): SubtleCrypto {
     return globalThis.crypto.subtle;
   }
 
-  // Fallback to Node.js crypto.webcrypto (Node.js 15+)
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const nodeCrypto = require('crypto');
-    if (nodeCrypto.webcrypto?.subtle) {
-      return nodeCrypto.webcrypto.subtle;
-    }
-  } catch {
-    // require might not work in all environments
-  }
-
   throw new Error('Web Crypto API not available');
 }
 
@@ -80,10 +69,9 @@ function getCryptoSubtle(): SubtleCrypto {
  * @throws Error if Web Crypto API is not available
  */
 export function createCryptoOperations(): CryptoOperations {
-  // Verify Web Crypto API is available
-  try {
-    getCryptoSubtle();
-  } catch (error) {
+  // Verify Web Crypto API is available (should be set up by test setup file in test env)
+  const crypto = getCryptoSubtle();
+  if (!crypto) {
     throw new Error('Web Crypto API not available');
   }
 
