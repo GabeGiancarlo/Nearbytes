@@ -45,13 +45,14 @@ export interface StorageBackend {
 export type ChannelPathMapper = (publicKey: PublicKey) => string;
 
 /**
- * Default path mapper: converts public key to hex string
+ * Default path mapper: converts public key to hex string in channels/ subdirectory
  * @param publicKey - Channel public key
- * @returns Hex string representation of the public key
+ * @returns Path to channel directory: channels/[hex-string]
  */
 export function defaultPathMapper(publicKey: PublicKey): string {
-  return Array.from(publicKey)
+  const hexKey = Array.from(publicKey)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
+  return `channels/${hexKey}`;
 }
 

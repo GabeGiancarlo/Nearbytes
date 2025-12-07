@@ -18,6 +18,7 @@ export class ChannelStorage {
 
   /**
    * Gets the channel directory path for a public key
+   * Returns path like: channels/[public-key-hex]
    */
   private getChannelPath(publicKey: PublicKey): string {
     return this.pathMapper(publicKey);

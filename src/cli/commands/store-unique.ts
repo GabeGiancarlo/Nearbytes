@@ -6,6 +6,7 @@ import { ChannelStorage } from '../../storage/channel.js';
 import { storeDataDeduplicated } from '../../domain/operations.js';
 import { green, red, yellow } from '../output/colors.js';
 import { validateSecret, validateFilePath } from '../validation.js';
+import { defaultPathMapper } from '../../types/storage.js';
 
 export interface StoreUniqueOptions {
   file: string;
@@ -29,11 +30,7 @@ export async function handleStoreUnique(options: StoreUniqueOptions): Promise<vo
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(options.dataDir || './data');
-    const channelStorage = new ChannelStorage(storage, (pubKey) =>
-      Array.from(pubKey)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-    );
+    const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Store data with deduplication
     const result = await storeDataDeduplicated(data, secret, crypto, channelStorage);

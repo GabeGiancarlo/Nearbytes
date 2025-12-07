@@ -97,11 +97,12 @@ Command-line interface:
 
 ```
 data/
-├── [channel-public-key-hex]/
-│   ├── [event-hash].bin    # Signed events
-│   └── ...
+├── channels/
+│   └── [channel-public-key-hex]/
+│       ├── [event-hash].bin    # Signed events
+│       └── ...
 └── blocks/
-    └── [data-hash].bin     # Encrypted data blocks
+    └── [data-hash].bin         # Encrypted data blocks
 ```
 
 ## Design Decisions

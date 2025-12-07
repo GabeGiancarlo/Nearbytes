@@ -5,6 +5,7 @@ import { FilesystemStorageBackend } from '../../storage/filesystem.js';
 import { ChannelStorage } from '../../storage/channel.js';
 import { setupChannel, storeData, storeDataDeduplicated, retrieveData } from '../../domain/operations.js';
 import { createSecret } from '../../types/keys.js';
+import { defaultPathMapper } from '../../types/storage.js';
 
 const TEST_DATA_DIR = './test-data';
 
@@ -22,11 +23,7 @@ describe('NearBytes Workflow', () => {
     const secret = createSecret('test:channel:password');
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(TEST_DATA_DIR);
-    const channelStorage = new ChannelStorage(storage, (pubKey) =>
-      Array.from(pubKey)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-    );
+    const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // 1. Setup channel
     const { publicKey } = await setupChannel(secret, crypto, storage);
@@ -47,11 +44,7 @@ describe('NearBytes Workflow', () => {
     const secret = createSecret('test:channel:password');
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(TEST_DATA_DIR);
-    const channelStorage = new ChannelStorage(storage, (pubKey) =>
-      Array.from(pubKey)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-    );
+    const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     await setupChannel(secret, crypto, storage);
 
@@ -78,11 +71,7 @@ describe('NearBytes Workflow', () => {
     const secret = createSecret('test:channel:password');
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(TEST_DATA_DIR);
-    const channelStorage = new ChannelStorage(storage, (pubKey) =>
-      Array.from(pubKey)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-    );
+    const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     await setupChannel(secret, crypto, storage);
 
@@ -115,25 +104,27 @@ describe('NearBytes Workflow', () => {
     expect(retrieved2).toEqual(testData);
   });
 
-  it('should verify blocks directory structure', async () => {
+  it('should verify directory structure (channels/ and blocks/)', async () => {
     const secret = createSecret('test:channel:password');
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(TEST_DATA_DIR);
-    const channelStorage = new ChannelStorage(storage, (pubKey) =>
-      Array.from(pubKey)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-    );
+    const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
-    await setupChannel(secret, crypto, storage);
-
+    const { publicKey } = await setupChannel(secret, crypto, storage);
     const testData = new TextEncoder().encode('Test data');
-    const { dataHash } = await storeData(testData, secret, crypto, channelStorage);
+    const { dataHash, eventHash } = await storeData(testData, secret, crypto, channelStorage);
 
-    // Verify the data is stored in blocks/ directory, not data/ directory
+    // Verify the data is stored in blocks/ directory
     const blocksPath = `blocks/${dataHash}.bin`;
-    const dataExists = await storage.exists(blocksPath);
-    expect(dataExists).toBe(true);
+    const blocksExists = await storage.exists(blocksPath);
+    expect(blocksExists).toBe(true);
+
+    // Verify channel events are stored in channels/ subdirectory
+    const channelPath = defaultPathMapper(publicKey);
+    expect(channelPath).toMatch(/^channels\/[0-9a-f]+$/);
+    const eventPath = `${channelPath}/${eventHash}.bin`;
+    const eventExists = await storage.exists(eventPath);
+    expect(eventExists).toBe(true);
 
     // Verify old data/ path doesn't exist
     const oldDataPath = `data/${dataHash}.bin`;
