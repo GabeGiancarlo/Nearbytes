@@ -35,7 +35,7 @@ export class ChannelStorage {
    * Gets the path for an encrypted data block
    */
   private getDataPath(dataHash: HashType): string {
-    return `data/${dataHash}.bin`;
+    return `blocks/${dataHash}.bin`;
   }
 
   /**
@@ -123,10 +123,21 @@ export class ChannelStorage {
    * Stores an encrypted data block
    * @param dataHash - Hash of the encrypted data
    * @param encryptedData - Encrypted data to store
+   * @param skipIfExists - If true, skip storing if the data already exists
    */
-  async storeEncryptedData(dataHash: HashType, encryptedData: EncryptedData): Promise<void> {
+  async storeEncryptedData(
+    dataHash: HashType,
+    encryptedData: EncryptedData,
+    skipIfExists: boolean = false
+  ): Promise<void> {
     try {
       const dataPath = this.getDataPath(dataHash);
+      
+      // Check if data already exists
+      if (skipIfExists && (await this.storage.exists(dataPath))) {
+        return; // Skip storing if it already exists
+      }
+      
       await this.storage.writeFile(dataPath, encryptedData);
     } catch (error) {
       throw new StorageError(
@@ -155,6 +166,16 @@ export class ChannelStorage {
         error instanceof Error ? error : undefined
       );
     }
+  }
+
+  /**
+   * Checks if an encrypted data block exists
+   * @param dataHash - Hash of the encrypted data
+   * @returns True if the data block exists
+   */
+  async hasEncryptedData(dataHash: HashType): Promise<boolean> {
+    const dataPath = this.getDataPath(dataHash);
+    return await this.storage.exists(dataPath);
   }
 }
 

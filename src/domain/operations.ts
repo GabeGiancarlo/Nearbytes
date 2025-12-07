@@ -140,3 +140,67 @@ export async function retrieveData(
   return plaintext;
 }
 
+/**
+ * Stores data in a channel with deduplication
+ * If the encrypted data block already exists (same hash), it will be reused
+ * @param data - Plaintext data to store
+ * @param secret - Channel secret
+ * @param crypto - Cryptographic operations
+ * @param channelStorage - Channel storage instance
+ * @returns Event hash and data hash, and whether data was deduplicated
+ */
+export async function storeDataDeduplicated(
+  data: Uint8Array,
+  secret: Secret,
+  crypto: CryptoOperations,
+  channelStorage: ChannelStorage
+): Promise<{ eventHash: Hash; dataHash: Hash; wasDeduplicated: boolean }> {
+  // 1. Derive keys from secret
+  const keyPair = await crypto.deriveKeys(secret);
+
+  // 2. Generate symmetric key for data encryption
+  const symmetricKey = await crypto.generateSymmetricKey();
+
+  // 3. Encrypt data
+  const encryptedData = await crypto.encryptSym(data, symmetricKey);
+
+  // 4. Compute hash of encrypted data
+  const dataHash = await computeHash(encryptedData);
+
+  // 5. Check if data already exists
+  const dataExists = await channelStorage.hasEncryptedData(dataHash);
+
+  // 6. Store encrypted data (skip if already exists)
+  await channelStorage.storeEncryptedData(dataHash, encryptedData, true);
+
+  // 7. Derive symmetric key for encrypting the data encryption key
+  const keyEncryptionKey = await crypto.deriveSymKey(keyPair.privateKey);
+
+  // 8. Encrypt the symmetric key
+  const encryptedKey = await crypto.encryptSym(symmetricKey, keyEncryptionKey);
+
+  // 9. Create event payload
+  const payload: EventPayload = {
+    hash: dataHash,
+    encryptedKey: createEncryptedData(encryptedKey),
+  };
+
+  // 10. Serialize payload and compute event hash
+  const payloadBytes = serializeEventPayload(payload);
+  const eventHash = await computeHash(payloadBytes);
+
+  // 11. Sign the payload
+  const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);
+
+  // 12. Create signed event
+  const signedEvent: SignedEvent = {
+    payload,
+    signature,
+  };
+
+  // 13. Store signed event
+  await channelStorage.storeEvent(keyPair.publicKey, signedEvent);
+
+  return { eventHash, dataHash, wasDeduplicated: dataExists };
+}
+

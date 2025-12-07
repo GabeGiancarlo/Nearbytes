@@ -100,7 +100,7 @@ data/
 ├── [channel-public-key-hex]/
 │   ├── [event-hash].bin    # Signed events
 │   └── ...
-└── data/
+└── blocks/
     └── [data-hash].bin     # Encrypted data blocks
 ```
 
