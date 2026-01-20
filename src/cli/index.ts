@@ -3,8 +3,14 @@
 import { Command } from 'commander';
 import { registerSetupCommand } from './commands/setup.js';
 import { registerStoreCommand } from './commands/store.js';
+import { registerStoreUniqueCommand } from './commands/store-unique.js';
 import { registerRetrieveCommand } from './commands/retrieve.js';
 import { registerListCommand } from './commands/list.js';
+import { registerVolumeOpenCommand } from './commands/volume-open.js';
+import { registerFileAddCommand } from './commands/file-add.js';
+import { registerFileRemoveCommand } from './commands/file-remove.js';
+import { registerFileListCommand } from './commands/file-list.js';
+import { registerFileGetCommand } from './commands/file-get.js';
 
 const program = new Command();
 
@@ -16,8 +22,16 @@ program
 // Register all commands
 registerSetupCommand(program);
 registerStoreCommand(program);
+registerStoreUniqueCommand(program);
 registerRetrieveCommand(program);
 registerListCommand(program);
+
+// Register new volume and file commands
+registerVolumeOpenCommand(program);
+registerFileAddCommand(program);
+registerFileRemoveCommand(program);
+registerFileListCommand(program);
+registerFileGetCommand(program);
 
 // Parse arguments and execute
 program.parse();

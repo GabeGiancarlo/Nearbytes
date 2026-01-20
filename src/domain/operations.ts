@@ -1,5 +1,6 @@
 import type { Secret, PublicKey } from '../types/keys.js';
 import type { Hash, SignedEvent, EventPayload } from '../types/events.js';
+import { EventType } from '../types/events.js';
 import type { CryptoOperations } from '../crypto/index.js';
 import type { StorageBackend, ChannelPathMapper } from '../types/storage.js';
 import { ChannelStorage } from '../storage/channel.js';
@@ -39,6 +40,7 @@ export async function setupChannel(
 /**
  * Stores data in a channel
  * @param data - Plaintext data to store
+ * @param fileName - Name of the file
  * @param secret - Channel secret
  * @param crypto - Cryptographic operations
  * @param channelStorage - Channel storage instance
@@ -46,6 +48,7 @@ export async function setupChannel(
  */
 export async function storeData(
   data: Uint8Array,
+  fileName: string,
   secret: Secret,
   crypto: CryptoOperations,
   channelStorage: ChannelStorage
@@ -73,6 +76,8 @@ export async function storeData(
 
   // 8. Create event payload
   const payload: EventPayload = {
+    type: EventType.CREATE_FILE,
+    fileName,
     hash: dataHash,
     encryptedKey: createEncryptedData(encryptedKey),
   };
@@ -140,3 +145,118 @@ export async function retrieveData(
   return plaintext;
 }
 
+/**
+ * Stores data in a channel with deduplication
+ * If the encrypted data block already exists (same hash), it will be reused
+ * @param data - Plaintext data to store
+ * @param fileName - Name of the file
+ * @param secret - Channel secret
+ * @param crypto - Cryptographic operations
+ * @param channelStorage - Channel storage instance
+ * @returns Event hash and data hash, and whether data was deduplicated
+ */
+export async function storeDataDeduplicated(
+  data: Uint8Array,
+  fileName: string,
+  secret: Secret,
+  crypto: CryptoOperations,
+  channelStorage: ChannelStorage
+): Promise<{ eventHash: Hash; dataHash: Hash; wasDeduplicated: boolean }> {
+  // 1. Derive keys from secret
+  const keyPair = await crypto.deriveKeys(secret);
+
+  // 2. Generate symmetric key for data encryption
+  const symmetricKey = await crypto.generateSymmetricKey();
+
+  // 3. Encrypt data
+  const encryptedData = await crypto.encryptSym(data, symmetricKey);
+
+  // 4. Compute hash of encrypted data
+  const dataHash = await computeHash(encryptedData);
+
+  // 5. Check if data already exists
+  const dataExists = await channelStorage.hasEncryptedData(dataHash);
+
+  // 6. Store encrypted data (skip if already exists)
+  await channelStorage.storeEncryptedData(dataHash, encryptedData, true);
+
+  // 7. Derive symmetric key for encrypting the data encryption key
+  const keyEncryptionKey = await crypto.deriveSymKey(keyPair.privateKey);
+
+  // 8. Encrypt the symmetric key
+  const encryptedKey = await crypto.encryptSym(symmetricKey, keyEncryptionKey);
+
+  // 9. Create event payload
+  const payload: EventPayload = {
+    type: EventType.CREATE_FILE,
+    fileName,
+    hash: dataHash,
+    encryptedKey: createEncryptedData(encryptedKey),
+  };
+
+  // 10. Serialize payload and compute event hash
+  const payloadBytes = serializeEventPayload(payload);
+  const eventHash = await computeHash(payloadBytes);
+
+  // 11. Sign the payload
+  const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);
+
+  // 12. Create signed event
+  const signedEvent: SignedEvent = {
+    payload,
+    signature,
+  };
+
+  // 13. Store signed event
+  await channelStorage.storeEvent(keyPair.publicKey, signedEvent);
+
+  return { eventHash, dataHash, wasDeduplicated: dataExists };
+}
+
+/**
+ * Deletes a file from a channel
+ * @param fileName - Name of the file to delete
+ * @param secret - Channel secret
+ * @param crypto - Cryptographic operations
+ * @param channelStorage - Channel storage instance
+ * @returns Event hash
+ */
+export async function deleteFile(
+  fileName: string,
+  secret: Secret,
+  crypto: CryptoOperations,
+  channelStorage: ChannelStorage
+): Promise<{ eventHash: Hash }> {
+  // 1. Derive keys from secret
+  const keyPair = await crypto.deriveKeys(secret);
+
+  // 2. Create empty hash and encrypted key for DELETE_FILE events
+  const emptyHash = await computeHash(new Uint8Array(0));
+  const emptyEncryptedKey = createEncryptedData(new Uint8Array(0));
+
+  // 3. Create event payload
+  const payload: EventPayload = {
+    type: EventType.DELETE_FILE,
+    fileName,
+    hash: emptyHash,
+    encryptedKey: emptyEncryptedKey,
+  };
+
+  // 4. Serialize payload and compute event hash
+  const payloadBytes = serializeEventPayload(payload);
+  const eventHash = await computeHash(payloadBytes);
+
+  // 5. Sign the payload
+  const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);
+
+  // 6. Create signed event
+  const signedEvent: SignedEvent = {
+    payload,
+    signature,
+  };
+
+  // 7. Store signed event
+  await channelStorage.storeEvent(keyPair.publicKey, signedEvent);
+
+  return { eventHash };
+}

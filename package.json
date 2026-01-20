@@ -16,6 +16,7 @@
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"*.{json,md}\"",
     "start": "node dist/cli/index.js",
+    "server": "node dist/server/index.js",
     "type-check": "tsc --noEmit"
   },
   "keywords": [
@@ -32,9 +33,11 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "commander": "^11.1.0"
+    "commander": "^11.1.0",
+    "express": "^4.22.1"
   },
   "devDependencies": {
+    "@types/express": "^4.17.25",
     "@types/node": "^20.10.0",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",
@@ -45,4 +48,3 @@
     "vitest": "^1.0.0"
   }
 }
-
