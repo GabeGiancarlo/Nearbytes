@@ -4,21 +4,21 @@ import { basename } from 'path';
 import { createCryptoOperations } from '../../crypto/index.js';
 import { FilesystemStorageBackend } from '../../storage/filesystem.js';
 import { ChannelStorage } from '../../storage/channel.js';
-import { storeData } from '../../domain/operations.js';
-import { green, red } from '../output/colors.js';
+import { storeDataDeduplicated } from '../../domain/operations.js';
+import { green, red, yellow } from '../output/colors.js';
 import { validateSecret, validateFilePath } from '../validation.js';
 import { defaultPathMapper } from '../../types/storage.js';
 
-export interface StoreOptions {
+export interface StoreUniqueOptions {
   file: string;
   secret: string;
   dataDir?: string;
 }
 
 /**
- * Store command handler
+ * Store-unique command handler (with deduplication)
  */
-export async function handleStore(options: StoreOptions): Promise<void> {
+export async function handleStoreUnique(options: StoreUniqueOptions): Promise<void> {
   try {
     // Validate inputs
     const secret = validateSecret(options.secret);
@@ -36,13 +36,16 @@ export async function handleStore(options: StoreOptions): Promise<void> {
     const storage = new FilesystemStorageBackend(options.dataDir || './data');
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
-    // Store data
-    const result = await storeData(data, fileName, secret, crypto, channelStorage);
+    // Store data with deduplication
+    const result = await storeDataDeduplicated(data, fileName, secret, crypto, channelStorage);
 
     // Output result
     console.log(green('✓ Data stored successfully'));
     console.log(`Event Hash: ${result.eventHash}`);
     console.log(`Data Hash: ${result.dataHash}`);
+    if (result.wasDeduplicated) {
+      console.log(yellow('ℹ Encrypted data block was reused (deduplicated)'));
+    }
   } catch (error) {
     console.error(red(`✗ Error: ${error instanceof Error ? error.message : 'unknown error'}`));
     process.exit(1);
@@ -50,15 +53,15 @@ export async function handleStore(options: StoreOptions): Promise<void> {
 }
 
 /**
- * Registers the store command
+ * Registers the store-unique command
  */
-export function registerStoreCommand(program: Command): void {
+export function registerStoreUniqueCommand(program: Command): void {
   program
-    .command('store')
-    .description('Store data in a channel')
+    .command('store-unique')
+    .description('Store data in a channel with deduplication (reuses existing encrypted data blocks)')
     .requiredOption('-f, --file <path>', 'Path to data file')
     .requiredOption('-s, --secret <secret>', 'Channel secret')
     .option('-d, --data-dir <path>', 'Data directory path', './data')
-    .action(handleStore);
+    .action(handleStoreUnique);
 }
 

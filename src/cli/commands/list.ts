@@ -5,6 +5,7 @@ import { ChannelStorage } from '../../storage/channel.js';
 import { setupChannel } from '../../domain/operations.js';
 import { red } from '../output/colors.js';
 import { validateSecret } from '../validation.js';
+import { defaultPathMapper } from '../../types/storage.js';
 import {
   formatEventsAsJson,
   formatEventsAsTable,
@@ -30,11 +31,7 @@ export async function handleList(options: ListOptions): Promise<void> {
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(options.dataDir || './data');
-    const channelStorage = new ChannelStorage(storage, (pubKey) =>
-      Array.from(pubKey)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-    );
+    const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Get channel public key
     const { publicKey } = await setupChannel(secret, crypto, storage);

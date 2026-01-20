@@ -13,4 +13,5 @@ coverage/
 *.test.ts.snap
 .nyc_output/
 test-data/
+data/
 
