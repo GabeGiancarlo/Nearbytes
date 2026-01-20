@@ -31,7 +31,7 @@ describe('NearBytes Workflow', () => {
 
     // 2. Store data
     const testData = new TextEncoder().encode('Hello, NearBytes!');
-    const { eventHash, dataHash } = await storeData(testData, secret, crypto, channelStorage);
+    const { eventHash, dataHash } = await storeData(testData, 'test.txt', secret, crypto, channelStorage);
     expect(eventHash).toMatch(/^[0-9a-f]{64}$/);
     expect(dataHash).toMatch(/^[0-9a-f]{64}$/);
 
@@ -53,9 +53,9 @@ describe('NearBytes Workflow', () => {
     const data2 = new TextEncoder().encode('Second message');
     const data3 = new TextEncoder().encode('Third message');
 
-    const result1 = await storeData(data1, secret, crypto, channelStorage);
-    const result2 = await storeData(data2, secret, crypto, channelStorage);
-    const result3 = await storeData(data3, secret, crypto, channelStorage);
+    const result1 = await storeData(data1, 'file1.txt', secret, crypto, channelStorage);
+    const result2 = await storeData(data2, 'file2.txt', secret, crypto, channelStorage);
+    const result3 = await storeData(data3, 'file3.txt', secret, crypto, channelStorage);
 
     // Retrieve all
     const retrieved1 = await retrieveData(result1.eventHash, secret, crypto, channelStorage);
@@ -78,7 +78,7 @@ describe('NearBytes Workflow', () => {
     const testData = new TextEncoder().encode('Test data for deduplication');
 
     // First store - should create new encrypted data block
-    const result1 = await storeDataDeduplicated(testData, secret, crypto, channelStorage);
+    const result1 = await storeDataDeduplicated(testData, 'test.txt', secret, crypto, channelStorage);
     expect(result1.wasDeduplicated).toBe(false);
 
     // Store the same data again with the same encryption (same symmetric key)
@@ -94,7 +94,7 @@ describe('NearBytes Workflow', () => {
     // Second store with same data - since encryption is random, this will create
     // different encrypted data, but the mechanism is in place to deduplicate
     // if the same encrypted data hash is encountered
-    const result2 = await storeDataDeduplicated(testData, secret, crypto, channelStorage);
+    const result2 = await storeDataDeduplicated(testData, 'test.txt', secret, crypto, channelStorage);
     
     // Verify both events can be retrieved
     const retrieved1 = await retrieveData(result1.eventHash, secret, crypto, channelStorage);
@@ -112,7 +112,7 @@ describe('NearBytes Workflow', () => {
 
     const { publicKey } = await setupChannel(secret, crypto, storage);
     const testData = new TextEncoder().encode('Test data');
-    const { dataHash, eventHash } = await storeData(testData, secret, crypto, channelStorage);
+    const { dataHash, eventHash } = await storeData(testData, 'test.txt', secret, crypto, channelStorage);
 
     // Verify the data is stored in blocks/ directory
     const blocksPath = `blocks/${dataHash}.bin`;

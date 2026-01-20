@@ -78,10 +78,7 @@ export class ChannelStorage {
     try {
       const eventPath = this.getEventPath(publicKey, eventHash);
       const eventBytes = await this.storage.readFile(eventPath);
-      const serialized = JSON.parse(new TextDecoder().decode(eventBytes)) as {
-        payload: { hash: string; encryptedKey: string };
-        signature: string;
-      };
+      const serialized = JSON.parse(new TextDecoder().decode(eventBytes)) as import('../types/events.js').SerializedEvent;
 
       return deserializeEvent(serialized);
     } catch (error) {

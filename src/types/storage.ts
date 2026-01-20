@@ -37,6 +37,13 @@ export interface StorageBackend {
    * @returns True if path exists
    */
   exists(path: string): Promise<boolean>;
+
+  /**
+   * Delete a file at the given path
+   * @param path - File path to delete
+   * @throws StorageError if file doesn't exist or deletion fails
+   */
+  deleteFile(path: string): Promise<void>;
 }
 
 /**

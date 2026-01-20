@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NearBytes - Encrypted File Storage</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      overflow: hidden;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px;
+      text-align: center;
+    }
+
+    .header h1 {
+      font-size: 2.5em;
+      margin-bottom: 10px;
+    }
+
+    .header p {
+      opacity: 0.9;
+      font-size: 1.1em;
+    }
+
+    .content {
+      padding: 30px;
+    }
+
+    .section {
+      margin-bottom: 30px;
+      padding: 20px;
+      background: #f8f9fa;
+      border-radius: 8px;
+      border: 1px solid #e9ecef;
+    }
+
+    .section h2 {
+      color: #667eea;
+      margin-bottom: 15px;
+      font-size: 1.5em;
+    }
+
+    .form-group {
+      margin-bottom: 15px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: 600;
+      color: #333;
+    }
+
+    input[type="text"],
+    input[type="password"],
+    input[type="file"] {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #e9ecef;
+      border-radius: 6px;
+      font-size: 16px;
+      transition: border-color 0.3s;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    button {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+
+    button:active {
+      transform: translateY(0);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .file-list {
+      margin-top: 20px;
+    }
+
+    .file-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px;
+      background: white;
+      border-radius: 6px;
+      margin-bottom: 10px;
+      border: 1px solid #e9ecef;
+    }
+
+    .file-item:hover {
+      background: #f8f9fa;
+    }
+
+    .file-name {
+      font-weight: 600;
+      color: #333;
+    }
+
+    .file-actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    .btn-small {
+      padding: 6px 12px;
+      font-size: 14px;
+    }
+
+    .btn-danger {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    }
+
+    .message {
+      padding: 12px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+    }
+
+    .message.success {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+
+    .message.error {
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+
+    .message.info {
+      background: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+
+    .volume-info {
+      background: white;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      border: 1px solid #e9ecef;
+    }
+
+    .volume-info strong {
+      color: #667eea;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 20px;
+      color: #667eea;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🔐 NearBytes</h1>
+      <p>Encrypted, Content-Addressed File Storage</p>
+    </div>
+
+    <div class="content">
+      <!-- Volume Section -->
+      <div class="section">
+        <h2>Volume</h2>
+        <div class="form-group">
+          <label for="secret">Volume Secret</label>
+          <input type="password" id="secret" placeholder="e.g., mychannel:password" />
+        </div>
+        <button onclick="openVolume()">Open Volume</button>
+        <div id="volumeMessage"></div>
+        <div id="volumeInfo" class="volume-info hidden"></div>
+      </div>
+
+      <!-- File List Section -->
+      <div class="section hidden" id="fileListSection">
+        <h2>Files</h2>
+        <div id="fileList" class="file-list"></div>
+      </div>
+
+      <!-- Add File Section -->
+      <div class="section hidden" id="addFileSection">
+        <h2>Add File</h2>
+        <div class="form-group">
+          <label for="fileName">File Name</label>
+          <input type="text" id="fileName" placeholder="e.g., photo.jpg" />
+        </div>
+        <div class="form-group">
+          <label for="fileInput">Select File</label>
+          <input type="file" id="fileInput" />
+        </div>
+        <button onclick="addFile()">Add File</button>
+        <div id="addFileMessage"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentSecret = null;
+
+    async function apiCall(endpoint, data) {
+      const response = await fetch(`/api${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Request failed');
+      }
+
+      return await response.json();
+    }
+
+    function showMessage(elementId, message, type = 'info') {
+      const element = document.getElementById(elementId);
+      element.className = `message ${type}`;
+      element.textContent = message;
+      element.classList.remove('hidden');
+      
+      if (type === 'success' || type === 'info') {
+        setTimeout(() => {
+          element.classList.add('hidden');
+        }, 3000);
+      }
+    }
+
+    async function openVolume() {
+      const secretInput = document.getElementById('secret');
+      const secret = secretInput.value.trim();
+
+      if (!secret) {
+        showMessage('volumeMessage', 'Please enter a volume secret', 'error');
+        return;
+      }
+
+      try {
+        showMessage('volumeMessage', 'Opening volume...', 'info');
+        const result = await apiCall('/volume/open', { secret });
+
+        currentSecret = secret;
+        document.getElementById('volumeInfo').innerHTML = `
+          <strong>Public Key:</strong> ${result.publicKeyHex.substring(0, 32)}...<br>
+          <strong>Files:</strong> ${result.fileCount}
+        `;
+        document.getElementById('volumeInfo').classList.remove('hidden');
+        document.getElementById('fileListSection').classList.remove('hidden');
+        document.getElementById('addFileSection').classList.remove('hidden');
+
+        showMessage('volumeMessage', 'Volume opened successfully!', 'success');
+        await loadFiles();
+      } catch (error) {
+        showMessage('volumeMessage', `Error: ${error.message}`, 'error');
+      }
+    }
+
+    async function loadFiles() {
+      if (!currentSecret) return;
+
+      try {
+        const files = await apiCall('/files/list', { secret: currentSecret });
+        const fileList = document.getElementById('fileList');
+        
+        if (files.length === 0) {
+          fileList.innerHTML = '<p style="text-align: center; color: #666;">No files in volume</p>';
+          return;
+        }
+
+        fileList.innerHTML = files.map(file => `
+          <div class="file-item">
+            <div class="file-name">${escapeHtml(file.name)}</div>
+            <div class="file-actions">
+              <button class="btn-small" onclick="downloadFile('${escapeHtml(file.name)}')">Download</button>
+              <button class="btn-small btn-danger" onclick="removeFile('${escapeHtml(file.name)}')">Remove</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (error) {
+        console.error('Error loading files:', error);
+      }
+    }
+
+    async function addFile() {
+      if (!currentSecret) {
+        showMessage('addFileMessage', 'Please open a volume first', 'error');
+        return;
+      }
+
+      const fileNameInput = document.getElementById('fileName');
+      const fileInput = document.getElementById('fileInput');
+      const fileName = fileNameInput.value.trim();
+      const file = fileInput.files[0];
+
+      if (!fileName) {
+        showMessage('addFileMessage', 'Please enter a file name', 'error');
+        return;
+      }
+
+      if (!file) {
+        showMessage('addFileMessage', 'Please select a file', 'error');
+        return;
+      }
+
+      try {
+        showMessage('addFileMessage', 'Adding file...', 'info');
+        
+        // Read file as base64
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          try {
+            const base64 = e.target.result.split(',')[1]; // Remove data:...;base64, prefix
+            await apiCall('/files/add', {
+              secret: currentSecret,
+              fileName: fileName,
+              data: base64,
+            });
+
+            showMessage('addFileMessage', 'File added successfully!', 'success');
+            fileNameInput.value = '';
+            fileInput.value = '';
+            await loadFiles();
+          } catch (error) {
+            showMessage('addFileMessage', `Error: ${error.message}`, 'error');
+          }
+        };
+        reader.readAsDataURL(file);
+      } catch (error) {
+        showMessage('addFileMessage', `Error: ${error.message}`, 'error');
+      }
+    }
+
+    async function downloadFile(fileName) {
+      if (!currentSecret) return;
+
+      try {
+        const result = await apiCall('/files/get', {
+          secret: currentSecret,
+          fileName: fileName,
+        });
+
+        // Convert base64 to blob
+        const binaryString = atob(result.data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes]);
+
+        // Download
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        alert(`Error downloading file: ${error.message}`);
+      }
+    }
+
+    async function removeFile(fileName) {
+      if (!currentSecret) return;
+      if (!confirm(`Are you sure you want to remove "${fileName}"?`)) return;
+
+      try {
+        await apiCall('/files/remove', {
+          secret: currentSecret,
+          fileName: fileName,
+        });
+        await loadFiles();
+      } catch (error) {
+        alert(`Error removing file: ${error.message}`);
+      }
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Allow Enter key to open volume
+    document.getElementById('secret').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        openVolume();
+      }
+    });
+  </script>
+</body>
+</html>

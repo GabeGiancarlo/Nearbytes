@@ -100,5 +100,26 @@ export class FilesystemStorageBackend implements StorageBackend {
       return false;
     }
   }
+
+  /**
+   * Delete a file at the given path
+   * Safe delete: only deletes files, not directories
+   * Idempotent: does not throw if file doesn't exist
+   */
+  async deleteFile(path: string): Promise<void> {
+    try {
+      const fullPath = join(this.basePath, path);
+      await fs.unlink(fullPath);
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+        // File doesn't exist - idempotent operation, no error
+        return;
+      }
+      throw new StorageError(
+        `Failed to delete file ${path}: ${error instanceof Error ? error.message : 'unknown error'}`,
+        error instanceof Error ? error : undefined
+      );
+    }
+  }
 }
 

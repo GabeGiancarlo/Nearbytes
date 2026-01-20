@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { readFile } from 'fs/promises';
+import { basename } from 'path';
 import { createCryptoOperations } from '../../crypto/index.js';
 import { FilesystemStorageBackend } from '../../storage/filesystem.js';
 import { ChannelStorage } from '../../storage/channel.js';
@@ -27,13 +28,16 @@ export async function handleStoreUnique(options: StoreUniqueOptions): Promise<vo
     const fileBuffer = await readFile(options.file);
     const data = new Uint8Array(fileBuffer);
 
+    // Determine file name (use basename of path)
+    const fileName = basename(options.file);
+
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
     const storage = new FilesystemStorageBackend(options.dataDir || './data');
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Store data with deduplication
-    const result = await storeDataDeduplicated(data, secret, crypto, channelStorage);
+    const result = await storeDataDeduplicated(data, fileName, secret, crypto, channelStorage);
 
     // Output result
     console.log(green('✓ Data stored successfully'));
