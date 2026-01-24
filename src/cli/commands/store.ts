@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { readFile } from 'fs/promises';
+import { basename } from 'path';
 import { createCryptoOperations } from '../../crypto/index.js';
 import { FilesystemStorageBackend } from '../../storage/filesystem.js';
 import { ChannelStorage } from '../../storage/channel.js';
@@ -36,7 +37,8 @@ export async function handleStore(options: StoreOptions): Promise<void> {
     );
 
     // Store data
-    const result = await storeData(data, secret, crypto, channelStorage);
+    const fileName = basename(options.file);
+    const result = await storeData(data, fileName, secret, crypto, channelStorage);
 
     // Output result
     console.log(green('✓ Data stored successfully'));

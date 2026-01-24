@@ -3,7 +3,6 @@
 import { Command } from 'commander';
 import { registerSetupCommand } from './commands/setup.js';
 import { registerStoreCommand } from './commands/store.js';
-import { registerStoreUniqueCommand } from './commands/store-unique.js';
 import { registerRetrieveCommand } from './commands/retrieve.js';
 import { registerListCommand } from './commands/list.js';
 import { registerVolumeOpenCommand } from './commands/volume-open.js';
@@ -22,7 +21,6 @@ program
 // Register all commands
 registerSetupCommand(program);
 registerStoreCommand(program);
-registerStoreUniqueCommand(program);
 registerRetrieveCommand(program);
 registerListCommand(program);
 

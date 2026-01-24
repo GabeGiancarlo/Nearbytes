@@ -55,6 +55,32 @@ nearbytes retrieve --event abc123... --secret "mychannel:mypassword" --output ./
 
 Retrieves and decrypts the data.
 
+## Encrypted File Layer (Phase 1)
+
+NearBytes includes a file-aware event layer that derives file state solely by replaying
+the append-only event log for a secret-derived channel. There is no mutable index; the
+current file list is reconstructed deterministically from events.
+
+Example usage:
+
+```ts
+import { addFile, listFiles, getFile } from './src/domain/fileService.js';
+import { readFileSync } from 'fs';
+
+const secret = 'mychannel:mypassword';
+await addFile(secret, 'photo.jpg', readFileSync('photo.jpg'), 'image/jpeg');
+const files = await listFiles(secret);
+const data = await getFile(secret, files[0].blobHash);
+```
+
+Logical storage layout (conceptual, not hard-coded paths):
+
+```
+/storage
+  /blobs/<hash>
+  /logs/<channel-id>.log
+```
+
 ## Architecture
 
 NearBytes follows a layered architecture:
@@ -100,8 +126,8 @@ npm run format
 - [Cryptographic Details](docs/crypto.md)
 - [API Reference](docs/api.md)
 - [Usage Guide](docs/usage.md)
+- [File System Model](docs/file-system.md)
 
 ## License
 
 MIT
-

@@ -83,6 +83,22 @@ export interface EventPayload {
   readonly fileName: string;
   readonly hash: Hash;
   readonly encryptedKey: EncryptedData;
+  /**
+   * Original plaintext size in bytes (CREATE_FILE only)
+   */
+  readonly size?: number;
+  /**
+   * Optional MIME type of the file (CREATE_FILE only)
+   */
+  readonly mimeType?: string;
+  /**
+   * Unix timestamp in milliseconds when the file was created (CREATE_FILE only)
+   */
+  readonly createdAt?: number;
+  /**
+   * Unix timestamp in milliseconds when the file was deleted (DELETE_FILE only)
+   */
+  readonly deletedAt?: number;
 }
 
 /**
@@ -102,6 +118,10 @@ export interface SerializedEvent {
     readonly fileName: string;
     readonly hash: string;
     readonly encryptedKey: string; // Base64
+    readonly size?: number;
+    readonly mimeType?: string;
+    readonly createdAt?: number;
+    readonly deletedAt?: number;
   };
   readonly signature: string; // Base64
 }
