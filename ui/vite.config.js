@@ -11,7 +11,7 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
         runtimeCaching: [
           {
-            urlPattern: /^https?:\/\/localhost:3000\/(open|files|upload|file|health)/,
+            urlPattern: /^\/(open|files|upload|file|health)/,
             handler: 'NetworkFirst',
             options: {
               cacheName: 'nearbytes-api-cache',

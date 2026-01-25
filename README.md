@@ -19,23 +19,48 @@ NearBytes is a content-addressed storage system that provides:
 - MEGA desktop app installed and running
 - MEGA shared folder synced locally at `$HOME/MEGA/NearbytesStorage`
 
+**⚠️ Important MEGA Setup:**
+- **Accept the MEGA share** when you receive it (check MEGA desktop app or web interface)
+- **Wait for sync to complete** - the MEGA desktop app will show sync status. Files must be fully synced before Nearbytes can access them.
+- **Verify sync location:** The folder should be at `$HOME/MEGA/NearbytesStorage` (or set `NEARBYTES_STORAGE_DIR` to your actual sync path)
+
 **Steps:**
 
 1. **Clone and install:**
    ```bash
-   git clone <repo-url>
+   git clone <github-url-provided-to-you>
    cd Nearbytes
    npm install
    cd ui && npm install && cd ..
    ```
 
-2. **Set storage directory:**
+2. **Verify MEGA folder is synced:**
    ```bash
-   export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
+   # Quick check - should show files if synced
+   ls -la "$HOME/MEGA/NearbytesStorage" | head
    ```
+   
+   If the folder doesn't exist or is empty:
+   - Check MEGA desktop app is running
+   - Verify you accepted the MEGA share
+   - Wait for sync to complete (check MEGA app status)
+   - If your MEGA folder is in a different location, set `NEARBYTES_STORAGE_DIR` to that path
 
 3. **Start server and UI:**
    ```bash
+   npm run mega
+   ```
+   
+   **Note:** On Windows (without WSL/Git Bash), use the manual approach instead:
+   ```bash
+   # Windows (PowerShell/CMD)
+   $env:NEARBYTES_STORAGE_DIR="$env:USERPROFILE\MEGA\NearbytesStorage"
+   npm run dev
+   ```
+   
+   Or manually on macOS/Linux:
+   ```bash
+   export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
    npm run dev
    ```
 
@@ -46,9 +71,23 @@ NearBytes is a content-addressed storage system that provides:
 4. **Open browser:**
    - Navigate to `http://localhost:5173`
    - Type `LeedsUnited` in the secret field
-   - Files should appear if the MEGA folder is synced
+   - Files should appear if the MEGA folder is synced and contains data
 
-**Important:** The professor must have the MEGA shared folder synced locally at `$HOME/MEGA/NearbytesStorage`, otherwise the volume will be empty.
+**Troubleshooting:**
+
+- **MEGA folder not at default location:** If your MEGA folder is synced elsewhere, set the environment variable:
+  ```bash
+  export NEARBYTES_STORAGE_DIR="/path/to/your/mega/sync/folder"
+  npm run dev
+  ```
+
+- **Empty folder:** If `ls -la "$HOME/MEGA/NearbytesStorage"` shows an empty folder:
+  - Ensure MEGA desktop app is running
+  - Check that you accepted the MEGA share invitation
+  - Wait for MEGA sync to complete (check MEGA app for sync status)
+  - Verify files exist in MEGA web interface
+
+- **Files not appearing:** See [docs/professor-verify.md](docs/professor-verify.md) for detailed troubleshooting.
 
 For verification steps, see [docs/professor-verify.md](docs/professor-verify.md).
 

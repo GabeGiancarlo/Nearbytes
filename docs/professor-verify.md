@@ -15,27 +15,63 @@ Before starting, ensure:
 ## Step 1: Clone and Install
 
 ```bash
-git clone <repo-url>
+git clone <github-url-provided-to-you>
 cd Nearbytes
 npm install
 cd ui && npm install && cd ..
+```
+
+**Note:** If you plan to use scripts directly (e.g., `./scripts/run-mega.sh`), make them executable:
+```bash
+chmod +x scripts/*.sh
 ```
 
 **Verify:**
 - No errors during installation
 - `node_modules` directories exist in both root and `ui/`
 
-## Step 2: Set Storage Directory
+## Step 2: MEGA Sync Sanity Check
+
+Before proceeding, verify that MEGA is properly synced:
+
+```bash
+# Check if folder exists
+ls -la "$HOME/MEGA/NearbytesStorage" | head
+
+# Check for blocks directory (should exist if files are synced)
+ls -la "$HOME/MEGA/NearbytesStorage/blocks" 2>/dev/null | head || echo "Blocks directory not found (expected if no files synced yet)"
+
+# Check for channels directory (should exist if volumes are synced)
+ls -la "$HOME/MEGA/NearbytesStorage/channels" 2>/dev/null | head || echo "Channels directory not found (expected if no volumes created yet)"
+```
+
+**What to look for:**
+- ✅ Folder exists at `$HOME/MEGA/NearbytesStorage`
+- ✅ MEGA desktop app shows the folder is synced (check MEGA app status)
+- ✅ If files should exist: `blocks/` and `channels/` directories contain `.bin` files
+- ⚠️ If folder is empty: Ensure you **accepted the MEGA share** and **waited for sync to complete**
+
+**Verify MEGA is running:**
+- Check MEGA desktop app is running (menu bar icon on Mac, system tray on Windows/Linux)
+- Check sync status in MEGA app - should show "Synced" or "Syncing" (not "Not synced")
+- If using a different sync location, note the path for Step 3
+
+## Step 3: Set Storage Directory
 
 ```bash
 export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
 ```
 
+**If your MEGA folder is in a different location:**
+```bash
+export NEARBYTES_STORAGE_DIR="/path/to/your/actual/mega/sync/folder"
+```
+
 **Verify:**
 - Environment variable is set: `echo $NEARBYTES_STORAGE_DIR`
-- Should output: `/Users/yourname/MEGA/NearbytesStorage` (or your home path)
+- Should output: `/Users/yourname/MEGA/NearbytesStorage` (or your custom path)
 
-## Step 3: Start Development Servers
+## Step 4: Start Development Servers
 
 ```bash
 npm run dev
@@ -47,7 +83,13 @@ npm run dev
 - Backend logs: `Nearbytes API server running at http://localhost:3000`
 - UI logs: `Local: http://localhost:5173`
 
-## Step 4: Verify Server Health
+**Alternative:** Use the convenience script:
+```bash
+npm run mega
+```
+This automatically sets `NEARBYTES_STORAGE_DIR` and starts both servers.
+
+## Step 5: Verify Server Health
 
 In a new terminal:
 
@@ -57,7 +99,7 @@ curl http://localhost:3000/health
 
 **Expected:** `{"ok":true}`
 
-## Step 5: Open UI in Browser
+## Step 6: Open UI in Browser
 
 1. Navigate to `http://localhost:5173`
 2. Check browser console for errors (should be empty)
@@ -67,7 +109,7 @@ curl http://localhost:3000/health
 - Dark theme is applied
 - Secret input field is visible
 
-## Step 6: Test with "LeedsUnited" Secret
+## Step 7: Test with "LeedsUnited" Secret
 
 1. Type `LeedsUnited` in the secret input field
 2. Press Enter or wait for automatic load
@@ -78,7 +120,7 @@ curl http://localhost:3000/health
 - If MEGA folder is empty: shows "No files yet" or empty list
 - Last refresh timestamp is displayed
 
-## Step 7: Verify File Download (if files exist)
+## Step 8: Verify File Download (if files exist)
 
 1. Click on a file in the list
 2. File should download
@@ -88,7 +130,7 @@ curl http://localhost:3000/health
 - File has correct name
 - File content matches expected
 
-## Step 8: Verify File Upload (optional)
+## Step 9: Verify File Upload (optional)
 
 1. Drag and drop an image file onto the UI
 2. File should appear in the list
@@ -98,6 +140,76 @@ curl http://localhost:3000/health
 - File shows correct name, size, and timestamp
 - Check MEGA folder: `ls -la "$HOME/MEGA/NearbytesStorage/blocks"`
 - New encrypted blob files should appear
+
+## Common Issues
+
+### MEGA Folder Not Synced / Empty Folder
+
+**Symptom:** `ls -la "$HOME/MEGA/NearbytesStorage"` shows empty folder or folder doesn't exist, but files should be there.
+
+**Causes:**
+1. **MEGA share not accepted yet** - Most common issue
+2. **MEGA desktop app not running**
+3. **Sync not completed** - MEGA is still syncing files
+4. **Wrong folder path** - MEGA folder is in a different location
+
+**Fix:**
+1. **Check MEGA desktop app:**
+   - Open MEGA desktop application
+   - Check if you have any pending share invitations (usually shown in app)
+   - Accept the share if you haven't already
+   
+2. **Verify sync status:**
+   - In MEGA app, check the sync status for `NearbytesStorage` folder
+   - Should show "Synced" (green checkmark) when complete
+   - If showing "Syncing" or "Pending", wait for it to complete
+   
+3. **Check MEGA web interface:**
+   - Log into MEGA web at https://mega.nz
+   - Verify files exist in the shared folder in the cloud
+   - If files are in cloud but not locally, sync hasn't completed yet
+   
+4. **Wait for sync:**
+   - MEGA sync can take time depending on file size and internet speed
+   - Check MEGA app for sync progress
+   - Don't proceed until sync shows "Synced"
+   
+5. **Verify local files:**
+   ```bash
+   # Should show files if synced
+   ls -la "$HOME/MEGA/NearbytesStorage/blocks"
+   ls -la "$HOME/MEGA/NearbytesStorage/channels"
+   ```
+
+### MEGA Desktop App Not Running
+
+**Symptom:** MEGA folder exists but files aren't syncing, or MEGA app icon not visible.
+
+**Fix:**
+1. Launch MEGA desktop application
+2. Check system tray (Windows/Linux) or menu bar (Mac) for MEGA icon
+3. Ensure MEGA is logged in and connected
+4. Verify sync folder is still configured in MEGA settings
+
+### Wrong MEGA Folder Path
+
+**Symptom:** Server logs show wrong path, or files don't appear even though MEGA is synced.
+
+**Fix:**
+1. Find your actual MEGA sync folder location:
+   ```bash
+   # Check common locations
+   ls -la ~/MEGA/NearbytesStorage
+   ls -la ~/Documents/MEGA/NearbytesStorage
+   ls -la ~/Downloads/MEGA/NearbytesStorage
+   ```
+   
+2. Set the correct path:
+   ```bash
+   export NEARBYTES_STORAGE_DIR="/actual/path/to/your/mega/folder"
+   ```
+   
+3. Restart the server with the correct path
 
 ## Troubleshooting
 

@@ -20,7 +20,8 @@
     "type-check": "tsc --noEmit",
     "dev:server": "npm run build --silent && npm run server",
     "dev:ui": "npm --prefix ui run dev",
-    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:ui\""
+    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:ui\"",
+    "mega": "bash scripts/run-mega-dev.sh"
   },
   "keywords": [
     "cryptography",
