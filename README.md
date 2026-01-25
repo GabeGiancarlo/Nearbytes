@@ -73,6 +73,61 @@ const files = await listFiles(secret);
 const data = await getFile(secret, files[0].blobHash);
 ```
 
+## Phase 2: Local File Server API
+
+Nearbytes includes a stateless local API server that exposes the Phase 1 file
+service over HTTP. Every request supplies either a secret header or a stateless
+Bearer token derived from the secret.
+
+### Run the server
+
+```bash
+npm install
+npm run build
+NEARBYTES_STORAGE_DIR=./nearbytes-storage npm run server
+```
+
+Optional auth token key (32 bytes, hex or base64/base64url):
+
+```bash
+NEARBYTES_SERVER_TOKEN_KEY="<32-byte-key>" npm run server
+```
+
+### Try the API (secret header mode)
+
+```bash
+curl -X POST http://localhost:3000/open \
+  -H "Content-Type: application/json" \
+  -d '{"secret":"my volume"}'
+
+curl http://localhost:3000/files \
+  -H "x-nearbytes-secret: my volume"
+
+curl -X POST http://localhost:3000/upload \
+  -H "x-nearbytes-secret: my volume" \
+  -F "file=@./photo.jpg"
+
+curl -L http://localhost:3000/file/<hash> \
+  -H "x-nearbytes-secret: my volume" \
+  -o out.bin
+
+curl -X DELETE http://localhost:3000/files/photo.jpg \
+  -H "x-nearbytes-secret: my volume"
+```
+
+### Try the API (bearer token mode)
+
+```bash
+TOKEN=$(curl -s http://localhost:3000/open \
+  -H "Content-Type: application/json" \
+  -d '{"secret":"my volume"}' | jq -r '.token')
+
+curl http://localhost:3000/files \
+  -H "Authorization: Bearer ${TOKEN}"
+```
+
+More details: [docs/api-server.md](docs/api-server.md)
+
 Logical storage layout (conceptual, not hard-coded paths):
 
 ```

@@ -1,0 +1,229 @@
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import { Router } from 'express';
+import { promises as fs } from 'fs';
+import os from 'os';
+import multer from 'multer';
+import type { CryptoOperations } from '../crypto/index.js';
+import type { FileService } from '../domain/fileService.js';
+import type { StorageBackend } from '../types/storage.js';
+import { openVolume } from '../domain/volume.js';
+import { bytesToHex } from '../utils/encoding.js';
+import { ApiError } from './errors.js';
+import { encodeSecretToken, getSecretFromRequest, validateSecret } from './auth.js';
+import {
+  fileHashParamSchema,
+  fileNameParamSchema,
+  openBodySchema,
+  parseWithSchema,
+  uploadFieldsSchema,
+} from './validation.js';
+
+/**
+ * Dependencies required to register API routes.
+ */
+export interface RouteDependencies {
+  readonly fileService: FileService;
+  readonly crypto: CryptoOperations;
+  readonly storage: StorageBackend;
+  readonly tokenKey?: Uint8Array;
+  readonly maxUploadBytes: number;
+}
+
+/**
+ * Builds the API routes for the Nearbytes file server.
+ */
+export function createRoutes(deps: RouteDependencies): Router {
+  const router = Router();
+  const upload = multer({
+    storage: multer.diskStorage({
+      destination: (_req, _file, callback) => callback(null, os.tmpdir()),
+      filename: (_req, _file, callback) =>
+        callback(null, `nearbytes-${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    }),
+    limits: {
+      fileSize: deps.maxUploadBytes,
+    },
+  });
+
+  router.get('/health', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  router.post(
+    '/open',
+    asyncHandler(async (req, res) => {
+      const { secret } = parseWithSchema(openBodySchema, req.body);
+      const validatedSecret = validateSecret(secret);
+      const volumeId = await getVolumeId(validatedSecret, deps.crypto, deps.storage);
+      const files = await deps.fileService.listFiles(validatedSecret);
+
+      const response: {
+        volumeId: string;
+        fileCount: number;
+        files: ReturnType<typeof mapFile>[];
+        token?: string;
+      } = {
+        volumeId,
+        fileCount: files.length,
+        files: files.map(mapFile),
+      };
+
+      if (deps.tokenKey) {
+        response.token = await encodeSecretToken(validatedSecret, deps.tokenKey);
+      }
+
+      res.json(response);
+    })
+  );
+
+  router.get(
+    '/files',
+    requireSecret(deps),
+    asyncHandler(async (_req, res) => {
+      const secret = res.locals.secret as string;
+      const volumeId = await getVolumeId(secret, deps.crypto, deps.storage);
+      const files = await deps.fileService.listFiles(secret);
+      res.json({
+        volumeId,
+        files: files.map(mapFile),
+      });
+    })
+  );
+
+  router.post(
+    '/upload',
+    requireSecret(deps),
+    upload.single('file'),
+    asyncHandler(async (req, res) => {
+      if (!req.file) {
+        throw new ApiError(400, 'INVALID_REQUEST', 'File is required');
+      }
+
+      const fields = parseWithSchema(uploadFieldsSchema, req.body);
+      const secret = res.locals.secret as string;
+      const overrideName = fields.filename?.trim();
+      const filename = overrideName && overrideName.length > 0 ? overrideName : req.file.originalname;
+
+      if (!filename || filename.trim().length === 0) {
+        throw new ApiError(400, 'INVALID_REQUEST', 'Filename is required');
+      }
+
+      const overrideMime = fields.mimeType?.trim();
+      const mimeType =
+        overrideMime && overrideMime.length > 0 ? overrideMime : req.file.mimetype || undefined;
+
+      const fileBuffer = await fs.readFile(req.file.path);
+      try {
+        const created = await deps.fileService.addFile(secret, filename, fileBuffer, mimeType);
+        res.json({ created: mapFile(created) });
+      } finally {
+        await safeUnlink(req.file.path);
+      }
+    })
+  );
+
+  router.delete(
+    '/files/:name',
+    requireSecret(deps),
+    asyncHandler(async (req, res) => {
+      const { name } = parseWithSchema(fileNameParamSchema, req.params);
+      const filename = decodeParam(name, 'filename');
+      const secret = res.locals.secret as string;
+      await deps.fileService.deleteFile(secret, filename);
+      res.json({ deleted: true, filename });
+    })
+  );
+
+  router.get(
+    '/file/:hash',
+    requireSecret(deps),
+    asyncHandler(async (req, res) => {
+      const { hash } = parseWithSchema(fileHashParamSchema, req.params);
+      const secret = res.locals.secret as string;
+      const data = await deps.fileService.getFile(secret, hash);
+
+      // TODO: Replace with hash lookup to avoid replaying the log each request.
+      const files = await deps.fileService.listFiles(secret);
+      const match = files.find((file) => file.blobHash === hash);
+      const filename = match?.filename ?? `${hash}.bin`;
+      const mimeType = match?.mimeType ?? 'application/octet-stream';
+
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Disposition', `attachment; filename="${sanitizeFilename(filename)}"`);
+      res.send(data);
+    })
+  );
+
+  return router;
+}
+
+function requireSecret(deps: RouteDependencies): RequestHandler {
+  return async (req, res, next) => {
+    try {
+      const secret = await getSecretFromRequest(req, { tokenKey: deps.tokenKey });
+      res.locals.secret = secret;
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
+type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<void>;
+
+function asyncHandler(handler: AsyncHandler): RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
+async function getVolumeId(
+  secret: string,
+  crypto: CryptoOperations,
+  storage: StorageBackend
+): Promise<string> {
+  const volume = await openVolume(validateSecret(secret), crypto, storage);
+  return bytesToHex(volume.publicKey);
+}
+
+function mapFile(file: {
+  filename: string;
+  blobHash: string;
+  size: number;
+  mimeType?: string;
+  createdAt: number;
+}): {
+  filename: string;
+  blobHash: string;
+  size: number;
+  mimeType?: string;
+  createdAt: number;
+} {
+  return {
+    filename: file.filename,
+    blobHash: file.blobHash,
+    size: file.size,
+    mimeType: file.mimeType,
+    createdAt: file.createdAt,
+  };
+}
+
+function decodeParam(value: string, label: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new ApiError(400, 'INVALID_REQUEST', `Invalid ${label}`);
+  }
+}
+
+function sanitizeFilename(value: string): string {
+  return value.replace(/[\r\n"]/g, '_');
+}
+
+async function safeUnlink(path: string): Promise<void> {
+  try {
+    await fs.unlink(path);
+  } catch {
+    // Ignore cleanup errors for temp files.
+  }
+}
