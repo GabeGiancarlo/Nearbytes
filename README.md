@@ -12,6 +12,46 @@ NearBytes is a content-addressed storage system that provides:
 - **Channel-based organization**: Each channel identified by a public key
 - **Deterministic key derivation**: Channels recreated from secrets
 
+## Professor Quick Start (MEGA Storage)
+
+**Prerequisites:**
+- Node.js 18+ and npm
+- MEGA desktop app installed and running
+- MEGA shared folder synced locally at `$HOME/MEGA/NearbytesStorage`
+
+**Steps:**
+
+1. **Clone and install:**
+   ```bash
+   git clone <repo-url>
+   cd Nearbytes
+   npm install
+   cd ui && npm install && cd ..
+   ```
+
+2. **Set storage directory:**
+   ```bash
+   export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
+   ```
+
+3. **Start server and UI:**
+   ```bash
+   npm run dev
+   ```
+
+   This starts both:
+   - Backend server on `http://localhost:3000`
+   - UI dev server on `http://localhost:5173`
+
+4. **Open browser:**
+   - Navigate to `http://localhost:5173`
+   - Type `LeedsUnited` in the secret field
+   - Files should appear if the MEGA folder is synced
+
+**Important:** The professor must have the MEGA shared folder synced locally at `$HOME/MEGA/NearbytesStorage`, otherwise the volume will be empty.
+
+For verification steps, see [docs/professor-verify.md](docs/professor-verify.md).
+
 ## Installation
 
 ```bash
@@ -177,17 +217,23 @@ Nearbytes can use MEGA desktop sync folder as the storage backend. This enables 
    - Add `$HOME/MEGA/NearbytesStorage` as a sync folder
    - Wait for initial sync to complete
 
-3. **Run backend with MEGA storage:**
+3. **Run backend and UI together:**
    ```bash
+   export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
+   npm run dev
+   ```
+
+   This starts both the backend server (port 3000) and UI dev server (port 5173).
+   The server will log: `Using storage dir: /Users/yourname/MEGA/NearbytesStorage`
+
+   **Or run separately:**
+   ```bash
+   # Terminal 1 - Backend
    export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
    npm run build
    npm run server
-   ```
 
-   The server will log: `Using storage dir: /Users/yourname/MEGA/NearbytesStorage`
-
-4. **Run UI:**
-   ```bash
+   # Terminal 2 - UI
    cd ui
    npm run dev
    ```
@@ -199,10 +245,15 @@ Nearbytes can use MEGA desktop sync folder as the storage backend. This enables 
 - **Secret controls access**: The secret is never stored in MEGA; it's only used locally to derive encryption keys
 - **Cross-machine sync**: Share the MEGA folder across machines to enable shared storage
 
-### Convenience Script
+### Convenience Scripts
 
-Use the provided script to start the server with MEGA storage:
+**Start server and UI together:**
+```bash
+export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
+npm run dev
+```
 
+**Or use the provided script to start just the server with MEGA storage:**
 ```bash
 ./scripts/run-mega.sh
 ```

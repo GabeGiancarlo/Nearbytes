@@ -17,7 +17,10 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"*.{json,md}\"",
     "start": "node dist/cli/index.js",
     "server": "node dist/server/index.js",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "dev:server": "npm run build --silent && npm run server",
+    "dev:ui": "npm --prefix ui run dev",
+    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:ui\""
   },
   "keywords": [
     "cryptography",
@@ -48,6 +51,7 @@
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",
     "@vitest/coverage-v8": "^1.0.0",
+    "concurrently": "^9.2.1",
     "eslint": "^8.54.0",
     "prettier": "^3.1.0",
     "supertest": "^7.2.2",
