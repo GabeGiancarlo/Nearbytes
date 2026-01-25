@@ -32,7 +32,35 @@ chmod +x scripts/*.sh
 
 ## Step 2: MEGA Sync Sanity Check
 
-Before proceeding, verify that MEGA is properly synced:
+**🚨 Critical First: Verify MEGA is NOT syncing your entire home directory**
+
+Before proceeding, check that MEGA is configured correctly:
+
+```bash
+# This should ONLY show NearbytesStorage, nothing else
+ls ~/MEGA
+```
+
+**Expected output:**
+```
+NearbytesStorage
+```
+
+**❌ If you see Desktop, Documents, Downloads, Applications, etc.:**
+- MEGA is syncing your entire home directory (WRONG!)
+- Go to MEGA Settings → Syncs
+- Remove the sync that maps your whole home directory
+- Add a new sync for ONLY: `/Users/yourname/MEGA/NearbytesStorage` → `/MEGA/NearbytesStorage`
+- This does NOT delete local files, only removes the sync configuration
+
+**Why this matters:**
+- Syncing your entire home directory is unnecessary, slow, and a privacy risk
+- Nearbytes only needs the `NearbytesStorage` folder synced
+- You only want encrypted Nearbytes blobs in MEGA, not your entire computer
+
+---
+
+**Now verify MEGA is properly synced:**
 
 ```bash
 # Check if folder exists
@@ -46,6 +74,7 @@ ls -la "$HOME/MEGA/NearbytesStorage/channels" 2>/dev/null | head || echo "Channe
 ```
 
 **What to look for:**
+- ✅ `~/MEGA` contains ONLY `NearbytesStorage` (not Desktop/Documents/etc.)
 - ✅ Folder exists at `$HOME/MEGA/NearbytesStorage`
 - ✅ MEGA desktop app shows the folder is synced (check MEGA app status)
 - ✅ If files should exist: `blocks/` and `channels/` directories contain `.bin` files
@@ -54,6 +83,7 @@ ls -la "$HOME/MEGA/NearbytesStorage/channels" 2>/dev/null | head || echo "Channe
 **Verify MEGA is running:**
 - Check MEGA desktop app is running (menu bar icon on Mac, system tray on Windows/Linux)
 - Check sync status in MEGA app - should show "Synced" or "Syncing" (not "Not synced")
+- In MEGA Settings → Syncs, verify you have a sync for ONLY `NearbytesStorage`
 - If using a different sync location, note the path for Step 3
 
 ## Step 3: Set Storage Directory
@@ -210,6 +240,26 @@ curl http://localhost:3000/health
    ```
    
 3. Restart the server with the correct path
+
+### MEGA Syncing Entire Home Directory
+
+**Symptom:** `ls ~/MEGA` shows Desktop, Documents, Downloads, Applications, etc. instead of just `NearbytesStorage`.
+
+**This is WRONG and dangerous!** MEGA is syncing your entire computer.
+
+**Fix:**
+1. Open MEGA desktop app → Settings/Preferences → Syncs
+2. Find the sync that maps your entire home directory (e.g., `/Users/yourname` → `/MEGA`)
+3. **Remove/Delete that sync** (this does NOT delete local files, only removes sync config)
+4. Add a new sync:
+   - **Local folder:** `/Users/yourname/MEGA/NearbytesStorage`
+   - **MEGA folder:** `/MEGA/NearbytesStorage` (or the shared folder path)
+5. Verify: `ls ~/MEGA` should now show ONLY `NearbytesStorage`
+
+**Why this matters:**
+- Syncing your entire home directory uploads unnecessary files (Desktop, Documents, etc.)
+- This is slow, uses excessive bandwidth, and is a privacy risk
+- Nearbytes only needs the `NearbytesStorage` folder synced
 
 ## Troubleshooting
 

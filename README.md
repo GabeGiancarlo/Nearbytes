@@ -24,6 +24,15 @@ NearBytes is a content-addressed storage system that provides:
 - **Wait for sync to complete** - the MEGA desktop app will show sync status. Files must be fully synced before Nearbytes can access them.
 - **Verify sync location:** The folder should be at `$HOME/MEGA/NearbytesStorage` (or set `NEARBYTES_STORAGE_DIR` to your actual sync path)
 
+**🚨 Critical: MEGA Sync Configuration**
+- **ONLY sync `$HOME/MEGA/NearbytesStorage`** - NOT your entire home directory
+- In MEGA Settings → Syncs, ensure you have a sync for:
+  - **Local folder:** `/Users/yourname/MEGA/NearbytesStorage`
+  - **MEGA folder:** `/MEGA/NearbytesStorage` (or the shared folder path)
+- **DO NOT** sync `/Users/yourname` or your entire home directory
+- **Verify:** Run `ls ~/MEGA` - should only show `NearbytesStorage`, not Desktop/Documents/Downloads/etc.
+- If you see your entire home directory syncing, remove that sync and create a new one for only `NearbytesStorage`
+
 **Steps:**
 
 1. **Clone and install:**
