@@ -80,11 +80,22 @@ describe('Nearbytes API', () => {
     const downloadRes = await request(app)
       .get(`/file/${created.blobHash}`)
       .set('Authorization', `Bearer ${token}`)
-      .buffer(true)
-      .parse(binaryParser)
       .expect(200);
 
-    expect(downloadRes.body.toString()).toBe('hello world');
+    // For text/plain responses, supertest returns body as string
+    // Check both body and text properties
+    let bodyText: string;
+    if (typeof downloadRes.body === 'string') {
+      bodyText = downloadRes.body;
+    } else if (downloadRes.body instanceof Buffer) {
+      bodyText = downloadRes.body.toString('utf8');
+    } else {
+      // Try accessing the text property directly
+      const response = downloadRes as any;
+      bodyText = response.text || response.body?.toString() || String(response.body);
+    }
+    
+    expect(bodyText).toBe('hello world');
     expect(downloadRes.headers['content-disposition']).toContain('hello.txt');
 
     await request(app)
@@ -136,19 +147,3 @@ describe('Nearbytes API', () => {
     expect(badDownload.body.error.code).toBe('UNAUTHORIZED');
   });
 });
-
-function binaryParser(
-  res: NodeJS.ReadableStream,
-  callback: (error: Error | null, body?: Buffer) => void
-): void {
-  const chunks: Buffer[] = [];
-  res.on('data', (chunk) => {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  });
-  res.on('end', () => {
-    callback(null, Buffer.concat(chunks));
-  });
-  res.on('error', (error) => {
-    callback(error);
-  });
-}

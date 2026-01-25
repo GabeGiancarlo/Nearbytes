@@ -63,7 +63,9 @@ export async function encodeSecretToken(secret: string, tokenKey: Uint8Array): P
 
   const iv = new Uint8Array(AES_GCM_IV_LENGTH);
   globalThis.crypto.getRandomValues(iv);
-  const key = await crypto.importKey('raw', tokenKey, { name: 'AES-GCM' }, false, ['encrypt']);
+  // Ensure tokenKey is backed by ArrayBuffer for Web Crypto API
+  const keyData = new Uint8Array([...tokenKey]);
+  const key = await crypto.importKey('raw', keyData, { name: 'AES-GCM' }, false, ['encrypt']);
   const plaintext = new TextEncoder().encode(secret);
   const encrypted = new Uint8Array(
     await crypto.encrypt({ name: 'AES-GCM', iv }, key, plaintext)
@@ -92,7 +94,9 @@ export async function decodeSecretToken(token: string, tokenKey: Uint8Array): Pr
 
   const iv = tokenBytes.slice(0, AES_GCM_IV_LENGTH);
   const ciphertext = tokenBytes.slice(AES_GCM_IV_LENGTH);
-  const key = await crypto.importKey('raw', tokenKey, { name: 'AES-GCM' }, false, ['decrypt']);
+  // Ensure tokenKey is backed by ArrayBuffer for Web Crypto API
+  const keyData = new Uint8Array([...tokenKey]);
+  const key = await crypto.importKey('raw', keyData, { name: 'AES-GCM' }, false, ['decrypt']);
 
   try {
     const decrypted = new Uint8Array(

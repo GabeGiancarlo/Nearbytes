@@ -8,7 +8,16 @@ import { bytesToBase64, base64ToBytes } from '../utils/encoding.js';
  * @returns Serialized event
  */
 export function serializeEvent(event: SignedEvent): SerializedEvent {
-  const payload: SerializedEvent['payload'] = {
+  const payload: {
+    type: string;
+    fileName: string;
+    hash: string;
+    encryptedKey: string;
+    size?: number;
+    mimeType?: string;
+    createdAt?: number;
+    deletedAt?: number;
+  } = {
     type: event.payload.type,
     fileName: event.payload.fileName,
     hash: event.payload.hash,
