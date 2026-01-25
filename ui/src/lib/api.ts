@@ -151,8 +151,8 @@ export async function uploadFiles(
   for (const file of fileArray) {
     const formData = new FormData();
     formData.append('file', file);
-    // Optional: allow filename override if needed
-    // formData.append('filename', file.name);
+    // Explicitly send filename to ensure it's preserved
+    formData.append('filename', file.name);
 
     const result = await apiRequest<UploadResponse>('/upload', {
       method: 'POST',
