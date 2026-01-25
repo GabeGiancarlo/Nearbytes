@@ -128,6 +128,39 @@ curl http://localhost:3000/files \
 
 More details: [docs/api-server.md](docs/api-server.md)
 
+## Phase 3: Branded Svelte 5 UI
+
+Nearbytes includes a modern web UI built with Svelte 5 that provides a beautiful, reactive interface for managing encrypted files.
+
+### Run the UI
+
+**Terminal 1 - Backend:**
+```bash
+npm run build
+npm run server
+```
+
+**Terminal 2 - UI:**
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Open http://localhost:5173 in your browser.
+
+### UI Features
+
+- **Secret-based access**: Enter a secret to instantly materialize files
+- **Drag & drop upload**: Drop files to add them to a volume
+- **Download & delete**: Click files to download, delete button to remove
+- **Offline support**: Cached file listings work offline
+- **PWA**: Installable as a web app with service worker caching
+
+The UI proxies API calls to the backend running on port 3000. See [ui/README.md](ui/README.md) for detailed setup instructions and [docs/ui.md](docs/ui.md) for architecture details.
+
+More details: [docs/ui.md](docs/ui.md)
+
 Logical storage layout (conceptual, not hard-coded paths):
 
 ```
