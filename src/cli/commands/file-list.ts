@@ -25,7 +25,7 @@ export async function handleFileList(options: FileListOptions): Promise<void> {
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './data');
+    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Open volume
@@ -83,7 +83,7 @@ export function registerFileListCommand(program: Command): void {
     .alias('file ls')
     .description('List all files in a volume')
     .requiredOption('-s, --secret <secret>', 'Volume secret')
-    .option('-d, --data-dir <path>', 'Data directory path', './data')
+    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
     .option('-f, --format <format>', 'Output format (table, json, plain)', 'table')
     .action(handleFileList);
 }

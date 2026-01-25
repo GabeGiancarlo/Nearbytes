@@ -31,7 +31,7 @@ export async function handleFileGet(options: FileGetOptions): Promise<void> {
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './data');
+    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Open volume
@@ -78,6 +78,6 @@ export function registerFileGetCommand(program: Command): void {
     .requiredOption('-n, --name <name>', 'File name to retrieve')
     .requiredOption('-s, --secret <secret>', 'Volume secret')
     .requiredOption('-o, --output <path>', 'Output file path')
-    .option('-d, --data-dir <path>', 'Data directory path', './data')
+    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
     .action(handleFileGet);
 }

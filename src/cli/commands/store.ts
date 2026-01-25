@@ -29,7 +29,7 @@ export async function handleStore(options: StoreOptions): Promise<void> {
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './data');
+    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
     const channelStorage = new ChannelStorage(storage, (pubKey) =>
       Array.from(pubKey)
         .map((b) => b.toString(16).padStart(2, '0'))
@@ -59,7 +59,7 @@ export function registerStoreCommand(program: Command): void {
     .description('Store data in a channel')
     .requiredOption('-f, --file <path>', 'Path to data file')
     .requiredOption('-s, --secret <secret>', 'Channel secret')
-    .option('-d, --data-dir <path>', 'Data directory path', './data')
+    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
     .action(handleStore);
 }
 

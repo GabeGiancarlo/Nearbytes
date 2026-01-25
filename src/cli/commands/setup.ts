@@ -20,7 +20,7 @@ export async function handleSetup(options: SetupOptions): Promise<void> {
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './data');
+    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
 
     // Setup channel
     const result = await setupChannel(secret, crypto, storage);
@@ -43,7 +43,7 @@ export function registerSetupCommand(program: Command): void {
     .command('setup')
     .description('Initialize a new channel')
     .requiredOption('-s, --secret <secret>', 'Channel secret (e.g., "channelname:password")')
-    .option('-d, --data-dir <path>', 'Data directory path', './data')
+    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
     .action(handleSetup);
 }
 

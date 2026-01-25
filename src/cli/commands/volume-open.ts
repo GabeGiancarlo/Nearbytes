@@ -23,7 +23,7 @@ export async function handleVolumeOpen(options: VolumeOpenOptions): Promise<void
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './data');
+    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Open volume
@@ -64,6 +64,6 @@ export function registerVolumeOpenCommand(program: Command): void {
     .command('volume open')
     .description('Open a volume from a secret and display information')
     .requiredOption('-s, --secret <secret>', 'Volume secret')
-    .option('-d, --data-dir <path>', 'Data directory path', './data')
+    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
     .action(handleVolumeOpen);
 }

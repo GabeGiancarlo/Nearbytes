@@ -18,6 +18,8 @@ const crypto = createCryptoOperations();
 const storage = new FilesystemStorageBackend(storageDir);
 const fileService = createFileService({ crypto, storage });
 
+console.log(`Using storage dir: ${storageDir}`);
+
 const app = createApp({
   fileService,
   crypto,

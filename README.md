@@ -161,6 +161,68 @@ The UI proxies API calls to the backend running on port 3000. See [ui/README.md]
 
 More details: [docs/ui.md](docs/ui.md)
 
+## Phase 4: MEGA-backed Storage (Desktop Sync Folder)
+
+Nearbytes can use MEGA desktop sync folder as the storage backend. This enables automatic cloud sync of encrypted blobs and logs across multiple machines.
+
+### Setup MEGA Storage
+
+1. **Create MEGA sync folder:**
+   ```bash
+   mkdir -p "$HOME/MEGA/NearbytesStorage"
+   ```
+
+2. **Configure MEGA desktop app:**
+   - Open MEGA desktop app
+   - Add `$HOME/MEGA/NearbytesStorage` as a sync folder
+   - Wait for initial sync to complete
+
+3. **Run backend with MEGA storage:**
+   ```bash
+   export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
+   npm run build
+   npm run server
+   ```
+
+   The server will log: `Using storage dir: /Users/yourname/MEGA/NearbytesStorage`
+
+4. **Run UI:**
+   ```bash
+   cd ui
+   npm run dev
+   ```
+
+### How It Works
+
+- **Local encryption**: Nearbytes encrypts all files locally before writing to storage
+- **MEGA stores ciphertext**: Only encrypted blobs and event logs are stored in MEGA
+- **Secret controls access**: The secret is never stored in MEGA; it's only used locally to derive encryption keys
+- **Cross-machine sync**: Share the MEGA folder across machines to enable shared storage
+
+### Convenience Script
+
+Use the provided script to start the server with MEGA storage:
+
+```bash
+./scripts/run-mega.sh
+```
+
+This script automatically sets `NEARBYTES_STORAGE_DIR` and ensures the directory exists.
+
+### Important Warnings
+
+⚠️ **Do not rename or move the MEGA folder** once you start storing volumes unless you also update the `NEARBYTES_STORAGE_DIR` environment variable accordingly.
+
+⚠️ **Keep MEGA client running** for automatic sync. Files written by Nearbytes will sync to MEGA cloud automatically.
+
+⚠️ **Never commit the MEGA folder** into git. Add it to `.gitignore` if it's in your repository.
+
+### Verification
+
+See [docs/verify-mega.md](docs/verify-mega.md) for step-by-step verification instructions.
+
+More details: [docs/mega.md](docs/mega.md)
+
 Logical storage layout (conceptual, not hard-coded paths):
 
 ```
@@ -215,6 +277,7 @@ npm run format
 - [API Reference](docs/api.md)
 - [Usage Guide](docs/usage.md)
 - [File System Model](docs/file-system.md)
+- [MEGA Integration](docs/mega.md)
 
 ## License
 

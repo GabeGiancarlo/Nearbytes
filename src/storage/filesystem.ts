@@ -8,7 +8,7 @@ import { StorageError } from '../types/errors.js';
  * Uses Node.js fs/promises for all operations
  */
 export class FilesystemStorageBackend implements StorageBackend {
-  constructor(private readonly basePath: string = './data') {}
+  constructor(private readonly basePath: string) {}
 
   /**
    * Write data to a file, creating parent directories if needed

@@ -126,7 +126,7 @@ function getDefaultFileService(): FileService {
   if (!defaultFileService) {
     defaultFileService = createFileService({
       crypto: createCryptoOperations(),
-      storage: new FilesystemStorageBackend('./data'),
+      storage: new FilesystemStorageBackend('./nearbytes-storage'),
       pathMapper: defaultPathMapper,
     });
   }
