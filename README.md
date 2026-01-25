@@ -59,7 +59,7 @@ npm install
 npm run build
 ```
 
-## Quick Start
+## Quick Start (CLI)
 
 ### 1. Setup a Channel
 
@@ -95,7 +95,20 @@ nearbytes retrieve --event abc123... --secret "mychannel:mypassword" --output ./
 
 Retrieves and decrypts the data.
 
-## Encrypted File Layer (Phase 1)
+## Architecture Overview
+
+NearBytes follows a layered architecture:
+
+1. **Crypto Layer**: Cryptographic primitives (hash, symmetric, asymmetric)
+2. **Storage Layer**: Abstract storage backend with filesystem implementation
+3. **Domain Layer**: High-level protocol operations
+4. **CLI Layer**: Command-line interface
+5. **Server Layer**: HTTP API server (Phase 2)
+6. **UI Layer**: Web interface (Phase 3)
+
+See [docs/architecture.md](docs/architecture.md) for details.
+
+## Phase 1: Encrypted File Layer
 
 NearBytes includes a file-aware event layer that derives file state solely by replaying
 the append-only event log for a secret-derived channel. There is no mutable index; the
@@ -124,14 +137,30 @@ Bearer token derived from the secret.
 ```bash
 npm install
 npm run build
-NEARBYTES_STORAGE_DIR=./nearbytes-storage npm run server
+export NEARBYTES_STORAGE_DIR="./nearbytes-storage"  # Optional, defaults to ./nearbytes-storage
+npm run server
 ```
 
-Optional auth token key (32 bytes, hex or base64/base64url):
+The server runs on `http://localhost:3000` by default.
 
-```bash
-NEARBYTES_SERVER_TOKEN_KEY="<32-byte-key>" npm run server
-```
+### Configuration
+
+Environment variables:
+
+- `PORT` (default: `3000`) - Server port
+- `NEARBYTES_STORAGE_DIR` (default: `./nearbytes-storage`) - Storage directory
+- `NEARBYTES_SERVER_TOKEN_KEY` (optional) - 32-byte key (hex or base64) to enable Bearer tokens
+- `NEARBYTES_CORS_ORIGIN` (default: `http://localhost:5173`) - CORS origin
+- `NEARBYTES_MAX_UPLOAD_MB` (default: `50`) - Maximum upload size in MB
+
+### API Endpoints
+
+- `POST /open` - Open a volume with a secret
+- `GET /files` - List files in a volume
+- `POST /upload` - Upload a file (multipart/form-data)
+- `GET /file/:hash` - Download a file by blob hash
+- `DELETE /files/:name` - Delete a file by name
+- `GET /health` - Health check
 
 ### Try the API (secret header mode)
 
@@ -174,6 +203,16 @@ Nearbytes includes a modern web UI built with Svelte 5 that provides a beautiful
 
 ### Run the UI
 
+**Option 1: Run both server and UI together (recommended):**
+```bash
+export NEARBYTES_STORAGE_DIR="./nearbytes-storage"  # Or your MEGA folder
+npm run dev
+```
+
+This starts both the backend server (port 3000) and UI dev server (port 5173).
+
+**Option 2: Run separately:**
+
 **Terminal 1 - Backend:**
 ```bash
 npm run build
@@ -183,11 +222,11 @@ npm run server
 **Terminal 2 - UI:**
 ```bash
 cd ui
-npm install
+npm install  # First time only
 npm run dev
 ```
 
-Open http://localhost:5173 in your browser.
+Open `http://localhost:5173` in your browser.
 
 ### UI Features
 
@@ -274,24 +313,23 @@ See [docs/verify-mega.md](docs/verify-mega.md) for step-by-step verification ins
 
 More details: [docs/mega.md](docs/mega.md)
 
+## Storage Structure
+
 Logical storage layout (conceptual, not hard-coded paths):
 
 ```
 /storage
-  /blobs/<hash>
-  /logs/<channel-id>.log
+  /blocks/<hash>.bin          # Encrypted file blobs (content-addressed)
+  /channels/<channel-id>/     # Event logs per channel
+    /<event-hash>.bin         # Signed event entries
 ```
 
-## Architecture
+Files are stored as:
+- **Blocks**: Encrypted file content, named by SHA-256 hash
+- **Channels**: Event logs organized by channel (volume) public key
+- **Events**: Immutable signed events that reconstruct file state
 
-NearBytes follows a layered architecture:
-
-1. **Crypto Layer**: Cryptographic primitives (hash, symmetric, asymmetric)
-2. **Storage Layer**: Abstract storage backend with filesystem implementation
-3. **Domain Layer**: High-level protocol operations
-4. **CLI Layer**: Command-line interface
-
-See [docs/architecture.md](docs/architecture.md) for details.
+See [docs/file-system.md](docs/file-system.md) for detailed storage structure.
 
 ## Security
 
@@ -299,14 +337,18 @@ See [docs/architecture.md](docs/architecture.md) for details.
 - Signatures use ECDSA P-256
 - Keys derived using PBKDF2 with 100,000 iterations
 - No external crypto libraries (Web Crypto API only)
+- Secrets are never stored - only used locally to derive keys
 
 See [docs/crypto.md](docs/crypto.md) for cryptographic details.
 
 ## Development
 
+### Setup
+
 ```bash
 # Install dependencies
 npm install
+cd ui && npm install && cd ..
 
 # Build
 npm run build
@@ -321,14 +363,46 @@ npm run lint
 npm run format
 ```
 
+### Development Workflow
+
+**Start both server and UI:**
+```bash
+npm run dev
+```
+
+**Start only server:**
+```bash
+npm run dev:server
+```
+
+**Start only UI:**
+```bash
+npm run dev:ui
+```
+
+### Scripts
+
+- `npm run build` - Build TypeScript to JavaScript
+- `npm run server` - Run backend server
+- `npm run dev` - Run both server and UI together
+- `npm run dev:server` - Build and run server
+- `npm run dev:ui` - Run UI dev server
+- `npm test` - Run tests
+- `npm run lint` - Lint code
+- `npm run format` - Format code
+
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Cryptographic Details](docs/crypto.md)
-- [API Reference](docs/api.md)
-- [Usage Guide](docs/usage.md)
-- [File System Model](docs/file-system.md)
-- [MEGA Integration](docs/mega.md)
+- [Architecture](docs/architecture.md) - System architecture overview
+- [Cryptographic Details](docs/crypto.md) - Encryption and signing details
+- [API Reference](docs/api.md) - API endpoint documentation
+- [API Server Guide](docs/api-server.md) - Server setup and configuration
+- [Usage Guide](docs/usage.md) - CLI usage examples
+- [File System Model](docs/file-system.md) - Storage structure details
+- [UI Documentation](docs/ui.md) - UI architecture and features
+- [MEGA Integration](docs/mega.md) - MEGA storage setup guide
+- [Professor Verification](docs/professor-verify.md) - Step-by-step verification
+- [MEGA Verification](docs/verify-mega.md) - MEGA storage verification
 
 ## License
 
