@@ -12,11 +12,11 @@ NearBytes is a content-addressed storage system that provides:
 - **Channel-based organization**: Each channel identified by a public key
 - **Deterministic key derivation**: Channels recreated from secrets
 
-## Professor Quick Start (MEGA Storage)
+## Quick Start (MEGA Storage)
 
 **Prerequisites:**
 - Node.js 18+ and npm
-- MEGA desktop app installed and running
+- [MEGA desktop app](https://mega.io/desktop#download) installed and running
 - MEGA shared folder synced locally at `$HOME/MEGA/NearbytesStorage`
 
 **⚠️ Important MEGA Setup:**
@@ -115,7 +115,7 @@ npm run build
 nearbytes setup --secret "mychannel:mypassword"
 ```
 
-This creates a new channel and outputs the public key.
+This creates a new channel  and outputs the public key.
 
 ### 2. Store Data
 
