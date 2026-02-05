@@ -11,6 +11,10 @@ import { bytesToHex } from '../utils/encoding.js';
 import { ApiError } from './errors.js';
 import { encodeSecretToken, getSecretFromRequest, validateSecret } from './auth.js';
 import {
+  getStorageDiagnostics,
+  getChannelDiagnostics,
+} from './storageDiagnostics.js';
+import {
   fileHashParamSchema,
   fileNameParamSchema,
   openBodySchema,
@@ -27,6 +31,8 @@ export interface RouteDependencies {
   readonly storage: StorageBackend;
   readonly tokenKey?: Uint8Array;
   readonly maxUploadBytes: number;
+  /** Resolved absolute storage path; used for debug endpoints. */
+  readonly resolvedStorageDir?: string;
 }
 
 /**
@@ -49,6 +55,30 @@ export function createRoutes(deps: RouteDependencies): Router {
     res.json({ ok: true });
   });
 
+  if (deps.resolvedStorageDir) {
+    router.get('/__debug/storage', asyncHandler(async (_req, res) => {
+      const result = await getStorageDiagnostics(deps.resolvedStorageDir!);
+      res.json({
+        storageDirAbs: result.storageDirAbs,
+        channelsDirAbs: result.channelsDirAbs,
+        blocksDirAbs: result.blocksDirAbs,
+        channelsCount: result.channelsCount,
+        blocksCount: result.blocksCount,
+        sampleChannels: result.channelIds.slice(0, 5),
+        megaHints: result.megaHints,
+      });
+    }));
+
+    router.get('/__debug/channel/:id', asyncHandler(async (req, res) => {
+      const id = (req.params as { id?: string }).id;
+      if (!id || !/^[a-f0-9]+$/i.test(id) || id.length < 32 || id.length > 200) {
+        throw new ApiError(400, 'INVALID_REQUEST', 'Channel id must be hex string (e.g. public key hex)');
+      }
+      const result = await getChannelDiagnostics(deps.resolvedStorageDir!, id);
+      res.json(result);
+    }));
+  }
+
   router.post(
     '/open',
     asyncHandler(async (req, res) => {
@@ -62,6 +92,7 @@ export function createRoutes(deps: RouteDependencies): Router {
         fileCount: number;
         files: ReturnType<typeof mapFile>[];
         token?: string;
+        storageHint?: string;
       } = {
         volumeId,
         fileCount: files.length,
@@ -70,6 +101,20 @@ export function createRoutes(deps: RouteDependencies): Router {
 
       if (deps.tokenKey) {
         response.token = await encodeSecretToken(validatedSecret, deps.tokenKey);
+      }
+
+      if (files.length === 0 && deps.resolvedStorageDir) {
+        const diag = await getStorageDiagnostics(deps.resolvedStorageDir);
+        if (diag.blocksCount === 0 && !diag.channelsDirExists) {
+          response.storageHint =
+            'Storage directory appears empty. Verify NEARBYTES_STORAGE_DIR points to the folder containing /blocks and /channels.';
+        } else if (diag.blocksCount === 0 && diag.channelsCount <= 1) {
+          const channelDiag = await getChannelDiagnostics(deps.resolvedStorageDir, volumeId);
+          if (channelDiag.eventFiles.length === 0) {
+            response.storageHint =
+              'Storage directory appears empty. Verify NEARBYTES_STORAGE_DIR points to the folder containing /blocks and /channels.';
+          }
+        }
       }
 
       res.json(response);

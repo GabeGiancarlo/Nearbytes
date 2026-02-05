@@ -16,6 +16,8 @@ export interface AppDependencies {
   readonly tokenKey?: Uint8Array;
   readonly corsOrigin: string | string[] | boolean;
   readonly maxUploadBytes: number;
+  /** Resolved absolute storage path; used for debug endpoints and diagnostics. */
+  readonly resolvedStorageDir?: string;
 }
 
 /**

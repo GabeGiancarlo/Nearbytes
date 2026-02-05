@@ -196,10 +196,30 @@ The server runs on `http://localhost:3000` by default.
 Environment variables:
 
 - `PORT` (default: `3000`) - Server port
-- `NEARBYTES_STORAGE_DIR` (default: `./nearbytes-storage`) - Storage directory
+- `NEARBYTES_STORAGE_DIR` (default: `./nearbytes-storage`) - Storage directory. **Single source of truth** for where the server reads/writes `channels/` and `blocks/`. Set this to your MEGA sync folder when using MEGA (see below).
 - `NEARBYTES_SERVER_TOKEN_KEY` (optional) - 32-byte key (hex or base64) to enable Bearer tokens
 - `NEARBYTES_CORS_ORIGIN` (default: `http://localhost:5173`) - CORS origin
 - `NEARBYTES_MAX_UPLOAD_MB` (default: `50`) - Maximum upload size in MB
+
+**Setting storage for MEGA (macOS / Linux / WSL):**
+```bash
+export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
+```
+**Example MEGA paths:** macOS `~/MEGA/NearbytesStorage`, Windows `%USERPROFILE%\MEGA\NearbytesStorage`, Linux `$HOME/MEGA/NearbytesStorage`, MEGA Cloud Drive on macOS `~/Library/CloudStorage/MEGA/...`.
+
+**Quick verification (after starting the server):**
+```bash
+# See what path the server is using (from startup logs or debug endpoint)
+curl -s http://localhost:3000/__debug/storage | jq .
+
+# List channel dirs and block count (replace STORAGE_DIR with value from above)
+ls -la "$NEARBYTES_STORAGE_DIR/channels"
+ls "$NEARBYTES_STORAGE_DIR/blocks" | wc -l
+```
+
+**Debug endpoints (storage only; no secrets):**
+- `GET /__debug/storage` - Resolved storage path, channel/block counts, MEGA path hints
+- `GET /__debug/channel/:id` - Channel dir path, existence, event file list (name, size, mtime) for channel id (public key hex)
 
 ### API Endpoints
 

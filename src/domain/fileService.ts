@@ -124,9 +124,12 @@ export async function getFile(secret: string, blobHash: string): Promise<Buffer>
 
 function getDefaultFileService(): FileService {
   if (!defaultFileService) {
+    const storageDir = typeof process !== 'undefined' && process.env?.NEARBYTES_STORAGE_DIR
+      ? process.env.NEARBYTES_STORAGE_DIR
+      : './nearbytes-storage';
     defaultFileService = createFileService({
       crypto: createCryptoOperations(),
-      storage: new FilesystemStorageBackend('./nearbytes-storage'),
+      storage: new FilesystemStorageBackend(storageDir),
       pathMapper: defaultPathMapper,
     });
   }

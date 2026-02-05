@@ -18,6 +18,8 @@ export interface OpenVolumeResponse {
   fileCount: number;
   files: FileMetadata[];
   token?: string;
+  /** Shown when storage appears empty (e.g. wrong NEARBYTES_STORAGE_DIR). */
+  storageHint?: string;
 }
 
 export interface ListFilesResponse {

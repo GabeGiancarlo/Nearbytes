@@ -77,6 +77,7 @@
       volumeId = response.volumeId;
       fileList = response.files;
       lastRefresh = Date.now();
+      errorMessage = response.storageHint ?? '';
 
       // Cache the file list
       await setCachedFiles(volumeId, response.files);
