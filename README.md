@@ -82,7 +82,11 @@ NearBytes is a content-addressed storage system that provides:
    - Type `LeedsUnited` in the secret field
    - Files should appear if the MEGA folder is synced and contains data
 
+**Scripts (macOS):** Run once: `bash scripts/setup.sh`. Then start servers: `bash scripts/run-servers.sh` (stops anything on 3000/5173, sets MEGA storage, runs backend + UI). Stop: `bash scripts/stop-servers.sh`. Workflow: `setup.sh` once, then `(run-servers.sh; stop-servers.sh)` as needed.
+
 **Troubleshooting:**
+
+- **Setup script closes the terminal / output disappears:** The script writes to `setup.log` in the repo root. After running `bash scripts/setup.sh`, open `setup.log` to see the full output and any error (e.g. `cat setup.log` or open in editor).
 
 - **MEGA folder not at default location:** If your MEGA folder is synced elsewhere, set the environment variable:
   ```bash
