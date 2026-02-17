@@ -7,6 +7,7 @@ import { deleteFile } from '../../domain/operations.js';
 import { green, red, yellow } from '../output/colors.js';
 import { validateSecret } from '../validation.js';
 import { defaultPathMapper } from '../../types/storage.js';
+import { getDefaultStorageDir } from '../../storagePath.js';
 
 export interface FileRemoveOptions {
   name: string;
@@ -29,7 +30,7 @@ export async function handleFileRemove(options: FileRemoveOptions): Promise<void
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
+    const storage = new FilesystemStorageBackend(options.dataDir ?? getDefaultStorageDir());
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Open volume
@@ -88,6 +89,6 @@ export function registerFileRemoveCommand(program: Command): void {
     .requiredOption('-n, --name <name>', 'File name to remove')
     .requiredOption('-s, --secret <secret>', 'Volume secret')
     .option('-f, --force', 'Force removal (no error if file does not exist)')
-    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
+    .option('-d, --data-dir <path>', 'Storage directory (default: MEGA cloud path)', getDefaultStorageDir())
     .action(handleFileRemove);
 }

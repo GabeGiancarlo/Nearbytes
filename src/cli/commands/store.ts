@@ -7,6 +7,7 @@ import { ChannelStorage } from '../../storage/channel.js';
 import { storeData } from '../../domain/operations.js';
 import { green, red } from '../output/colors.js';
 import { validateSecret, validateFilePath } from '../validation.js';
+import { getDefaultStorageDir } from '../../storagePath.js';
 
 export interface StoreOptions {
   file: string;
@@ -29,7 +30,7 @@ export async function handleStore(options: StoreOptions): Promise<void> {
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
+    const storage = new FilesystemStorageBackend(options.dataDir ?? getDefaultStorageDir());
     const channelStorage = new ChannelStorage(storage, (pubKey) =>
       Array.from(pubKey)
         .map((b) => b.toString(16).padStart(2, '0'))
@@ -59,7 +60,7 @@ export function registerStoreCommand(program: Command): void {
     .description('Store data in a channel')
     .requiredOption('-f, --file <path>', 'Path to data file')
     .requiredOption('-s, --secret <secret>', 'Channel secret')
-    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
+    .option('-d, --data-dir <path>', 'Storage directory (default: MEGA cloud path)', getDefaultStorageDir())
     .action(handleStore);
 }
 

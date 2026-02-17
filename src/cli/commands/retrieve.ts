@@ -6,6 +6,7 @@ import { ChannelStorage } from '../../storage/channel.js';
 import { retrieveData } from '../../domain/operations.js';
 import { green, red } from '../output/colors.js';
 import { validateSecret, validateHash, validateOutputPath } from '../validation.js';
+import { getDefaultStorageDir } from '../../storagePath.js';
 
 export interface RetrieveOptions {
   event: string;
@@ -26,7 +27,7 @@ export async function handleRetrieve(options: RetrieveOptions): Promise<void> {
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
+    const storage = new FilesystemStorageBackend(options.dataDir ?? getDefaultStorageDir());
     const channelStorage = new ChannelStorage(storage, (pubKey) =>
       Array.from(pubKey)
         .map((b) => b.toString(16).padStart(2, '0'))
@@ -56,7 +57,7 @@ export function registerRetrieveCommand(program: Command): void {
     .requiredOption('-e, --event <hash>', 'Event hash')
     .requiredOption('-s, --secret <secret>', 'Channel secret')
     .requiredOption('-o, --output <path>', 'Output file path')
-    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
+    .option('-d, --data-dir <path>', 'Storage directory (default: MEGA cloud path)', getDefaultStorageDir())
     .action(handleRetrieve);
 }
 

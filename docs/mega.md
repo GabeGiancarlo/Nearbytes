@@ -4,7 +4,7 @@ This guide explains how Nearbytes integrates with MEGA desktop sync folder to pr
 
 ## Overview
 
-At this time the app uses **only the MEGA cloud synced path** by default: when `NEARBYTES_STORAGE_DIR` is not set, the server uses `$HOME/MEGA/NearbytesStorage` (or the Windows equivalent). There is no fallback to repo-local storage. Nearbytes writes files to that directory, and the MEGA desktop app syncs them to the cloud.
+At this time the app uses **only the MEGA cloud synced path** by default: when `NEARBYTES_STORAGE_DIR` is not set, the server uses `$HOME/MEGA/NearbytesStorage` (or the Windows equivalent). Nearbytes writes files to that directory, and the MEGA desktop app syncs them to the cloud.
 
 **Shared workflow:** The team uses a shared MEGA folder with structure **MEGA** (top level) → **NearbytesStorage** → **blocks**, **channels**. Anyone who clones the repo and is a shared member of that MEGA folder should sync it locally to the standard path (or set `NEARBYTES_STORAGE_DIR`); with the shared secrets they can run the app and see the same photos; new channels and uploads sync via MEGA.
 

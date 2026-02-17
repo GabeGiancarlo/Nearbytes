@@ -197,7 +197,7 @@ The server runs on `http://localhost:3000` by default.
 Environment variables:
 
 - `PORT` (default: `3000`) - Server port
-- `NEARBYTES_STORAGE_DIR` (default: `$HOME/MEGA/NearbytesStorage` on macOS/Linux, `%USERPROFILE%\MEGA\NearbytesStorage` on Windows) - Storage directory. **Single source of truth** for where the server reads/writes `channels/` and `blocks/`. At this time the app uses only the MEGA cloud synced path by default; no repo-local fallback. Set this only if your MEGA folder is in a different location (see below).
+- `NEARBYTES_STORAGE_DIR` (default: `$HOME/MEGA/NearbytesStorage` on macOS/Linux, `%USERPROFILE%\MEGA\NearbytesStorage` on Windows) - Storage directory. **Single source of truth** for where the server reads/writes `channels/` and `blocks/`. At this time the app uses only the MEGA cloud synced path by default. Set this only if your MEGA folder is in a different location (see below).
 - `NEARBYTES_SERVER_TOKEN_KEY` (optional) - 32-byte key (hex or base64) to enable Bearer tokens
 - `NEARBYTES_CORS_ORIGIN` (default: `http://localhost:5173`) - CORS origin
 - `NEARBYTES_MAX_UPLOAD_MB` (default: `50`) - Maximum upload size in MB

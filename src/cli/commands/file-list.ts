@@ -6,6 +6,7 @@ import { openVolume, materializeVolume, listFiles } from '../../domain/volume.js
 import { green, red, yellow } from '../output/colors.js';
 import { validateSecret } from '../validation.js';
 import { defaultPathMapper } from '../../types/storage.js';
+import { getDefaultStorageDir } from '../../storagePath.js';
 
 export interface FileListOptions {
   secret: string;
@@ -25,7 +26,7 @@ export async function handleFileList(options: FileListOptions): Promise<void> {
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
+    const storage = new FilesystemStorageBackend(options.dataDir ?? getDefaultStorageDir());
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Open volume
@@ -83,7 +84,7 @@ export function registerFileListCommand(program: Command): void {
     .alias('file ls')
     .description('List all files in a volume')
     .requiredOption('-s, --secret <secret>', 'Volume secret')
-    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
+    .option('-d, --data-dir <path>', 'Storage directory (default: MEGA cloud path)', getDefaultStorageDir())
     .option('-f, --format <format>', 'Output format (table, json, plain)', 'table')
     .action(handleFileList);
 }

@@ -9,6 +9,7 @@ import { storeData } from '../../domain/operations.js';
 import { green, red } from '../output/colors.js';
 import { validateSecret, validateFilePath } from '../validation.js';
 import { defaultPathMapper } from '../../types/storage.js';
+import { getDefaultStorageDir } from '../../storagePath.js';
 
 export interface FileAddOptions {
   path: string;
@@ -39,7 +40,7 @@ export async function handleFileAdd(options: FileAddOptions): Promise<void> {
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
+    const storage = new FilesystemStorageBackend(options.dataDir ?? getDefaultStorageDir());
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Open volume (ensures it exists)
@@ -73,6 +74,6 @@ export function registerFileAddCommand(program: Command): void {
     .requiredOption('-p, --path <path>', 'Path to file to add')
     .requiredOption('-s, --secret <secret>', 'Volume secret')
     .option('-n, --name <name>', 'File name in volume (defaults to basename of path)')
-    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
+    .option('-d, --data-dir <path>', 'Storage directory (default: MEGA cloud path)', getDefaultStorageDir())
     .action(handleFileAdd);
 }

@@ -1,6 +1,6 @@
 /**
  * Storage diagnostics: resolve storage root, count channels/blocks, and optionally
- * warn when using repo-local storage while MEGA-like paths exist.
+ * warn when the storage path looks like it is inside the repo instead of a MEGA sync folder.
  * No secrets, keys, or decrypted content are read or logged.
  */
 
@@ -175,7 +175,7 @@ export async function getChannelDiagnostics(
 }
 
 /**
- * Log diagnostics at server startup and warn if using repo-local storage while MEGA candidates exist.
+ * Log diagnostics at server startup and warn if storage path appears to be inside the repo rather than MEGA.
  */
 export function logStorageDiagnostics(result: StorageDiagnosticsResult): void {
   console.log('[storage] resolved storageDir (absolute):', result.storageDirAbs);
@@ -187,14 +187,13 @@ export function logStorageDiagnostics(result: StorageDiagnosticsResult): void {
   console.log('[storage] blocks exists:', result.blocksDirExists);
   console.log('[storage] blocks *.bin count:', result.blocksCount);
 
-  const looksRepoLocal =
-    result.storageDirAbs.includes('nearbytes-storage') ||
+  const looksInsideRepo =
     result.storageDirAbs.endsWith('/Nearbytes') ||
     result.storageDirAbs.endsWith('/Nearbytes/');
 
-  if (looksRepoLocal && result.megaHints.found && result.megaHints.candidates.length > 0) {
+  if (looksInsideRepo && result.megaHints.found && result.megaHints.candidates.length > 0) {
     console.warn(
-      '[storage] WARNING: Server is using repo-local storage. If you expect MEGA sync, set NEARBYTES_STORAGE_DIR to your MEGA sync folder (e.g. $HOME/MEGA/NearbytesStorage/NearbytesStorage or a path under: ' +
+      '[storage] WARNING: Storage path appears to be inside the repo. For MEGA sync, set NEARBYTES_STORAGE_DIR to your MEGA folder (e.g. $HOME/MEGA/NearbytesStorage or a path under: ' +
         result.megaHints.candidates.join(', ') +
         ').'
     );

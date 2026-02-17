@@ -6,6 +6,7 @@ import { openVolume, materializeVolume } from '../../domain/volume.js';
 import { green, red, yellow } from '../output/colors.js';
 import { validateSecret } from '../validation.js';
 import { defaultPathMapper } from '../../types/storage.js';
+import { getDefaultStorageDir } from '../../storagePath.js';
 
 export interface VolumeOpenOptions {
   secret: string;
@@ -23,7 +24,7 @@ export async function handleVolumeOpen(options: VolumeOpenOptions): Promise<void
 
     // Initialize crypto and storage
     const crypto = createCryptoOperations();
-    const storage = new FilesystemStorageBackend(options.dataDir || './nearbytes-storage');
+    const storage = new FilesystemStorageBackend(options.dataDir ?? getDefaultStorageDir());
     const channelStorage = new ChannelStorage(storage, defaultPathMapper);
 
     // Open volume
@@ -64,6 +65,6 @@ export function registerVolumeOpenCommand(program: Command): void {
     .command('volume open')
     .description('Open a volume from a secret and display information')
     .requiredOption('-s, --secret <secret>', 'Volume secret')
-    .option('-d, --data-dir <path>', 'Data directory path', './nearbytes-storage')
+    .option('-d, --data-dir <path>', 'Storage directory (default: MEGA cloud path)', getDefaultStorageDir())
     .action(handleVolumeOpen);
 }

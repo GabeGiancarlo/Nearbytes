@@ -88,7 +88,7 @@ ls -la "$HOME/MEGA/NearbytesStorage/channels" 2>/dev/null | head || echo "Channe
 
 ## Step 3: Storage Directory (default is MEGA path only)
 
-The app uses only the MEGA cloud synced path by default: when `NEARBYTES_STORAGE_DIR` is not set, it uses `$HOME/MEGA/NearbytesStorage` (or the Windows equivalent). No repo-local fallback.
+The app uses only the MEGA cloud synced path by default: when `NEARBYTES_STORAGE_DIR` is not set, it uses `$HOME/MEGA/NearbytesStorage` (or the Windows equivalent).
 
 **If your MEGA folder is at the standard path:** You do not need to set anything; just run the app.
 
