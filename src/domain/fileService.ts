@@ -7,6 +7,7 @@ import { createEncryptedData, EMPTY_HASH, EventType } from '../types/events.js';
 import { createCryptoOperations } from '../crypto/index.js';
 import { FilesystemStorageBackend } from '../storage/filesystem.js';
 import { ChannelStorage } from '../storage/channel.js';
+import { getDefaultStorageDir } from '../storagePath.js';
 import { defaultPathMapper } from '../types/storage.js';
 import { serializeEventPayload } from '../storage/serialization.js';
 import { openVolume, loadEventLog, verifyEventLog } from './volume.js';
@@ -124,9 +125,7 @@ export async function getFile(secret: string, blobHash: string): Promise<Buffer>
 
 function getDefaultFileService(): FileService {
   if (!defaultFileService) {
-    const storageDir = typeof process !== 'undefined' && process.env?.NEARBYTES_STORAGE_DIR
-      ? process.env.NEARBYTES_STORAGE_DIR
-      : './nearbytes-storage';
+    const storageDir = getDefaultStorageDir();
     defaultFileService = createFileService({
       crypto: createCryptoOperations(),
       storage: new FilesystemStorageBackend(storageDir),

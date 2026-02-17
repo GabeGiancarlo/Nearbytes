@@ -4,11 +4,13 @@ This guide explains how Nearbytes integrates with MEGA desktop sync folder to pr
 
 ## Overview
 
-Nearbytes uses MEGA's desktop sync folder feature to automatically sync encrypted blobs and event logs to the cloud. The MEGA desktop app handles all sync operations—Nearbytes simply writes files to the configured directory, and MEGA syncs them automatically.
+At this time the app uses **only the MEGA cloud synced path** by default: when `NEARBYTES_STORAGE_DIR` is not set, the server uses `$HOME/MEGA/NearbytesStorage` (or the Windows equivalent). There is no fallback to repo-local storage. Nearbytes writes files to that directory, and the MEGA desktop app syncs them to the cloud.
+
+**Shared workflow:** The team uses a shared MEGA folder with structure **MEGA** (top level) → **NearbytesStorage** → **blocks**, **channels**. Anyone who clones the repo and is a shared member of that MEGA folder should sync it locally to the standard path (or set `NEARBYTES_STORAGE_DIR`); with the shared secrets they can run the app and see the same photos; new channels and uploads sync via MEGA.
 
 ## Storage Structure
 
-When you configure `NEARBYTES_STORAGE_DIR` to point to a MEGA sync folder, Nearbytes writes the following structure:
+When the app uses the default path or you set `NEARBYTES_STORAGE_DIR` to a MEGA sync folder, Nearbytes writes the following structure:
 
 ```
 $HOME/MEGA/NearbytesStorage/
@@ -54,7 +56,7 @@ mkdir -p "$HOME/MEGA/NearbytesStorage"
 
 ### 3. Configure Nearbytes
 
-Set the environment variable before starting the server:
+If your MEGA folder is at the standard path (`$HOME/MEGA/NearbytesStorage`), no environment variable is needed—the app uses it by default. If your MEGA folder is elsewhere, set the environment variable before starting the server:
 
 ```bash
 export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"

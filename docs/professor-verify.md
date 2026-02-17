@@ -86,11 +86,11 @@ ls -la "$HOME/MEGA/NearbytesStorage/channels" 2>/dev/null | head || echo "Channe
 - In MEGA Settings → Syncs, verify you have a sync for ONLY `NearbytesStorage`
 - If using a different sync location, note the path for Step 3
 
-## Step 3: Set Storage Directory
+## Step 3: Storage Directory (default is MEGA path only)
 
-```bash
-export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
-```
+The app uses only the MEGA cloud synced path by default: when `NEARBYTES_STORAGE_DIR` is not set, it uses `$HOME/MEGA/NearbytesStorage` (or the Windows equivalent). No repo-local fallback.
+
+**If your MEGA folder is at the standard path:** You do not need to set anything; just run the app.
 
 **If your MEGA folder is in a different location:**
 ```bash

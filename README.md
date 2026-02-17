@@ -185,7 +185,8 @@ Bearer token derived from the secret.
 ```bash
 npm install
 npm run build
-export NEARBYTES_STORAGE_DIR="./nearbytes-storage"  # Optional, defaults to ./nearbytes-storage
+# Optional: set only if your MEGA folder is elsewhere (default is $HOME/MEGA/NearbytesStorage)
+# export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
 npm run server
 ```
 
@@ -196,12 +197,14 @@ The server runs on `http://localhost:3000` by default.
 Environment variables:
 
 - `PORT` (default: `3000`) - Server port
-- `NEARBYTES_STORAGE_DIR` (default: `./nearbytes-storage`) - Storage directory. **Single source of truth** for where the server reads/writes `channels/` and `blocks/`. Set this to your MEGA sync folder when using MEGA (see below).
+- `NEARBYTES_STORAGE_DIR` (default: `$HOME/MEGA/NearbytesStorage` on macOS/Linux, `%USERPROFILE%\MEGA\NearbytesStorage` on Windows) - Storage directory. **Single source of truth** for where the server reads/writes `channels/` and `blocks/`. At this time the app uses only the MEGA cloud synced path by default; no repo-local fallback. Set this only if your MEGA folder is in a different location (see below).
 - `NEARBYTES_SERVER_TOKEN_KEY` (optional) - 32-byte key (hex or base64) to enable Bearer tokens
 - `NEARBYTES_CORS_ORIGIN` (default: `http://localhost:5173`) - CORS origin
 - `NEARBYTES_MAX_UPLOAD_MB` (default: `50`) - Maximum upload size in MB
 
-**Setting storage for MEGA (macOS / Linux / WSL):**
+**Shared cloud structure:** The team uses a shared MEGA folder with structure **MEGA** (top level) → **NearbytesStorage** → **blocks**, **channels**. Anyone who clones the repo and is a shared member of that MEGA folder should sync it locally to the standard path (or set `NEARBYTES_STORAGE_DIR`); with the shared secrets they can run the app and see the same photos; new channels and uploads sync via MEGA.
+
+**Setting storage when MEGA is elsewhere (macOS / Linux / WSL):**
 ```bash
 export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
 ```
@@ -273,7 +276,7 @@ Nearbytes includes a modern web UI built with Svelte 5 that provides a beautiful
 
 **Option 1: Run both server and UI together (recommended):**
 ```bash
-export NEARBYTES_STORAGE_DIR="./nearbytes-storage"  # Or your MEGA folder
+# Storage defaults to $HOME/MEGA/NearbytesStorage; set NEARBYTES_STORAGE_DIR only if your MEGA folder is elsewhere
 npm run dev
 ```
 

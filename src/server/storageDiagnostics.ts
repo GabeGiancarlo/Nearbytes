@@ -194,7 +194,7 @@ export function logStorageDiagnostics(result: StorageDiagnosticsResult): void {
 
   if (looksRepoLocal && result.megaHints.found && result.megaHints.candidates.length > 0) {
     console.warn(
-      '[storage] WARNING: Server is using repo-local storage. If you expect MEGA sync, set NEARBYTES_STORAGE_DIR to your MEGA sync folder (e.g. $HOME/MEGA/NearbytesStorage or a path under: ' +
+      '[storage] WARNING: Server is using repo-local storage. If you expect MEGA sync, set NEARBYTES_STORAGE_DIR to your MEGA sync folder (e.g. $HOME/MEGA/NearbytesStorage/NearbytesStorage or a path under: ' +
         result.megaHints.candidates.join(', ') +
         ').'
     );

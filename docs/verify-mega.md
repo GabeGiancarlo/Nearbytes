@@ -33,15 +33,18 @@ mkdir -p "$HOME/MEGA/NearbytesStorage"
 
 ### Step 3: Start Backend with MEGA Storage
 
+Storage defaults to `$HOME/MEGA/NearbytesStorage`; set `NEARBYTES_STORAGE_DIR` only if your MEGA folder is elsewhere.
+
 ```bash
-export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
+# Optional: only if MEGA folder is not at $HOME/MEGA/NearbytesStorage
+# export NEARBYTES_STORAGE_DIR="$HOME/MEGA/NearbytesStorage"
 npm run build
 npm run server
 ```
 
 **Verify:**
 - Server starts without errors
-- Console shows: `Using storage dir: /Users/yourname/MEGA/NearbytesStorage`
+- Console shows: `Using storage dir: /Users/yourname/MEGA/NearbytesStorage` (or your custom path)
 - Console shows: `Nearbytes API server running at http://localhost:3000`
 
 ### Step 4: Start UI

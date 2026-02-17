@@ -120,7 +120,7 @@ Returns raw bytes (not JSON).
 Environment variables:
 
 - `PORT` (default `3000`)
-- `NEARBYTES_STORAGE_DIR` (default `./nearbytes-storage`)
+- `NEARBYTES_STORAGE_DIR` (default `$HOME/MEGA/NearbytesStorage` on macOS/Linux, `%USERPROFILE%\MEGA\NearbytesStorage` on Windows; no repo-local fallback)
 - `NEARBYTES_SERVER_TOKEN_KEY` (optional; enables Bearer tokens)
 - `NEARBYTES_CORS_ORIGIN` (default `http://localhost:5173`, use `*` for any origin)
 - `NEARBYTES_MAX_UPLOAD_MB` (default `50`)

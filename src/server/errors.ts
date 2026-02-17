@@ -76,7 +76,11 @@ function toApiError(error: unknown): ApiError {
     if (/not found/i.test(error.message)) {
       return new ApiError(404, 'NOT_FOUND', 'Blob not found');
     }
-    return new ApiError(500, 'INTERNAL_ERROR', 'Storage error');
+    // Surface the underlying storage message so the UI can show e.g. permission/path errors
+    const message = error.message && error.message.length > 0
+      ? error.message
+      : 'Storage error';
+    return new ApiError(500, 'INTERNAL_ERROR', message);
   }
 
   if (error instanceof MulterError) {

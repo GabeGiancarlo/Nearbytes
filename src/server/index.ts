@@ -3,6 +3,7 @@
 import path from 'path';
 import { createCryptoOperations } from '../crypto/index.js';
 import { createFileService } from '../domain/fileService.js';
+import { getDefaultStorageDir } from '../storagePath.js';
 import { FilesystemStorageBackend } from '../storage/filesystem.js';
 import { createApp } from './app.js';
 import { parseTokenKey } from './auth.js';
@@ -12,7 +13,7 @@ import {
 } from './storageDiagnostics.js';
 
 const port = parsePort(process.env.PORT);
-const storageDirRaw = process.env.NEARBYTES_STORAGE_DIR ?? './nearbytes-storage';
+const storageDirRaw = getDefaultStorageDir();
 const storageDir = path.resolve(storageDirRaw);
 const corsOrigin = parseCorsOrigin(process.env.NEARBYTES_CORS_ORIGIN ?? 'http://localhost:5173');
 const maxUploadBytes = parseMaxUploadBytes(process.env.NEARBYTES_MAX_UPLOAD_MB);
@@ -28,6 +29,10 @@ async function main(): Promise<void> {
   console.log(`Using storage dir: ${storageDir}`);
   const diagnostics = await getStorageDiagnostics(storageDir);
   logStorageDiagnostics(diagnostics);
+
+  // Ensure channels/ and blocks/ exist and are writable (fail fast if path wrong or read-only)
+  await storage.createDirectory('channels');
+  await storage.createDirectory('blocks');
 
   const app = createApp({
     fileService,
