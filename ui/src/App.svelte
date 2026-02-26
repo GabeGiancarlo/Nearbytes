@@ -2,8 +2,50 @@
   import { openVolume, listFiles, uploadFiles, deleteFile, downloadFile, type Auth, type FileMetadata } from './lib/api.js';
   import { getCachedFiles, setCachedFiles, getCacheTimestamp } from './lib/cache.js';
 
-  // State
-  let currentSecret = $state('');
+  const ADDRESS_SECRETS_KEY = 'nearbytes-address-secrets';
+
+  function getStoredSecret(addr: string): string {
+    try {
+      const raw = localStorage.getItem(ADDRESS_SECRETS_KEY);
+      if (!raw) return '';
+      const obj = JSON.parse(raw) as Record<string, string>;
+      return obj[addr] ?? '';
+    } catch {
+      return '';
+    }
+  }
+
+  function setStoredSecret(addr: string, secret: string): void {
+    try {
+      const raw = localStorage.getItem(ADDRESS_SECRETS_KEY);
+      const obj = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+      obj[addr] = secret;
+      localStorage.setItem(ADDRESS_SECRETS_KEY, JSON.stringify(obj));
+    } catch {
+      // ignore
+    }
+  }
+
+  function clearStoredSecret(addr: string): void {
+    try {
+      const raw = localStorage.getItem(ADDRESS_SECRETS_KEY);
+      if (!raw) return;
+      const obj = JSON.parse(raw) as Record<string, string>;
+      delete obj[addr];
+      localStorage.setItem(ADDRESS_SECRETS_KEY, JSON.stringify(obj));
+    } catch {
+      // ignore
+    }
+  }
+
+  // State: address = main input; effectiveSecret = sent to API
+  let address = $state('');
+  let effectiveSecret = $state('');
+  let unlockedAddress = $state('');
+  let showSecretModal = $state(false);
+  let secretModalMode = $state<'remembered' | 'unlock_with_secret'>('remembered');
+  let secretInput = $state('');
+  let modalError = $state('');
   let fileList = $state<FileMetadata[]>([]);
   let volumeId = $state<string | null>(null);
   let auth = $state<Auth | null>(null);
@@ -13,76 +55,91 @@
   let isOffline = $state(false);
   let lastRefresh = $state<number | null>(null);
   let copiedVolumeId = $state(false);
+  let wasNewVolume = $state(false); // opened with address, fileCount === 0; after first upload show "Set secret"
+  let showSetSecretModal = $state(false);
+  let setSecretInput = $state('');
+  // When address has files but no stored secret: hold data until they set a secret to view
+  let pendingUnlockData = $state<{ auth: Auth; volumeId: string; files: FileMetadata[] } | null>(null);
+  let showSetSecretToViewModal = $state(false);
+  let setSecretToViewInput = $state('');
 
-  // Debounce timer reference
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-  // Reactive: Load files when secret changes (debounced)
   $effect(() => {
-    const secret = currentSecret.trim();
-
-    // Clear existing timer
+    const a = address.trim();
     if (debounceTimer) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
-
-    if (secret === '') {
+    if (a === '') {
+      effectiveSecret = '';
+      unlockedAddress = '';
+      showSecretModal = false;
+      showSetSecretModal = false;
+      pendingUnlockData = null;
+      showSetSecretToViewModal = false;
       fileList = [];
       volumeId = null;
       auth = null;
       lastRefresh = null;
       isOffline = false;
       isLoading = false;
+      wasNewVolume = false;
       return;
     }
-
-    // Debounce: wait 500ms after user stops typing before loading
     debounceTimer = setTimeout(() => {
-      loadVolume();
+      tryOpenAddress(a);
+      debounceTimer = null;
     }, 500);
-
-    // Cleanup function
     return () => {
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
-        debounceTimer = null;
-      }
+      if (debounceTimer) clearTimeout(debounceTimer);
     };
   });
 
-  // Load volume with optimistic caching
-  async function loadVolume() {
-    const secret = currentSecret.trim();
-    if (!secret) return;
-
+  async function tryOpenAddress(a: string) {
+    if (!a) return;
+    const stored = getStoredSecret(a);
+    if (stored) {
+      showSecretModal = true;
+      secretModalMode = 'remembered';
+      modalError = '';
+      secretInput = '';
+      return;
+    }
     isLoading = true;
     errorMessage = '';
+    modalError = '';
     isOffline = false;
-
+    pendingUnlockData = null;
+    showSetSecretToViewModal = false;
     try {
-      // Open volume (this returns files + optional token)
-      const response = await openVolume(secret);
-
-      // Store auth for subsequent requests
+      const response = await openVolume(a);
+      const authResult = response.token
+        ? { type: 'token' as const, token: response.token }
+        : { type: 'secret' as const, secret: a };
       if (response.token) {
-        auth = { type: 'token', token: response.token };
-        // Store token in sessionStorage (not localStorage for security)
         sessionStorage.setItem('nearbytes-token', response.token);
       } else {
-        auth = { type: 'secret', secret };
         sessionStorage.removeItem('nearbytes-token');
       }
-
+      auth = authResult;
       volumeId = response.volumeId;
-      fileList = response.files;
       lastRefresh = Date.now();
       errorMessage = response.storageHint ?? '';
-
-      // Cache the file list
-      await setCachedFiles(volumeId, response.files);
+      effectiveSecret = a;
+      unlockedAddress = a;
+      if (response.fileCount > 0) {
+        wasNewVolume = false;
+        // Address has files but no stored secret: require setting a secret before showing files
+        fileList = [];
+        pendingUnlockData = { auth: authResult, volumeId: response.volumeId, files: response.files };
+        showSetSecretToViewModal = true;
+        setSecretToViewInput = '';
+      } else {
+        wasNewVolume = true;
+        fileList = [];
+        await setCachedFiles(response.volumeId, response.files);
+      }
     } catch (error) {
-      // On error, try to show cached data
       if (volumeId) {
         const cached = await getCachedFiles(volumeId);
         if (cached) {
@@ -101,6 +158,186 @@
       isLoading = false;
     }
   }
+
+  $effect(() => {
+    const a = address.trim();
+    if (a !== '' && a !== unlockedAddress && effectiveSecret !== '') {
+      effectiveSecret = '';
+      unlockedAddress = '';
+      auth = null;
+      volumeId = null;
+      fileList = [];
+      lastRefresh = null;
+      wasNewVolume = false;
+      showSecretModal = false;
+      showSetSecretModal = false;
+      pendingUnlockData = null;
+      showSetSecretToViewModal = false;
+      modalError = '';
+      secretInput = '';
+    }
+  });
+
+  // Load volume with effective secret (called after Unlock)
+  async function loadVolume(secret: string) {
+    if (!secret) return;
+    isLoading = true;
+    errorMessage = '';
+    modalError = '';
+    isOffline = false;
+    try {
+      const response = await openVolume(secret);
+      if (response.token) {
+        auth = { type: 'token', token: response.token };
+        sessionStorage.setItem('nearbytes-token', response.token);
+      } else {
+        auth = { type: 'secret', secret };
+        sessionStorage.removeItem('nearbytes-token');
+      }
+      volumeId = response.volumeId;
+      fileList = response.files;
+      lastRefresh = Date.now();
+      errorMessage = response.storageHint ?? '';
+      await setCachedFiles(volumeId, response.files);
+    } catch (error) {
+      if (volumeId) {
+        const cached = await getCachedFiles(volumeId);
+        if (cached) {
+          fileList = cached;
+          isOffline = true;
+          errorMessage = 'Using cached data. Backend unavailable.';
+        } else {
+          errorMessage = error instanceof Error ? error.message : 'Failed to load volume';
+          fileList = [];
+        }
+      } else {
+        errorMessage = error instanceof Error ? error.message : 'Failed to load volume';
+        fileList = [];
+      }
+      throw error;
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  function handleUnlock() {
+    const a = address.trim();
+    if (!a) return;
+    const secret = secretInput.trim();
+    modalError = '';
+    if (secretModalMode === 'remembered') {
+      const stored = getStoredSecret(a);
+      if (stored !== secret) {
+        modalError = 'Wrong secret';
+        return;
+      }
+      (async () => {
+        try {
+          await loadVolume(a);
+          effectiveSecret = a;
+          unlockedAddress = a;
+          showSecretModal = false;
+          secretInput = '';
+        } catch (err) {
+          modalError = err instanceof Error ? err.message : 'Failed to open';
+        }
+      })();
+      return;
+    }
+    const composite = `${a}:${secret}`;
+    (async () => {
+      try {
+        await loadVolume(composite);
+        effectiveSecret = composite;
+        unlockedAddress = a;
+        showSecretModal = false;
+        secretInput = '';
+      } catch (err) {
+        modalError = err instanceof Error ? err.message : 'Failed to unlock';
+      }
+    })();
+  }
+
+  function handleCancelModal() {
+    showSecretModal = false;
+    modalError = '';
+    secretInput = '';
+  }
+
+  function openUnlockWithSecretModal() {
+    secretModalMode = 'unlock_with_secret';
+    secretInput = '';
+    modalError = '';
+    showSecretModal = true;
+  }
+
+  function handleSetSecretConfirm() {
+    const a = address.trim();
+    const secret = setSecretInput.trim();
+    if (!a || !secret) return;
+    setStoredSecret(a, secret);
+    showSetSecretModal = false;
+    setSecretInput = '';
+  }
+
+  function handleSetSecretSkip() {
+    showSetSecretModal = false;
+    setSecretInput = '';
+  }
+
+  async function handleSetSecretToViewConfirm() {
+    const a = address.trim();
+    const secret = setSecretToViewInput.trim();
+    if (!a || !secret || !pendingUnlockData) return;
+    setStoredSecret(a, secret);
+    fileList = pendingUnlockData.files;
+    await setCachedFiles(pendingUnlockData.volumeId, pendingUnlockData.files);
+    pendingUnlockData = null;
+    showSetSecretToViewModal = false;
+    setSecretToViewInput = '';
+  }
+
+  function handleSetSecretToViewKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      showSetSecretToViewModal = false;
+      setSecretToViewInput = '';
+      pendingUnlockData = null;
+      fileList = [];
+      auth = null;
+      volumeId = null;
+      effectiveSecret = '';
+      unlockedAddress = '';
+    }
+  }
+
+  $effect(() => {
+    if (showSetSecretToViewModal) {
+      const t = setTimeout(() => document.getElementById('set-secret-to-view-input')?.focus(), 50);
+      return () => clearTimeout(t);
+    }
+  });
+
+  function handleModalKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      handleCancelModal();
+    }
+  }
+
+  // Focus secret input when unlock modal opens
+  $effect(() => {
+    if (showSecretModal) {
+      const t = setTimeout(() => document.getElementById('unlock-secret-input')?.focus(), 50);
+      return () => clearTimeout(t);
+    }
+  });
+
+  // Focus secret input when set-secret modal opens
+  $effect(() => {
+    if (showSetSecretModal) {
+      const t = setTimeout(() => document.getElementById('set-secret-input')?.focus(), 50);
+      return () => clearTimeout(t);
+    }
+  });
 
   // Refresh file list
   async function refreshFiles() {
@@ -143,8 +380,8 @@
     e.preventDefault();
     isDragging = false;
 
-    if (!auth || !currentSecret.trim()) {
-      errorMessage = 'Please enter a secret first';
+    if (!auth || !effectiveSecret) {
+      errorMessage = 'Please unlock with address and secret first';
       return;
     }
 
@@ -154,8 +391,11 @@
     try {
       errorMessage = '';
       await uploadFiles(auth, files);
-      // Refresh file list
       await refreshFiles();
+      if (wasNewVolume) {
+        wasNewVolume = false;
+        showSetSecretModal = true;
+      }
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Upload failed';
       console.error('Error uploading files:', error);
@@ -255,10 +495,10 @@
       <div class="secret-input-wrapper">
         <input
           type="text"
-          placeholder="Enter secret location..."
-          bind:value={currentSecret}
+          placeholder="Enter address..."
+          bind:value={address}
           class="secret-input"
-          autofocus
+          aria-label="Volume address"
         />
         {#if isLoading}
           <span class="loading-spinner"></span>
@@ -313,7 +553,7 @@
     ondragleave={handleDragLeave}
     ondrop={handleDrop}
   >
-    {#if currentSecret.trim() === ''}
+    {#if address.trim() === ''}
       <!-- Initial state -->
       <div class="empty-state">
         <div class="empty-content">
@@ -322,12 +562,26 @@
             <path d="M8 20V44L32 56L56 44V20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
             <path d="M32 32V56" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
           </svg>
-          <p class="empty-hint">Enter a secret location to access your files</p>
+          <p class="empty-hint">Enter an address to access your files</p>
           <p class="empty-subhint">Or drag and drop files here to create a new volume</p>
         </div>
       </div>
+    {:else if showSecretModal}
+      <!-- Unlock modal is shown; empty state until unlocked -->
+      <div class="empty-state">
+        <div class="empty-content">
+          <p class="empty-hint">Enter secret in the popup to unlock</p>
+        </div>
+      </div>
+    {:else if showSetSecretToViewModal}
+      <!-- Set secret to view modal is shown -->
+      <div class="empty-state">
+        <div class="empty-content">
+          <p class="empty-hint">Set a secret in the popup to view files</p>
+        </div>
+      </div>
     {:else if fileList.length === 0 && !isLoading}
-      <!-- Empty volume -->
+      <!-- Empty volume: drop zone + Unlock with secret -->
       <div class="empty-state">
         <div class="empty-content">
           <svg class="empty-icon" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -337,13 +591,23 @@
           </svg>
           <p class="empty-hint">No files yet</p>
           <p class="empty-subhint">Drop files here to add them</p>
+          <button type="button" class="unlock-with-secret-link" onclick={openUnlockWithSecretModal}>
+            Unlock with secret
+          </button>
         </div>
       </div>
     {:else}
       <!-- File grid -->
       <div class="file-grid">
         {#each fileList as file (file.blobHash)}
-          <div class="file-card" data-filename={file.filename} tabindex="0" role="button" onclick={() => handleDownload(file)}>
+          <div
+            class="file-card"
+            data-filename={file.filename}
+            tabindex="0"
+            role="button"
+            onclick={() => handleDownload(file)}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleDownload(file); } }}
+          >
             <div class="file-icon">
               {#if file.mimeType?.startsWith('image/')}
                 🖼️
@@ -386,6 +650,119 @@
       </div>
     {/if}
   </main>
+
+  <!-- Unlock volume modal -->
+  {#if showSecretModal}
+    <div
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="unlock-modal-title"
+      tabindex="-1"
+      onkeydown={handleModalKeydown}
+    >
+      <div class="modal-content">
+        <h2 id="unlock-modal-title" class="modal-title">
+          {secretModalMode === 'remembered' ? 'Enter secret' : 'Unlock with secret'}
+        </h2>
+        <p class="modal-hint">
+          {#if secretModalMode === 'remembered'}
+            Enter the secret you set for this address. You need it to open this volume.
+          {:else}
+            Enter the secret to open an address:secret volume.
+          {/if}
+        </p>
+        <label for="unlock-secret-input" class="visually-hidden">Secret</label>
+        <input
+          id="unlock-secret-input"
+          type="password"
+          class="modal-input"
+          placeholder="Secret"
+          bind:value={secretInput}
+          aria-label="Secret to unlock volume"
+          onkeydown={(e) => e.key === 'Enter' && handleUnlock()}
+        />
+        {#if modalError}
+          <p class="modal-error" role="alert">{modalError}</p>
+        {/if}
+        <div class="modal-actions">
+          <button type="button" class="modal-btn secondary" onclick={handleCancelModal}>
+            Cancel
+          </button>
+          <button type="button" class="modal-btn primary" onclick={handleUnlock}>
+            Unlock
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Set secret after first upload (new volume) -->
+  {#if showSetSecretModal}
+    <div
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="set-secret-modal-title"
+      tabindex="-1"
+      onkeydown={(e) => e.key === 'Escape' && handleSetSecretSkip()}
+    >
+      <div class="modal-content">
+        <h2 id="set-secret-modal-title" class="modal-title">Set a secret to protect this volume</h2>
+        <p class="modal-hint">You will need this secret next time you open this address. It is stored only on this device.</p>
+        <label for="set-secret-input" class="visually-hidden">Secret</label>
+        <input
+          id="set-secret-input"
+          type="password"
+          class="modal-input"
+          placeholder="Secret"
+          bind:value={setSecretInput}
+          aria-label="Secret to protect volume"
+          onkeydown={(e) => e.key === 'Enter' && handleSetSecretConfirm()}
+        />
+        <div class="modal-actions">
+          <button type="button" class="modal-btn secondary" onclick={handleSetSecretSkip}>
+            Skip
+          </button>
+          <button type="button" class="modal-btn primary" onclick={handleSetSecretConfirm}>
+            Confirm
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Set secret to view files (address has files but no stored secret) -->
+  {#if showSetSecretToViewModal}
+    <div
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="set-secret-to-view-modal-title"
+      tabindex="-1"
+      onkeydown={handleSetSecretToViewKeydown}
+    >
+      <div class="modal-content">
+        <h2 id="set-secret-to-view-modal-title" class="modal-title">Set a secret to view files</h2>
+        <p class="modal-hint">This address has files. Set a secret to unlock and view them. You will need this secret next time you open this address.</p>
+        <label for="set-secret-to-view-input" class="visually-hidden">Secret</label>
+        <input
+          id="set-secret-to-view-input"
+          type="password"
+          class="modal-input"
+          placeholder="Secret"
+          bind:value={setSecretToViewInput}
+          aria-label="Secret to view files"
+          onkeydown={(e) => e.key === 'Enter' && handleSetSecretToViewConfirm()}
+        />
+        <div class="modal-actions">
+          <button type="button" class="modal-btn primary" onclick={handleSetSecretToViewConfirm}>
+            Set secret and view files
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -624,6 +1001,21 @@
     margin: 0;
   }
 
+  .unlock-with-secret-link {
+    margin-top: 1rem;
+    background: none;
+    border: none;
+    color: #667eea;
+    font-size: 0.9375rem;
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 0;
+  }
+
+  .unlock-with-secret-link:hover {
+    color: #5a6fd6;
+  }
+
   /* File grid */
   .file-grid {
     display: grid;
@@ -731,5 +1123,116 @@
   .delete-btn:hover {
     color: #f87171;
     border-color: #f87171;
+  }
+
+  /* Unlock modal */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    padding: 1rem;
+  }
+
+  .modal-content {
+    background: #1a1a2e;
+    border: 1px solid rgba(102, 126, 234, 0.3);
+    border-radius: 12px;
+    padding: 1.5rem;
+    min-width: 320px;
+    max-width: 420px;
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
+  }
+
+  .modal-title {
+    margin: 0 0 0.75rem;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #e0e0e0;
+  }
+
+  .modal-hint {
+    font-size: 0.875rem;
+    color: rgba(224, 224, 224, 0.6);
+    margin: 0 0 1rem;
+    line-height: 1.4;
+  }
+
+  .modal-input {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    font-size: 1rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 2px solid rgba(102, 126, 234, 0.3);
+    border-radius: 8px;
+    color: #e0e0e0;
+    outline: none;
+    margin-bottom: 1rem;
+    box-sizing: border-box;
+  }
+
+  .modal-input:focus {
+    border-color: #667eea;
+  }
+
+  .modal-input::placeholder {
+    color: rgba(224, 224, 224, 0.4);
+  }
+
+  .modal-error {
+    color: #f87171;
+    font-size: 0.875rem;
+    margin: -0.5rem 0 1rem;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: flex-end;
+  }
+
+  .modal-btn {
+    padding: 0.5rem 1.25rem;
+    border-radius: 8px;
+    font-size: 0.9375rem;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .modal-btn.primary {
+    background: #667eea;
+    border: 1px solid #667eea;
+    color: #fff;
+  }
+
+  .modal-btn.primary:hover {
+    background: #5a6fd6;
+    border-color: #5a6fd6;
+  }
+
+  .modal-btn.secondary {
+    background: transparent;
+    border: 1px solid rgba(224, 224, 224, 0.3);
+    color: rgba(224, 224, 224, 0.9);
+  }
+
+  .modal-btn.secondary:hover {
+    border-color: rgba(224, 224, 224, 0.5);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 </style>

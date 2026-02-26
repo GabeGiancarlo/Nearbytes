@@ -6,12 +6,12 @@
 import path from 'path';
 import os from 'os';
 
-/** Standard MEGA sync path: MEGA → NearbytesStorage → blocks, channels (single folder, no nesting). */
-const DEFAULT_MEGA_STORAGE_DIR = path.join(os.homedir(), 'MEGA', 'NearbytesStorage');
+/** Standard MEGA sync path: MEGA → NearbytesStorage → NearbytesStorage → blocks, channels. */
+const DEFAULT_MEGA_STORAGE_DIR = path.join(os.homedir(), 'MEGA', 'NearbytesStorage', 'NearbytesStorage');
 
 /**
  * Returns the storage root directory. If NEARBYTES_STORAGE_DIR is set, uses that;
- * otherwise uses the standard MEGA path ($HOME/MEGA/NearbytesStorage). All data
+ * otherwise uses the standard MEGA path ($HOME/MEGA/NearbytesStorage/NearbytesStorage). All data
  * goes to this cloud-synced folder.
  */
 export function getDefaultStorageDir(): string {
