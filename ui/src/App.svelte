@@ -40,6 +40,7 @@
 
   // State: address = main input; effectiveSecret = sent to API
   let address = $state('');
+  let addressPassword = $state('');
   let effectiveSecret = $state('');
   let unlockedAddress = $state('');
   let showSecretModal = $state(false);
@@ -66,6 +67,7 @@
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
     const a = address.trim();
+    const p = addressPassword.trim();
     if (debounceTimer) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
@@ -87,7 +89,7 @@
       return;
     }
     debounceTimer = setTimeout(() => {
-      tryOpenAddress(a);
+      tryOpenAddress(a, p);
       debounceTimer = null;
     }, 500);
     return () => {
@@ -95,16 +97,32 @@
     };
   });
 
-  async function tryOpenAddress(a: string) {
+  async function tryOpenAddress(a: string, p: string) {
     if (!a) return;
     const stored = getStoredSecret(a);
     if (stored) {
+      if (p && p === stored) {
+        try {
+          await loadVolume(a);
+          effectiveSecret = a;
+          unlockedAddress = a;
+          showSecretModal = false;
+          modalError = '';
+        } catch (err) {
+          modalError = err instanceof Error ? err.message : 'Failed to open';
+          showSecretModal = true;
+          secretModalMode = 'remembered';
+          secretInput = p;
+        }
+        return;
+      }
       showSecretModal = true;
       secretModalMode = 'remembered';
       modalError = '';
-      secretInput = '';
+      secretInput = p;
       return;
     }
+    const openSecret = p ? `${a}:${p}` : a;
     isLoading = true;
     errorMessage = '';
     modalError = '';
@@ -112,10 +130,10 @@
     pendingUnlockData = null;
     showSetSecretToViewModal = false;
     try {
-      const response = await openVolume(a);
+      const response = await openVolume(openSecret);
       const authResult = response.token
         ? { type: 'token' as const, token: response.token }
-        : { type: 'secret' as const, secret: a };
+        : { type: 'secret' as const, secret: openSecret };
       if (response.token) {
         sessionStorage.setItem('nearbytes-token', response.token);
       } else {
@@ -125,15 +143,21 @@
       volumeId = response.volumeId;
       lastRefresh = Date.now();
       errorMessage = response.storageHint ?? '';
-      effectiveSecret = a;
+      effectiveSecret = openSecret;
       unlockedAddress = a;
       if (response.fileCount > 0) {
         wasNewVolume = false;
-        // Address has files but no stored secret: require setting a secret before showing files
-        fileList = [];
-        pendingUnlockData = { auth: authResult, volumeId: response.volumeId, files: response.files };
-        showSetSecretToViewModal = true;
-        setSecretToViewInput = '';
+        if (p) {
+          setStoredSecret(a, p);
+          fileList = response.files;
+          await setCachedFiles(response.volumeId, response.files);
+        } else {
+          // Address has files but no stored secret: require setting a secret before showing files
+          fileList = [];
+          pendingUnlockData = { auth: authResult, volumeId: response.volumeId, files: response.files };
+          showSetSecretToViewModal = true;
+          setSecretToViewInput = '';
+        }
       } else {
         wasNewVolume = true;
         fileList = [];
@@ -265,8 +289,29 @@
   }
 
   function openUnlockWithSecretModal() {
+    const a = address.trim();
+    const p = addressPassword.trim();
+    if (a && p) {
+      const composite = `${a}:${p}`;
+      (async () => {
+        try {
+          await loadVolume(composite);
+          setStoredSecret(a, p);
+          effectiveSecret = composite;
+          unlockedAddress = a;
+          showSecretModal = false;
+          modalError = '';
+        } catch (err) {
+          modalError = err instanceof Error ? err.message : 'Failed to unlock';
+          showSecretModal = true;
+          secretModalMode = 'unlock_with_secret';
+          secretInput = p;
+        }
+      })();
+      return;
+    }
     secretModalMode = 'unlock_with_secret';
-    secretInput = '';
+    secretInput = p;
     modalError = '';
     showSecretModal = true;
   }
@@ -499,6 +544,14 @@
           bind:value={address}
           class="secret-input"
           aria-label="Volume address"
+        />
+        <input
+          type="password"
+          placeholder="Password (optional)"
+          bind:value={addressPassword}
+          class="secret-input password-input"
+          aria-label="Optional volume password"
+          autocomplete="current-password"
         />
         {#if isLoading}
           <span class="loading-spinner"></span>
@@ -766,6 +819,15 @@
 </div>
 
 <style>
+  :global(html, body, #app) {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  :global(*, *::before, *::after) {
+    box-sizing: border-box;
+  }
+
   :global(body) {
     margin: 0;
     padding: 0;
@@ -775,10 +837,11 @@
   }
 
   .app {
-    min-height: 100vh;
+    height: 100dvh;
     display: flex;
     flex-direction: column;
     background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 100%);
+    overflow: hidden;
   }
 
   /* Header */
@@ -798,7 +861,7 @@
     display: flex;
     align-items: center;
     gap: 2rem;
-    flex-wrap: wrap;
+    width: 100%;
   }
 
   .brand {
@@ -825,9 +888,11 @@
 
   .secret-input-wrapper {
     flex: 1;
-    min-width: 300px;
-    max-width: 600px;
-    position: relative;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+    gap: 0.75rem;
+    align-items: center;
   }
 
   .secret-input {
@@ -858,10 +923,7 @@
   }
 
   .loading-spinner {
-    position: absolute;
-    right: 1rem;
-    top: 50%;
-    transform: translateY(-50%);
+    justify-self: center;
     width: 16px;
     height: 16px;
     border: 2px solid rgba(102, 126, 234, 0.3);
@@ -871,7 +933,7 @@
   }
 
   @keyframes spin {
-    to { transform: translateY(-50%) rotate(360deg); }
+    to { transform: rotate(360deg); }
   }
 
   /* Status bar */
@@ -958,8 +1020,9 @@
   /* File area */
   .file-area {
     flex: 1;
+    min-height: 0;
     padding: 2rem;
-    overflow-y: auto;
+    overflow: hidden;
     transition: background-color 0.3s ease;
   }
 
@@ -1023,6 +1086,8 @@
     gap: 1.25rem;
     max-width: 1200px;
     margin: 0 auto;
+    max-height: 100%;
+    overflow: hidden;
   }
 
   .file-card {
@@ -1234,5 +1299,29 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+  }
+
+  @media (max-width: 900px) {
+    .header {
+      padding: 1rem;
+    }
+
+    .header-content {
+      gap: 1rem;
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .secret-input-wrapper {
+      grid-template-columns: 1fr 1fr auto;
+    }
+
+    .status-bar {
+      padding: 0.75rem 1rem;
+    }
+
+    .file-area {
+      padding: 1rem;
+    }
   }
 </style>
