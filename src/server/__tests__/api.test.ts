@@ -13,6 +13,8 @@ const SECRET_OPEN = 'nearbytes-open-secret';
 const SECRET_UPLOAD = 'nearbytes-upload-secret';
 const SECRET_ISOLATION = 'nearbytes-isolation-secret';
 const SECRET_OTHER = 'nearbytes-other-secret';
+const SECRET_SNAPSHOT = 'nearbytes-snapshot-secret';
+const SECRET_TIMELINE = 'nearbytes-timeline-secret';
 
 describe('Nearbytes API', () => {
   let tempDir: string;
@@ -145,5 +147,66 @@ describe('Nearbytes API', () => {
       .expect(401);
 
     expect(badDownload.body.error.code).toBe('UNAUTHORIZED');
+  });
+
+  it('computes snapshots on demand', async () => {
+    const openRes = await request(app).post('/open').send({ secret: SECRET_SNAPSHOT }).expect(200);
+    const token = openRes.body.token as string;
+
+    await request(app)
+      .post('/upload')
+      .set('Authorization', `Bearer ${token}`)
+      .attach('file', Buffer.from('snapshot payload'), 'snapshot.txt')
+      .expect(200);
+
+    const snapshotRes = await request(app)
+      .post('/snapshot')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(snapshotRes.body.snapshot).toBeDefined();
+    expect(snapshotRes.body.snapshot.fileCount).toBe(1);
+    expect(snapshotRes.body.snapshot.eventCount).toBe(1);
+    expect(snapshotRes.body.snapshot.generatedAt).toBeTypeOf('number');
+    expect(snapshotRes.body.snapshot.lastEventHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('returns timeline events in chronological order', async () => {
+    const openRes = await request(app).post('/open').send({ secret: SECRET_TIMELINE }).expect(200);
+    const token = openRes.body.token as string;
+
+    await request(app)
+      .post('/upload')
+      .set('Authorization', `Bearer ${token}`)
+      .attach('file', Buffer.from('alpha'), 'a.txt')
+      .expect(200);
+
+    await request(app)
+      .post('/upload')
+      .set('Authorization', `Bearer ${token}`)
+      .attach('file', Buffer.from('beta'), 'b.txt')
+      .expect(200);
+
+    await request(app)
+      .delete(`/files/${encodeURIComponent('a.txt')}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    const timelineRes = await request(app)
+      .get('/timeline')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(timelineRes.body.eventCount).toBe(3);
+    expect(timelineRes.body.events).toHaveLength(3);
+    expect(timelineRes.body.events[0].type).toBe('CREATE_FILE');
+    expect(timelineRes.body.events[1].type).toBe('CREATE_FILE');
+    expect(timelineRes.body.events[2].type).toBe('DELETE_FILE');
+    expect(timelineRes.body.events[0].timestamp).toBeLessThanOrEqual(
+      timelineRes.body.events[1].timestamp
+    );
+    expect(timelineRes.body.events[1].timestamp).toBeLessThanOrEqual(
+      timelineRes.body.events[2].timestamp
+    );
   });
 });

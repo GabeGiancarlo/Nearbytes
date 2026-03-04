@@ -31,6 +31,35 @@ export interface UploadResponse {
   created: FileMetadata;
 }
 
+export interface SnapshotSummary {
+  generatedAt: number;
+  eventCount: number;
+  fileCount: number;
+  lastEventHash: string | null;
+}
+
+export interface SnapshotResponse {
+  snapshot: SnapshotSummary;
+}
+
+export interface TimelineEvent {
+  eventHash: string;
+  type: 'CREATE_FILE' | 'DELETE_FILE';
+  filename: string;
+  timestamp: number;
+  blobHash?: string;
+  size?: number;
+  mimeType?: string;
+  createdAt?: number;
+  deletedAt?: number;
+}
+
+export interface TimelineResponse {
+  volumeId: string;
+  eventCount: number;
+  events: TimelineEvent[];
+}
+
 export interface ApiError {
   error: {
     code: string;
@@ -140,6 +169,16 @@ export async function listFiles(auth: Auth): Promise<ListFilesResponse> {
 }
 
 /**
+ * Returns a deterministic timeline of file events for the current volume.
+ */
+export async function getTimeline(auth: Auth): Promise<TimelineResponse> {
+  return apiRequest<TimelineResponse>('/timeline', {
+    method: 'GET',
+    auth,
+  });
+}
+
+/**
  * Uploads one or more files using multipart/form-data.
  * Returns array of created file metadata.
  */
@@ -174,6 +213,16 @@ export async function deleteFile(auth: Auth, filename: string): Promise<void> {
   const encodedName = encodeURIComponent(filename);
   await apiRequest(`/files/${encodedName}`, {
     method: 'DELETE',
+    auth,
+  });
+}
+
+/**
+ * Computes and persists a snapshot for the current volume on demand.
+ */
+export async function computeSnapshot(auth: Auth): Promise<SnapshotResponse> {
+  return apiRequest<SnapshotResponse>('/snapshot', {
+    method: 'POST',
     auth,
   });
 }

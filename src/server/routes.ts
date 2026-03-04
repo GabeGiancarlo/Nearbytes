@@ -135,6 +135,31 @@ export function createRoutes(deps: RouteDependencies): Router {
     })
   );
 
+  router.get(
+    '/timeline',
+    requireSecret(deps),
+    asyncHandler(async (_req, res) => {
+      const secret = res.locals.secret as string;
+      const volumeId = await getVolumeId(secret, deps.crypto, deps.storage);
+      const events = await deps.fileService.getTimeline(secret);
+      res.json({
+        volumeId,
+        eventCount: events.length,
+        events,
+      });
+    })
+  );
+
+  router.post(
+    '/snapshot',
+    requireSecret(deps),
+    asyncHandler(async (_req, res) => {
+      const secret = res.locals.secret as string;
+      const snapshot = await deps.fileService.computeSnapshot(secret);
+      res.json({ snapshot });
+    })
+  );
+
   router.post(
     '/upload',
     requireSecret(deps),

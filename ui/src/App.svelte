@@ -1,39 +1,78 @@
 <script lang="ts">
-  import { openVolume, listFiles, uploadFiles, deleteFile, downloadFile, type Auth, type FileMetadata } from './lib/api.js';
-  import { getCachedFiles, setCachedFiles, getCacheTimestamp } from './lib/cache.js';
+  import {
+    openVolume,
+    listFiles,
+    getTimeline,
+    uploadFiles,
+    deleteFile,
+    downloadFile,
+    type Auth,
+    type FileMetadata,
+    type TimelineEvent,
+  } from './lib/api.js';
+  import { getCachedFiles, setCachedFiles } from './lib/cache.js';
+  import ArmedActionButton from './components/ArmedActionButton.svelte';
 
-  const ADDRESS_SECRETS_KEY = 'nearbytes-address-secrets';
+  const PINNED_VOLUMES_KEY = 'nearbytes-pinned-volumes';
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const WEEK_MS = 7 * DAY_MS;
+  const MONTH_MS = 30 * DAY_MS;
+
   type PreviewKind = 'none' | 'image' | 'text' | 'pdf' | 'video' | 'audio' | 'unsupported';
+  type PinDuration = 'day' | 'week' | 'month';
+  type PinnedVolume = {
+    id: string;
+    name: string;
+    address: string;
+    password: string;
+    secret: string;
+    expiresAt: number;
+    pinnedAt: number;
+  };
 
-  function getStoredSecret(addr: string): string {
+  function buildSecret(addr: string, password: string): string {
+    return password ? `${addr}:${password}` : addr;
+  }
+
+  function durationToMs(duration: PinDuration): number {
+    if (duration === 'day') return DAY_MS;
+    if (duration === 'week') return WEEK_MS;
+    return MONTH_MS;
+  }
+
+  function normalizePins(input: unknown): PinnedVolume[] {
+    if (!Array.isArray(input)) return [];
+    const now = Date.now();
+    return input
+      .filter((value) => typeof value === 'object' && value !== null)
+      .map((value) => value as Partial<PinnedVolume>)
+      .filter(
+        (value) =>
+          typeof value.id === 'string' &&
+          typeof value.name === 'string' &&
+          typeof value.address === 'string' &&
+          typeof value.password === 'string' &&
+          typeof value.secret === 'string' &&
+          typeof value.expiresAt === 'number' &&
+          typeof value.pinnedAt === 'number'
+      )
+      .filter((value) => (value.expiresAt as number) > now)
+      .sort((a, b) => (b.pinnedAt as number) - (a.pinnedAt as number)) as PinnedVolume[];
+  }
+
+  function loadPinnedVolumes(): PinnedVolume[] {
     try {
-      const raw = localStorage.getItem(ADDRESS_SECRETS_KEY);
-      if (!raw) return '';
-      const obj = JSON.parse(raw) as Record<string, string>;
-      return obj[addr] ?? '';
+      const raw = localStorage.getItem(PINNED_VOLUMES_KEY);
+      if (!raw) return [];
+      return normalizePins(JSON.parse(raw));
     } catch {
-      return '';
+      return [];
     }
   }
 
-  function setStoredSecret(addr: string, secret: string): void {
+  function persistPinnedVolumes(pins: PinnedVolume[]): void {
     try {
-      const raw = localStorage.getItem(ADDRESS_SECRETS_KEY);
-      const obj = raw ? (JSON.parse(raw) as Record<string, string>) : {};
-      obj[addr] = secret;
-      localStorage.setItem(ADDRESS_SECRETS_KEY, JSON.stringify(obj));
-    } catch {
-      // ignore
-    }
-  }
-
-  function clearStoredSecret(addr: string): void {
-    try {
-      const raw = localStorage.getItem(ADDRESS_SECRETS_KEY);
-      if (!raw) return;
-      const obj = JSON.parse(raw) as Record<string, string>;
-      delete obj[addr];
-      localStorage.setItem(ADDRESS_SECRETS_KEY, JSON.stringify(obj));
+      localStorage.setItem(PINNED_VOLUMES_KEY, JSON.stringify(pins));
     } catch {
       // ignore
     }
@@ -44,41 +83,118 @@
   let addressPassword = $state('');
   let effectiveSecret = $state('');
   let unlockedAddress = $state('');
-  let showSecretModal = $state(false);
-  let secretModalMode = $state<'remembered' | 'unlock_with_secret'>('remembered');
-  let secretInput = $state('');
-  let modalError = $state('');
   let fileList = $state<FileMetadata[]>([]);
   let volumeId = $state<string | null>(null);
   let auth = $state<Auth | null>(null);
   let isDragging = $state(false);
   let errorMessage = $state('');
   let isLoading = $state(false);
+  let isTimelineLoading = $state(false);
+  let isTimelinePlaying = $state(false);
   let isOffline = $state(false);
   let lastRefresh = $state<number | null>(null);
   let copiedVolumeId = $state(false);
-  let wasNewVolume = $state(false); // opened with address, fileCount === 0; after first upload show "Set secret"
-  let showSetSecretModal = $state(false);
-  let setSecretInput = $state('');
   let searchQuery = $state('');
   let sortBy = $state<'newest' | 'oldest' | 'name' | 'size'>('newest');
   let selectedBlobHash = $state<string | null>(null);
+  let timelineEvents = $state<TimelineEvent[]>([]);
+  let timelinePosition = $state(0);
   let previewKind = $state<PreviewKind>('none');
   let previewUrl = $state('');
   let previewText = $state('');
   let previewLoading = $state(false);
   let previewError = $state('');
   let currentPreviewObjectUrl: string | null = null;
-  // When address has files but no stored secret: hold data until they set a secret to view
-  let pendingUnlockData = $state<{ auth: Auth; volumeId: string; files: FileMetadata[] } | null>(null);
-  let showSetSecretToViewModal = $state(false);
-  let setSecretToViewInput = $state('');
+  const previewBlobCache = new Map<string, Blob>();
+  let pinnedVolumes = $state<PinnedVolume[]>(loadPinnedVolumes());
+  let showPinMenu = $state(false);
+  let pinClock = $state(Date.now());
+  let timelinePlayTimer: ReturnType<typeof setInterval> | null = null;
+
+  const activePins = $derived.by(() => {
+    pinClock;
+    return normalizePins(pinnedVolumes);
+  });
+  const matchedPinned = $derived.by(() => {
+    const a = address.trim();
+    if (!a) return null;
+    const secret = buildSecret(a, addressPassword.trim());
+    return activePins.find((pin) => pin.id === secret) ?? null;
+  });
+
+  $effect(() => {
+    const interval = setInterval(() => {
+      pinClock = Date.now();
+    }, 60000);
+    return () => clearInterval(interval);
+  });
+
+  $effect(() => {
+    pinClock;
+    const cleaned = normalizePins(pinnedVolumes);
+    if (cleaned.length !== pinnedVolumes.length) {
+      pinnedVolumes = cleaned;
+      persistPinnedVolumes(cleaned);
+    }
+  });
+
+  $effect(() => {
+    if (matchedPinned && showPinMenu) {
+      showPinMenu = false;
+    }
+  });
+
+  const isHistoryMode = $derived.by(() => timelinePosition < timelineEvents.length);
+
+  const timelineMarker = $derived.by(() => {
+    if (timelineEvents.length === 0) return 'No history yet';
+    if (timelinePosition === timelineEvents.length) return 'Live view';
+    if (timelinePosition === 0) return `Genesis • 0/${timelineEvents.length}`;
+    const event = timelineEvents[timelinePosition - 1];
+    const verb = event.type === 'CREATE_FILE' ? 'created' : 'deleted';
+    return `${timelinePosition}/${timelineEvents.length} • ${event.filename} ${verb}`;
+  });
+
+  const viewFiles = $derived.by(() => {
+    if (timelinePosition >= timelineEvents.length) return fileList;
+
+    const files = new Map<string, FileMetadata>();
+    const limit = Math.max(0, Math.min(timelinePosition, timelineEvents.length));
+    for (let i = 0; i < limit; i += 1) {
+      const event = timelineEvents[i];
+      if (event.type === 'CREATE_FILE') {
+        if (
+          event.blobHash === undefined ||
+          event.size === undefined ||
+          event.createdAt === undefined
+        ) {
+          continue;
+        }
+        files.set(event.filename, {
+          filename: event.filename,
+          blobHash: event.blobHash,
+          size: event.size,
+          mimeType: event.mimeType,
+          createdAt: event.createdAt,
+        });
+      } else {
+        files.delete(event.filename);
+      }
+    }
+
+    const materialized = Array.from(files.values());
+    materialized.sort((a, b) => {
+      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+      return a.filename.localeCompare(b.filename);
+    });
+    return materialized;
+  });
 
   const visibleFiles = $derived.by(() => {
     const query = searchQuery.trim().toLowerCase();
     const filtered = query
-      ? fileList.filter((file) => file.filename.toLowerCase().includes(query))
-      : fileList;
+      ? viewFiles.filter((file) => file.filename.toLowerCase().includes(query))
+      : viewFiles;
     const sorted = [...filtered];
     if (sortBy === 'name') {
       sorted.sort((a, b) => a.filename.localeCompare(b.filename));
@@ -100,6 +216,88 @@
     () => visibleFiles.find((file) => file.blobHash === selectedBlobHash) ?? null
   );
 
+  function stopTimelinePlayback() {
+    if (timelinePlayTimer) {
+      clearInterval(timelinePlayTimer);
+      timelinePlayTimer = null;
+    }
+    isTimelinePlaying = false;
+  }
+
+  function setTimelinePosition(next: number) {
+    const max = timelineEvents.length;
+    const clamped = Math.max(0, Math.min(next, max));
+    timelinePosition = clamped;
+  }
+
+  function jumpToLatest() {
+    stopTimelinePlayback();
+    setTimelinePosition(timelineEvents.length);
+  }
+
+  function jumpToEvent(index: number) {
+    stopTimelinePlayback();
+    setTimelinePosition(index + 1);
+  }
+
+  function toggleTimelinePlayback() {
+    if (timelineEvents.length === 0) return;
+    if (isTimelinePlaying) {
+      stopTimelinePlayback();
+      return;
+    }
+    if (timelinePosition >= timelineEvents.length) {
+      timelinePosition = 0;
+    }
+    isTimelinePlaying = true;
+    timelinePlayTimer = setInterval(() => {
+      if (timelinePosition >= timelineEvents.length) {
+        stopTimelinePlayback();
+        return;
+      }
+      timelinePosition += 1;
+      if (timelinePosition >= timelineEvents.length) {
+        stopTimelinePlayback();
+      }
+    }, 700);
+  }
+
+  async function refreshTimeline(keepPosition = true) {
+    if (!auth) {
+      timelineEvents = [];
+      timelinePosition = 0;
+      return;
+    }
+
+    const previousLength = timelineEvents.length;
+    const previousPosition = timelinePosition;
+    const wasAtLatest = previousPosition >= previousLength;
+    isTimelineLoading = true;
+
+    try {
+      const response = await getTimeline(auth);
+      timelineEvents = response.events;
+      const latest = response.events.length;
+      if (!keepPosition || wasAtLatest) {
+        timelinePosition = latest;
+      } else {
+        timelinePosition = Math.min(previousPosition, latest);
+      }
+    } catch (error) {
+      timelineEvents = [];
+      timelinePosition = 0;
+      errorMessage = error instanceof Error ? error.message : 'Failed to load timeline';
+    } finally {
+      isTimelineLoading = false;
+    }
+  }
+
+  $effect(() => {
+    return () => {
+      stopTimelinePlayback();
+    };
+  });
+
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
     const a = address.trim();
@@ -109,25 +307,26 @@
       debounceTimer = null;
     }
     if (a === '') {
+      stopTimelinePlayback();
       effectiveSecret = '';
       unlockedAddress = '';
-      showSecretModal = false;
-      showSetSecretModal = false;
-      pendingUnlockData = null;
-      showSetSecretToViewModal = false;
       fileList = [];
       volumeId = null;
       auth = null;
       lastRefresh = null;
       isOffline = false;
       isLoading = false;
-      wasNewVolume = false;
+      isTimelineLoading = false;
+      timelineEvents = [];
+      timelinePosition = 0;
       searchQuery = '';
       selectedBlobHash = null;
       previewKind = 'none';
       previewText = '';
       previewError = '';
       previewLoading = false;
+      showPinMenu = false;
+      previewBlobCache.clear();
       revokePreviewUrl();
       return;
     }
@@ -142,36 +341,10 @@
 
   async function tryOpenAddress(a: string, p: string) {
     if (!a) return;
-    const stored = getStoredSecret(a);
-    if (stored) {
-      if (p && p === stored) {
-        try {
-          await loadVolume(a);
-          effectiveSecret = a;
-          unlockedAddress = a;
-          showSecretModal = false;
-          modalError = '';
-        } catch (err) {
-          modalError = err instanceof Error ? err.message : 'Failed to open';
-          showSecretModal = true;
-          secretModalMode = 'remembered';
-          secretInput = p;
-        }
-        return;
-      }
-      showSecretModal = true;
-      secretModalMode = 'remembered';
-      modalError = '';
-      secretInput = p;
-      return;
-    }
-    const openSecret = p ? `${a}:${p}` : a;
+    const openSecret = buildSecret(a, p);
     isLoading = true;
     errorMessage = '';
-    modalError = '';
     isOffline = false;
-    pendingUnlockData = null;
-    showSetSecretToViewModal = false;
     try {
       const response = await openVolume(openSecret);
       const authResult = response.token
@@ -188,24 +361,10 @@
       errorMessage = response.storageHint ?? '';
       effectiveSecret = openSecret;
       unlockedAddress = a;
-      if (response.fileCount > 0) {
-        wasNewVolume = false;
-        if (p) {
-          setStoredSecret(a, p);
-          fileList = response.files;
-          await setCachedFiles(response.volumeId, response.files);
-        } else {
-          // Address has files but no stored secret: require setting a secret before showing files
-          fileList = [];
-          pendingUnlockData = { auth: authResult, volumeId: response.volumeId, files: response.files };
-          showSetSecretToViewModal = true;
-          setSecretToViewInput = '';
-        }
-      } else {
-        wasNewVolume = true;
-        fileList = [];
-        await setCachedFiles(response.volumeId, response.files);
-      }
+      fileList = response.files;
+      previewBlobCache.clear();
+      await setCachedFiles(response.volumeId, response.files);
+      await refreshTimeline(false);
     } catch (error) {
       if (volumeId) {
         const cached = await getCachedFiles(volumeId);
@@ -221,6 +380,8 @@
         errorMessage = error instanceof Error ? error.message : 'Failed to load volume';
         fileList = [];
       }
+      timelineEvents = [];
+      timelinePosition = 0;
     } finally {
       isLoading = false;
     }
@@ -229,209 +390,77 @@
   $effect(() => {
     const a = address.trim();
     if (a !== '' && a !== unlockedAddress && effectiveSecret !== '') {
+      stopTimelinePlayback();
       effectiveSecret = '';
       unlockedAddress = '';
       auth = null;
       volumeId = null;
       fileList = [];
       lastRefresh = null;
-      wasNewVolume = false;
-      showSecretModal = false;
-      showSetSecretModal = false;
-      pendingUnlockData = null;
-      showSetSecretToViewModal = false;
-      modalError = '';
-      secretInput = '';
+      timelineEvents = [];
+      timelinePosition = 0;
       selectedBlobHash = null;
       previewKind = 'none';
       previewText = '';
       previewError = '';
       previewLoading = false;
+      previewBlobCache.clear();
       revokePreviewUrl();
     }
   });
 
-  // Load volume with effective secret (called after Unlock)
-  async function loadVolume(secret: string) {
-    if (!secret) return;
-    isLoading = true;
-    errorMessage = '';
-    modalError = '';
-    isOffline = false;
-    try {
-      const response = await openVolume(secret);
-      if (response.token) {
-        auth = { type: 'token', token: response.token };
-        sessionStorage.setItem('nearbytes-token', response.token);
-      } else {
-        auth = { type: 'secret', secret };
-        sessionStorage.removeItem('nearbytes-token');
-      }
-      volumeId = response.volumeId;
-      fileList = response.files;
-      lastRefresh = Date.now();
-      errorMessage = response.storageHint ?? '';
-      await setCachedFiles(volumeId, response.files);
-    } catch (error) {
-      if (volumeId) {
-        const cached = await getCachedFiles(volumeId);
-        if (cached) {
-          fileList = cached;
-          isOffline = true;
-          errorMessage = 'Using cached data. Backend unavailable.';
-        } else {
-          errorMessage = error instanceof Error ? error.message : 'Failed to load volume';
-          fileList = [];
-        }
-      } else {
-        errorMessage = error instanceof Error ? error.message : 'Failed to load volume';
-        fileList = [];
-      }
-      throw error;
-    } finally {
-      isLoading = false;
-    }
-  }
-
-  function handleUnlock() {
+  function pinCurrentCombo(duration: PinDuration) {
     const a = address.trim();
-    if (!a) return;
-    const secret = secretInput.trim();
-    modalError = '';
-    if (secretModalMode === 'remembered') {
-      const stored = getStoredSecret(a);
-      if (stored !== secret) {
-        modalError = 'Wrong secret';
-        return;
-      }
-      (async () => {
-        try {
-          await loadVolume(a);
-          effectiveSecret = a;
-          unlockedAddress = a;
-          showSecretModal = false;
-          secretInput = '';
-        } catch (err) {
-          modalError = err instanceof Error ? err.message : 'Failed to open';
-        }
-      })();
+    if (!a) {
+      errorMessage = 'Enter an address before pinning';
+      showPinMenu = false;
       return;
     }
-    const composite = `${a}:${secret}`;
-    (async () => {
-      try {
-        await loadVolume(composite);
-        effectiveSecret = composite;
-        unlockedAddress = a;
-        showSecretModal = false;
-        secretInput = '';
-      } catch (err) {
-        modalError = err instanceof Error ? err.message : 'Failed to unlock';
-      }
-    })();
-  }
-
-  function handleCancelModal() {
-    showSecretModal = false;
-    modalError = '';
-    secretInput = '';
-  }
-
-  function openUnlockWithSecretModal() {
-    const a = address.trim();
     const p = addressPassword.trim();
-    if (a && p) {
-      const composite = `${a}:${p}`;
-      (async () => {
-        try {
-          await loadVolume(composite);
-          setStoredSecret(a, p);
-          effectiveSecret = composite;
-          unlockedAddress = a;
-          showSecretModal = false;
-          modalError = '';
-        } catch (err) {
-          modalError = err instanceof Error ? err.message : 'Failed to unlock';
-          showSecretModal = true;
-          secretModalMode = 'unlock_with_secret';
-          secretInput = p;
-        }
-      })();
+    const secret = buildSecret(a, p);
+    const now = Date.now();
+    const next = normalizePins(pinnedVolumes).filter((pin) => pin.id !== secret);
+    next.unshift({
+      id: secret,
+      name: a,
+      address: a,
+      password: p,
+      secret,
+      expiresAt: now + durationToMs(duration),
+      pinnedAt: now,
+    });
+    pinnedVolumes = next;
+    persistPinnedVolumes(next);
+    showPinMenu = false;
+  }
+
+  function handlePinButtonAction() {
+    if (matchedPinned) {
+      removePinnedVolume(matchedPinned.id);
       return;
     }
-    secretModalMode = 'unlock_with_secret';
-    secretInput = p;
-    modalError = '';
-    showSecretModal = true;
+    togglePinMenu();
   }
 
-  function handleSetSecretConfirm() {
-    const a = address.trim();
-    const secret = setSecretInput.trim();
-    if (!a || !secret) return;
-    setStoredSecret(a, secret);
-    showSetSecretModal = false;
-    setSecretInput = '';
-  }
-
-  function handleSetSecretSkip() {
-    showSetSecretModal = false;
-    setSecretInput = '';
-  }
-
-  async function handleSetSecretToViewConfirm() {
-    const a = address.trim();
-    const secret = setSecretToViewInput.trim();
-    if (!a || !secret || !pendingUnlockData) return;
-    setStoredSecret(a, secret);
-    fileList = pendingUnlockData.files;
-    await setCachedFiles(pendingUnlockData.volumeId, pendingUnlockData.files);
-    pendingUnlockData = null;
-    showSetSecretToViewModal = false;
-    setSecretToViewInput = '';
-  }
-
-  function handleSetSecretToViewKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      showSetSecretToViewModal = false;
-      setSecretToViewInput = '';
-      pendingUnlockData = null;
-      fileList = [];
-      auth = null;
-      volumeId = null;
-      effectiveSecret = '';
-      unlockedAddress = '';
+  function usePinnedVolume(pin: PinnedVolume) {
+    const sameSelection = address.trim() === pin.address && addressPassword.trim() === pin.password;
+    address = pin.address;
+    addressPassword = pin.password;
+    showPinMenu = false;
+    if (sameSelection) {
+      tryOpenAddress(pin.address, pin.password);
     }
   }
 
-  $effect(() => {
-    if (showSetSecretToViewModal) {
-      const t = setTimeout(() => document.getElementById('set-secret-to-view-input')?.focus(), 50);
-      return () => clearTimeout(t);
-    }
-  });
-
-  function handleModalKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      handleCancelModal();
-    }
+  function removePinnedVolume(pinId: string) {
+    const next = normalizePins(pinnedVolumes).filter((pin) => pin.id !== pinId);
+    pinnedVolumes = next;
+    persistPinnedVolumes(next);
   }
 
-  // Focus secret input when unlock modal opens
-  $effect(() => {
-    if (showSecretModal) {
-      const t = setTimeout(() => document.getElementById('unlock-secret-input')?.focus(), 50);
-      return () => clearTimeout(t);
-    }
-  });
-
-  // Focus secret input when set-secret modal opens
-  $effect(() => {
-    if (showSetSecretModal) {
-      const t = setTimeout(() => document.getElementById('set-secret-input')?.focus(), 50);
-      return () => clearTimeout(t);
-    }
-  });
+  function togglePinMenu() {
+    showPinMenu = !showPinMenu;
+  }
 
   $effect(() => {
     if (visibleFiles.length === 0) {
@@ -502,7 +531,11 @@
     previewLoading = true;
     (async () => {
       try {
-        const blob = await downloadFile(auth, file.blobHash);
+        let blob = previewBlobCache.get(file.blobHash);
+        if (!blob) {
+          blob = await downloadFile(auth, file.blobHash);
+          previewBlobCache.set(file.blobHash, blob);
+        }
         if (cancelled) return;
         if (kind === 'text') {
           const raw = await blob.text();
@@ -585,6 +618,7 @@
 
       // Update cache
       await setCachedFiles(volumeId, response.files);
+      await refreshTimeline(true);
     } catch (error) {
       // Try cached data
       const cached = await getCachedFiles(volumeId);
@@ -614,7 +648,11 @@
     isDragging = false;
 
     if (!auth || !effectiveSecret) {
-      errorMessage = 'Please unlock with address and secret first';
+      errorMessage = 'Enter address and optional password first';
+      return;
+    }
+    if (isHistoryMode) {
+      errorMessage = 'History mode is read-only. Jump to Latest before uploading.';
       return;
     }
 
@@ -625,10 +663,6 @@
       errorMessage = '';
       await uploadFiles(auth, files);
       await refreshFiles();
-      if (wasNewVolume) {
-        wasNewVolume = false;
-        showSetSecretModal = true;
-      }
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Upload failed';
       console.error('Error uploading files:', error);
@@ -638,6 +672,10 @@
   // Delete file
   async function handleDelete(filename: string) {
     if (!auth) return;
+    if (isHistoryMode) {
+      errorMessage = 'History mode is read-only. Jump to Latest before deleting.';
+      return;
+    }
 
     try {
       errorMessage = '';
@@ -716,6 +754,11 @@
       }
     }
   }
+}} onpointerdown={(e) => {
+  if (!(e.target instanceof Element)) return;
+  if (!showPinMenu) return;
+  if (e.target.closest('.pin-menu') || e.target.closest('.pin-btn')) return;
+  showPinMenu = false;
 }} />
 
 <div class="app">
@@ -746,12 +789,57 @@
           aria-label="Optional volume password"
           autocomplete="current-password"
         />
+        <ArmedActionButton
+          class="pin-btn"
+          text={matchedPinned ? 'Forget' : 'Pin'}
+          armed={matchedPinned !== null}
+          armDelayMs={1000}
+          autoDisarmMs={3000}
+          resetKey={matchedPinned?.id ?? address.trim()}
+          disabled={address.trim() === ''}
+          ariaHasPopup={matchedPinned ? undefined : 'menu'}
+          ariaExpanded={matchedPinned ? undefined : showPinMenu}
+          onPress={handlePinButtonAction}
+        />
         {#if isLoading}
           <span class="loading-spinner"></span>
+        {/if}
+        {#if showPinMenu}
+          <div class="pin-menu" role="menu" aria-label="Pin volume duration">
+            <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('day')}>
+              Pin for 1 day
+            </button>
+            <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('week')}>
+              Pin for 1 week
+            </button>
+            <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('month')}>
+              Pin for 1 month
+            </button>
+          </div>
         {/if}
       </div>
     </div>
   </header>
+
+  {#if activePins.length > 0}
+    <div class="pins-bar">
+      <div class="pins-content">
+        {#each activePins as pin (pin.id)}
+          <div class="pin-chip-wrap">
+            <button
+              type="button"
+              class="pin-chip"
+              class:active={matchedPinned?.id === pin.id}
+              onclick={() => usePinnedVolume(pin)}
+              title={"Open pinned volume " + pin.name}
+            >
+              {pin.name}
+            </button>
+          </div>
+        {/each}
+      </div>
+    </div>
+  {/if}
 
   <!-- Status bar -->
   {#if volumeId || errorMessage || isOffline}
@@ -771,6 +859,11 @@
         <div class="status-item">
           <span class="status-label">Last refresh:</span>
           <span class="status-value">{formatDate(lastRefresh)}</span>
+        </div>
+      {/if}
+      {#if isHistoryMode}
+        <div class="status-item history-indicator">
+          <span>History mode (read-only)</span>
         </div>
       {/if}
       {#if isOffline}
@@ -812,245 +905,201 @@
           <p class="empty-subhint">Or drag and drop files here to create a new volume</p>
         </div>
       </div>
-    {:else if showSecretModal}
-      <!-- Unlock modal is shown; empty state until unlocked -->
-      <div class="empty-state">
-        <div class="empty-content">
-          <p class="empty-hint">Enter secret in the popup to unlock</p>
-        </div>
-      </div>
-    {:else if showSetSecretToViewModal}
-      <!-- Set secret to view modal is shown -->
-      <div class="empty-state">
-        <div class="empty-content">
-          <p class="empty-hint">Set a secret in the popup to view files</p>
-        </div>
-      </div>
-    {:else if fileList.length === 0 && !isLoading}
-      <!-- Empty volume: drop zone + Unlock with secret -->
-      <div class="empty-state">
-        <div class="empty-content">
-          <svg class="empty-icon" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M32 8L8 20L32 32L56 20L32 8Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
-            <path d="M8 20V44L32 56L56 44V20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
-            <path d="M32 32V56" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
-          </svg>
-          <p class="empty-hint">No files yet</p>
-          <p class="empty-subhint">Drop files here to add them</p>
-          <button type="button" class="unlock-with-secret-link" onclick={openUnlockWithSecretModal}>
-            Unlock with secret
-          </button>
-        </div>
-      </div>
     {:else}
-      <div class="file-manager">
-        <section class="file-list-pane">
-          <div class="manager-toolbar">
-            <input
-              type="text"
-              class="manager-search"
-              placeholder="Search files"
-              bind:value={searchQuery}
-              aria-label="Search files"
-            />
-            <select class="manager-sort" bind:value={sortBy} aria-label="Sort files">
-              <option value="newest">Newest</option>
-              <option value="oldest">Oldest</option>
-              <option value="name">Name</option>
-              <option value="size">Size</option>
-            </select>
+      <div class="volume-workspace">
+      <section class="time-machine" aria-label="Volume timeline">
+        <div class="time-machine-head">
+          <div>
+            <p class="time-machine-eyebrow">Time Machine</p>
+            <p class="time-machine-marker">{timelineMarker}</p>
           </div>
-          <div class="file-list-head">
-            <span>Name</span>
-            <span>Size</span>
-            <span>Date</span>
+          <div class="time-machine-actions">
+            <button
+              type="button"
+              class="tm-btn"
+              onclick={toggleTimelinePlayback}
+              disabled={timelineEvents.length === 0 || isTimelineLoading}
+            >
+              {isTimelinePlaying ? 'Pause' : 'Play'}
+            </button>
+            <button
+              type="button"
+              class="tm-btn live"
+              onclick={jumpToLatest}
+              disabled={timelinePosition === timelineEvents.length}
+            >
+              Latest
+            </button>
           </div>
-          {#if visibleFiles.length === 0}
-            <div class="list-empty">No files match your search.</div>
-          {:else}
-            <div class="file-list-scroll">
-              {#each visibleFiles as file (file.blobHash)}
-                <div
-                  class="file-row"
-                  class:selected={selectedBlobHash === file.blobHash}
-                  data-filename={file.filename}
-                  tabindex="0"
-                  role="button"
-                  onclick={() => selectFile(file)}
-                  ondblclick={() => openFileInViewer(file)}
-                  onkeydown={(e) => handleFileRowKeydown(e, file)}
-                >
-                  <span class="file-row-name" title={file.filename}>{file.filename}</span>
-                  <span class="file-row-size">{formatSize(file.size)}</span>
-                  <span class="file-row-date">{formatShortDate(file.createdAt)}</span>
+        </div>
+        <div class="time-machine-track">
+          <input
+            class="tm-slider"
+            type="range"
+            min="0"
+            max={timelineEvents.length}
+            value={timelinePosition}
+            disabled={timelineEvents.length === 0}
+            aria-label="Timeline position"
+            oninput={(e) => {
+              stopTimelinePlayback();
+              setTimelinePosition(Number((e.currentTarget as HTMLInputElement).value));
+            }}
+          />
+          <div class="tm-scale">
+            <span>Start</span>
+            <span>{timelinePosition}/{timelineEvents.length}</span>
+            <span>Latest</span>
+          </div>
+        </div>
+        {#if timelineEvents.length > 0}
+          <div class="tm-events">
+            {#each timelineEvents as event, index (event.eventHash)}
+              <button
+                type="button"
+                class="tm-event"
+                class:applied={index < timelinePosition}
+                class:current={index === timelinePosition - 1}
+                class:create={event.type === 'CREATE_FILE'}
+                class:delete={event.type === 'DELETE_FILE'}
+                onclick={() => jumpToEvent(index)}
+                title={`${event.type === 'CREATE_FILE' ? 'Create' : 'Delete'} ${event.filename} • ${formatDate(event.timestamp)}`}
+              >
+                <span class="tm-event-kind">{event.type === 'CREATE_FILE' ? 'Create' : 'Delete'}</span>
+                <span class="tm-event-name">{event.filename}</span>
+                <span class="tm-event-time">{formatShortDate(event.timestamp)}</span>
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <p class="tm-empty">Timeline is empty. Add files to create history.</p>
+        {/if}
+      </section>
+
+      {#if viewFiles.length === 0 && !isLoading}
+        <div class="empty-state">
+          <div class="empty-content">
+            <svg class="empty-icon" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M32 8L8 20L32 32L56 20L32 8Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
+              <path d="M8 20V44L32 56L56 44V20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
+              <path d="M32 32V56" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
+            </svg>
+            {#if isHistoryMode}
+              <p class="empty-hint">No files at this point in history</p>
+              <p class="empty-subhint">Move the timeline toward Latest to see newer files</p>
+            {:else}
+              <p class="empty-hint">No files yet</p>
+              <p class="empty-subhint">Drop files here to add them</p>
+            {/if}
+          </div>
+        </div>
+      {:else}
+        <div class="file-manager">
+          <section class="file-list-pane">
+            <div class="manager-toolbar">
+              <input
+                type="text"
+                class="manager-search"
+                placeholder="Search files"
+                bind:value={searchQuery}
+                aria-label="Search files"
+              />
+              <select class="manager-sort" bind:value={sortBy} aria-label="Sort files">
+                <option value="newest">Newest</option>
+                <option value="oldest">Oldest</option>
+                <option value="name">Name</option>
+                <option value="size">Size</option>
+              </select>
+            </div>
+            <div class="file-list-head">
+              <span>Name</span>
+              <span>Size</span>
+              <span>Date</span>
+            </div>
+            {#if visibleFiles.length === 0}
+              <div class="list-empty">No files match your search.</div>
+            {:else}
+              <div class="file-list-scroll">
+                {#each visibleFiles as file (file.blobHash)}
+                  <div
+                    class="file-row"
+                    class:selected={selectedBlobHash === file.blobHash}
+                    data-filename={file.filename}
+                    tabindex="0"
+                    role="button"
+                    onclick={() => selectFile(file)}
+                    ondblclick={() => openFileInViewer(file)}
+                    onkeydown={(e) => handleFileRowKeydown(e, file)}
+                  >
+                    <span class="file-row-name" title={file.filename}>{file.filename}</span>
+                    <span class="file-row-size">{formatSize(file.size)}</span>
+                    <span class="file-row-date">{formatShortDate(file.createdAt)}</span>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </section>
+          <section class="preview-pane">
+            {#if selectedFile}
+              <div class="preview-header">
+                <div>
+                  <h3 class="preview-title" title={selectedFile.filename}>{selectedFile.filename}</h3>
+                  <p class="preview-meta">
+                    {selectedFile.mimeType || 'Unknown type'} • {formatSize(selectedFile.size)} • {formatDate(selectedFile.createdAt)}
+                  </p>
                 </div>
-              {/each}
-            </div>
-          {/if}
-        </section>
-        <section class="preview-pane">
-          {#if selectedFile}
-            <div class="preview-header">
-              <div>
-                <h3 class="preview-title" title={selectedFile.filename}>{selectedFile.filename}</h3>
-                <p class="preview-meta">
-                  {selectedFile.mimeType || 'Unknown type'} • {formatSize(selectedFile.size)} • {formatDate(selectedFile.createdAt)}
-                </p>
+                <div class="preview-actions">
+                  <button type="button" class="manager-btn" onclick={() => openFileInViewer(selectedFile)}>
+                    Open
+                  </button>
+                  <button type="button" class="manager-btn" onclick={() => handleDownload(selectedFile)}>
+                    Download
+                  </button>
+                  <ArmedActionButton
+                    class="manager-btn danger"
+                    text="Delete"
+                    armed={true}
+                    armDelayMs={1000}
+                    autoDisarmMs={3000}
+                    disabled={isHistoryMode}
+                    resetKey={`${selectedFile.blobHash}:${isHistoryMode}`}
+                    title={isHistoryMode ? 'Jump to Latest before deleting' : ''}
+                    onPress={() => handleDelete(selectedFile.filename)}
+                  />
+                </div>
               </div>
-              <div class="preview-actions">
-                <button type="button" class="manager-btn" onclick={() => openFileInViewer(selectedFile)}>
-                  Open
-                </button>
-                <button type="button" class="manager-btn" onclick={() => handleDownload(selectedFile)}>
-                  Download
-                </button>
-                <button type="button" class="manager-btn danger" onclick={() => handleDelete(selectedFile.filename)}>
-                  Delete
-                </button>
+              <div class="preview-body">
+                {#if previewLoading}
+                  <p class="preview-message">Loading preview…</p>
+                {:else if previewError}
+                  <p class="preview-message error">{previewError}</p>
+                {:else if previewKind === 'image' && previewUrl}
+                  <img class="preview-image" src={previewUrl} alt={"Preview of " + selectedFile.filename} />
+                {:else if previewKind === 'video' && previewUrl}
+                  <!-- svelte-ignore a11y_media_has_caption -->
+                  <video class="preview-media" controls src={previewUrl}></video>
+                {:else if previewKind === 'audio' && previewUrl}
+                  <audio class="preview-audio" controls src={previewUrl}></audio>
+                {:else if previewKind === 'pdf' && previewUrl}
+                  <iframe class="preview-pdf" src={previewUrl} title={"PDF preview: " + selectedFile.filename}></iframe>
+                {:else if previewKind === 'text'}
+                  <pre class="preview-text">{previewText}</pre>
+                {:else}
+                  <p class="preview-message">Preview unavailable. Double-click the file to open it.</p>
+                {/if}
               </div>
-            </div>
-            <div class="preview-body">
-              {#if previewLoading}
-                <p class="preview-message">Loading preview…</p>
-              {:else if previewError}
-                <p class="preview-message error">{previewError}</p>
-              {:else if previewKind === 'image' && previewUrl}
-                <img class="preview-image" src={previewUrl} alt={"Preview of " + selectedFile.filename} />
-              {:else if previewKind === 'video' && previewUrl}
-                <!-- svelte-ignore a11y_media_has_caption -->
-                <video class="preview-media" controls src={previewUrl}></video>
-              {:else if previewKind === 'audio' && previewUrl}
-                <audio class="preview-audio" controls src={previewUrl}></audio>
-              {:else if previewKind === 'pdf' && previewUrl}
-                <iframe class="preview-pdf" src={previewUrl} title={"PDF preview: " + selectedFile.filename}></iframe>
-              {:else if previewKind === 'text'}
-                <pre class="preview-text">{previewText}</pre>
-              {:else}
-                <p class="preview-message">Preview unavailable. Double-click the file to open it.</p>
-              {/if}
-            </div>
-          {:else}
-            <div class="preview-empty">
-              <p>Select a file to preview.</p>
-            </div>
-          {/if}
-        </section>
+            {:else}
+              <div class="preview-empty">
+                <p>Select a file to preview.</p>
+              </div>
+            {/if}
+          </section>
+        </div>
+      {/if}
       </div>
     {/if}
   </main>
 
-  <!-- Unlock volume modal -->
-  {#if showSecretModal}
-    <div
-      class="modal-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="unlock-modal-title"
-      tabindex="-1"
-      onkeydown={handleModalKeydown}
-    >
-      <div class="modal-content">
-        <h2 id="unlock-modal-title" class="modal-title">
-          {secretModalMode === 'remembered' ? 'Enter secret' : 'Unlock with secret'}
-        </h2>
-        <p class="modal-hint">
-          {#if secretModalMode === 'remembered'}
-            Enter the secret you set for this address. You need it to open this volume.
-          {:else}
-            Enter the secret to open an address:secret volume.
-          {/if}
-        </p>
-        <label for="unlock-secret-input" class="visually-hidden">Secret</label>
-        <input
-          id="unlock-secret-input"
-          type="password"
-          class="modal-input"
-          placeholder="Secret"
-          bind:value={secretInput}
-          aria-label="Secret to unlock volume"
-          onkeydown={(e) => e.key === 'Enter' && handleUnlock()}
-        />
-        {#if modalError}
-          <p class="modal-error" role="alert">{modalError}</p>
-        {/if}
-        <div class="modal-actions">
-          <button type="button" class="modal-btn secondary" onclick={handleCancelModal}>
-            Cancel
-          </button>
-          <button type="button" class="modal-btn primary" onclick={handleUnlock}>
-            Unlock
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  <!-- Set secret after first upload (new volume) -->
-  {#if showSetSecretModal}
-    <div
-      class="modal-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="set-secret-modal-title"
-      tabindex="-1"
-      onkeydown={(e) => e.key === 'Escape' && handleSetSecretSkip()}
-    >
-      <div class="modal-content">
-        <h2 id="set-secret-modal-title" class="modal-title">Set a secret to protect this volume</h2>
-        <p class="modal-hint">You will need this secret next time you open this address. It is stored only on this device.</p>
-        <label for="set-secret-input" class="visually-hidden">Secret</label>
-        <input
-          id="set-secret-input"
-          type="password"
-          class="modal-input"
-          placeholder="Secret"
-          bind:value={setSecretInput}
-          aria-label="Secret to protect volume"
-          onkeydown={(e) => e.key === 'Enter' && handleSetSecretConfirm()}
-        />
-        <div class="modal-actions">
-          <button type="button" class="modal-btn secondary" onclick={handleSetSecretSkip}>
-            Skip
-          </button>
-          <button type="button" class="modal-btn primary" onclick={handleSetSecretConfirm}>
-            Confirm
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  <!-- Set secret to view files (address has files but no stored secret) -->
-  {#if showSetSecretToViewModal}
-    <div
-      class="modal-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="set-secret-to-view-modal-title"
-      tabindex="-1"
-      onkeydown={handleSetSecretToViewKeydown}
-    >
-      <div class="modal-content">
-        <h2 id="set-secret-to-view-modal-title" class="modal-title">Set a secret to view files</h2>
-        <p class="modal-hint">This address has files. Set a secret to unlock and view them. You will need this secret next time you open this address.</p>
-        <label for="set-secret-to-view-input" class="visually-hidden">Secret</label>
-        <input
-          id="set-secret-to-view-input"
-          type="password"
-          class="modal-input"
-          placeholder="Secret"
-          bind:value={setSecretToViewInput}
-          aria-label="Secret to view files"
-          onkeydown={(e) => e.key === 'Enter' && handleSetSecretToViewConfirm()}
-        />
-        <div class="modal-actions">
-          <button type="button" class="modal-btn primary" onclick={handleSetSecretToViewConfirm}>
-            Set secret and view files
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -1125,9 +1174,10 @@
     flex: 1;
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto;
     gap: 0.75rem;
     align-items: center;
+    position: relative;
   }
 
   .secret-input {
@@ -1169,6 +1219,107 @@
 
   @keyframes spin {
     to { transform: rotate(360deg); }
+  }
+
+  :global(.pin-btn) {
+    border: 1px solid rgba(102, 126, 234, 0.35);
+    background: rgba(10, 10, 15, 0.35);
+    color: #d9e2ff;
+    border-radius: 10px;
+    padding: 0.75rem 0.95rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+  }
+
+  :global(.pin-btn:hover:not(:disabled)) {
+    background: rgba(102, 126, 234, 0.2);
+  }
+
+  :global(.pin-btn.armed) {
+    border-color: rgba(248, 113, 113, 0.65);
+    background: rgba(248, 113, 113, 0.18);
+    color: #fecaca;
+  }
+
+  :global(.pin-btn.armed:hover:not(:disabled)) {
+    background: rgba(248, 113, 113, 0.28);
+  }
+
+  :global(.pin-btn:disabled) {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .pin-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.5rem);
+    min-width: 170px;
+    background: rgba(17, 17, 32, 0.95);
+    border: 1px solid rgba(102, 126, 234, 0.35);
+    border-radius: 10px;
+    padding: 0.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    z-index: 150;
+    backdrop-filter: blur(8px);
+  }
+
+  .pin-menu-item {
+    text-align: left;
+    border: 0;
+    background: transparent;
+    color: #dde5ff;
+    padding: 0.5rem 0.6rem;
+    border-radius: 8px;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .pin-menu-item:hover {
+    background: rgba(102, 126, 234, 0.2);
+  }
+
+  .pins-bar {
+    padding: 0.6rem 2rem 0;
+  }
+
+  .pins-content {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .pin-chip-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .pin-chip {
+    border: 1px solid rgba(102, 126, 234, 0.35);
+    background: rgba(10, 10, 15, 0.35);
+    color: #dce5ff;
+    border-radius: 999px;
+    padding: 0.38rem 0.75rem;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .pin-chip:hover {
+    background: rgba(102, 126, 234, 0.2);
+  }
+
+  .pin-chip.active {
+    border-color: rgba(102, 126, 234, 0.75);
+    background: rgba(102, 126, 234, 0.28);
+    color: #eef2ff;
+    box-shadow: inset 0 0 0 1px rgba(102, 126, 234, 0.3);
   }
 
   /* Status bar */
@@ -1231,6 +1382,10 @@
     color: #fbbf24;
   }
 
+  .history-indicator {
+    color: #7dd3fc;
+  }
+
   .error-indicator {
     color: #f87171;
   }
@@ -1252,6 +1407,11 @@
     border-color: #667eea;
   }
 
+  .refresh-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
   /* File area */
   .file-area {
     flex: 1;
@@ -1259,6 +1419,162 @@
     padding: 2rem;
     overflow: hidden;
     transition: background-color 0.3s ease;
+  }
+
+  .volume-workspace {
+    max-width: 1200px;
+    margin: 0 auto;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-height: 0;
+  }
+
+  .time-machine {
+    border: 1px solid rgba(125, 211, 252, 0.22);
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.7), rgba(30, 41, 59, 0.55));
+    padding: 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    min-height: 0;
+  }
+
+  .time-machine-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+
+  .time-machine-eyebrow {
+    margin: 0;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(125, 211, 252, 0.78);
+  }
+
+  .time-machine-marker {
+    margin: 0.25rem 0 0;
+    font-size: 0.875rem;
+    color: rgba(226, 232, 240, 0.92);
+  }
+
+  .time-machine-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .tm-btn {
+    border: 1px solid rgba(125, 211, 252, 0.34);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.55);
+    color: #dbeafe;
+    padding: 0.38rem 0.75rem;
+    cursor: pointer;
+    font-size: 0.8125rem;
+  }
+
+  .tm-btn.live {
+    border-color: rgba(96, 165, 250, 0.65);
+    background: rgba(59, 130, 246, 0.2);
+  }
+
+  .tm-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .time-machine-track {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .tm-slider {
+    width: 100%;
+    accent-color: #38bdf8;
+  }
+
+  .tm-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: rgba(191, 219, 254, 0.8);
+  }
+
+  .tm-events {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(150px, 180px);
+    gap: 0.5rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 0.1rem;
+    scrollbar-width: none;
+  }
+
+  .tm-events::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tm-event {
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.35);
+    color: #e2e8f0;
+    display: grid;
+    gap: 0.15rem;
+    padding: 0.5rem 0.58rem;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+  }
+
+  .tm-event.applied {
+    border-color: rgba(56, 189, 248, 0.5);
+    background: rgba(14, 116, 144, 0.22);
+  }
+
+  .tm-event.current {
+    border-color: rgba(96, 165, 250, 0.85);
+    background: rgba(30, 64, 175, 0.38);
+    transform: translateY(-1px);
+  }
+
+  .tm-event.create .tm-event-kind {
+    color: #86efac;
+  }
+
+  .tm-event.delete .tm-event-kind {
+    color: #fca5a5;
+  }
+
+  .tm-event-kind {
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .tm-event-name {
+    font-size: 0.8125rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tm-event-time {
+    font-size: 0.72rem;
+    color: rgba(191, 219, 254, 0.85);
+  }
+
+  .tm-empty {
+    margin: 0;
+    font-size: 0.8125rem;
+    color: rgba(186, 230, 253, 0.7);
   }
 
   .file-area.dragging {
@@ -1299,26 +1615,10 @@
     margin: 0;
   }
 
-  .unlock-with-secret-link {
-    margin-top: 1rem;
-    background: none;
-    border: none;
-    color: #667eea;
-    font-size: 0.9375rem;
-    cursor: pointer;
-    text-decoration: underline;
-    padding: 0;
-  }
-
-  .unlock-with-secret-link:hover {
-    color: #5a6fd6;
-  }
-
   /* File manager */
   .file-manager {
-    height: 100%;
-    max-width: 1200px;
-    margin: 0 auto;
+    flex: 1;
+    min-height: 0;
     display: grid;
     grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
     gap: 1rem;
@@ -1467,7 +1767,7 @@
     justify-content: flex-end;
   }
 
-  .manager-btn {
+  :global(.manager-btn) {
     border: 1px solid rgba(102, 126, 234, 0.35);
     background: rgba(10, 10, 15, 0.35);
     color: #d9e2ff;
@@ -1477,16 +1777,16 @@
     cursor: pointer;
   }
 
-  .manager-btn:hover {
+  :global(.manager-btn:hover) {
     background: rgba(102, 126, 234, 0.18);
   }
 
-  .manager-btn.danger {
+  :global(.manager-btn.danger) {
     border-color: rgba(248, 113, 113, 0.45);
     color: #fecaca;
   }
 
-  .manager-btn.danger:hover {
+  :global(.manager-btn.danger:hover) {
     background: rgba(248, 113, 113, 0.16);
   }
 
@@ -1553,117 +1853,6 @@
     font-size: 0.9375rem;
   }
 
-  /* Unlock modal */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 200;
-    padding: 1rem;
-  }
-
-  .modal-content {
-    background: #1a1a2e;
-    border: 1px solid rgba(102, 126, 234, 0.3);
-    border-radius: 12px;
-    padding: 1.5rem;
-    min-width: 320px;
-    max-width: 420px;
-    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
-  }
-
-  .modal-title {
-    margin: 0 0 0.75rem;
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: #e0e0e0;
-  }
-
-  .modal-hint {
-    font-size: 0.875rem;
-    color: rgba(224, 224, 224, 0.6);
-    margin: 0 0 1rem;
-    line-height: 1.4;
-  }
-
-  .modal-input {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    font-size: 1rem;
-    background: rgba(255, 255, 255, 0.05);
-    border: 2px solid rgba(102, 126, 234, 0.3);
-    border-radius: 8px;
-    color: #e0e0e0;
-    outline: none;
-    margin-bottom: 1rem;
-    box-sizing: border-box;
-  }
-
-  .modal-input:focus {
-    border-color: #667eea;
-  }
-
-  .modal-input::placeholder {
-    color: rgba(224, 224, 224, 0.4);
-  }
-
-  .modal-error {
-    color: #f87171;
-    font-size: 0.875rem;
-    margin: -0.5rem 0 1rem;
-  }
-
-  .modal-actions {
-    display: flex;
-    gap: 0.75rem;
-    justify-content: flex-end;
-  }
-
-  .modal-btn {
-    padding: 0.5rem 1.25rem;
-    border-radius: 8px;
-    font-size: 0.9375rem;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .modal-btn.primary {
-    background: #667eea;
-    border: 1px solid #667eea;
-    color: #fff;
-  }
-
-  .modal-btn.primary:hover {
-    background: #5a6fd6;
-    border-color: #5a6fd6;
-  }
-
-  .modal-btn.secondary {
-    background: transparent;
-    border: 1px solid rgba(224, 224, 224, 0.3);
-    color: rgba(224, 224, 224, 0.9);
-  }
-
-  .modal-btn.secondary:hover {
-    border-color: rgba(224, 224, 224, 0.5);
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  .visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
-
   @media (max-width: 900px) {
     .header {
       padding: 1rem;
@@ -1676,7 +1865,11 @@
     }
 
     .secret-input-wrapper {
-      grid-template-columns: 1fr 1fr auto;
+      grid-template-columns: 1fr 1fr auto auto;
+    }
+
+    .pins-bar {
+      padding: 0.6rem 1rem 0;
     }
 
     .status-bar {
@@ -1685,6 +1878,18 @@
 
     .file-area {
       padding: 1rem;
+    }
+
+    .volume-workspace {
+      gap: 0.75rem;
+    }
+
+    .time-machine {
+      padding: 0.75rem;
+    }
+
+    .tm-events {
+      grid-auto-columns: minmax(132px, 160px);
     }
 
     .file-manager {
@@ -1708,11 +1913,38 @@
 
   @media (max-width: 640px) {
     .secret-input-wrapper {
-      grid-template-columns: 1fr;
+      grid-template-columns: 1fr 1fr;
+      grid-template-areas:
+        'address address'
+        'password password'
+        'pin spinner';
+    }
+
+    .secret-input-wrapper > input:first-child {
+      grid-area: address;
+    }
+
+    .secret-input-wrapper > input:nth-child(2) {
+      grid-area: password;
+    }
+
+    :global(.pin-btn) {
+      grid-area: pin;
+      width: fit-content;
     }
 
     .loading-spinner {
+      grid-area: spinner;
       justify-self: start;
+    }
+
+    .time-machine-head {
+      flex-direction: column;
+    }
+
+    .time-machine-actions {
+      width: 100%;
+      justify-content: space-between;
     }
 
     .manager-toolbar {

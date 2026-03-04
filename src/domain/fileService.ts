@@ -13,7 +13,37 @@ import { serializeEventPayload } from '../storage/serialization.js';
 import { openVolume, loadEventLog, verifyEventLog } from './volume.js';
 import type { FileEvent, FileMetadata } from './fileEvents.js';
 import { reconstructFileState } from './fileState.js';
-import { isFileEvent } from './fileEventCodec.js';
+import type { EventLogEntry } from '../types/volume.js';
+
+const SNAPSHOT_FILE_NAME = 'snapshot.latest.json';
+const SNAPSHOT_VERSION = 1;
+
+interface StoredVolumeSnapshot {
+  version: number;
+  generatedAt: number;
+  eventCount: number;
+  lastEventHash: string | null;
+  files: FileMetadata[];
+}
+
+export interface SnapshotSummary {
+  generatedAt: number;
+  eventCount: number;
+  fileCount: number;
+  lastEventHash: string | null;
+}
+
+export interface TimelineEvent {
+  eventHash: string;
+  type: FileEvent['type'];
+  filename: string;
+  timestamp: number;
+  blobHash?: string;
+  size?: number;
+  mimeType?: string;
+  createdAt?: number;
+  deletedAt?: number;
+}
 
 export interface FileServiceDependencies {
   crypto: CryptoOperations;
@@ -32,6 +62,8 @@ export interface FileService {
   deleteFile(secret: string, filename: string): Promise<void>;
   listFiles(secret: string): Promise<FileMetadata[]>;
   getFile(secret: string, blobHash: string): Promise<Buffer>;
+  computeSnapshot(secret: string): Promise<SnapshotSummary>;
+  getTimeline(secret: string): Promise<TimelineEvent[]>;
 }
 
 /**
@@ -71,6 +103,17 @@ export function createFileService(dependencies: FileServiceDependencies): FileSe
       listFilesWithDeps(secret, dependencies.crypto, dependencies.storage, channelStorage, pathMapper),
     getFile: async (secret, blobHash) =>
       getFileWithDeps(secret, blobHash, dependencies.crypto, channelStorage),
+    computeSnapshot: async (secret) =>
+      computeSnapshotWithDeps(
+        secret,
+        dependencies.crypto,
+        dependencies.storage,
+        channelStorage,
+        pathMapper,
+        now
+      ),
+    getTimeline: async (secret) =>
+      getTimelineWithDeps(secret, dependencies.crypto, dependencies.storage, channelStorage, pathMapper),
   };
 }
 
@@ -121,6 +164,23 @@ export async function listFiles(secret: string): Promise<FileMetadata[]> {
 export async function getFile(secret: string, blobHash: string): Promise<Buffer> {
   const service = getDefaultFileService();
   return service.getFile(secret, blobHash);
+}
+
+/**
+ * Computes and persists a point-in-time snapshot of the current volume state.
+ * Snapshot generation is explicit (on-demand) and never automatic.
+ */
+export async function computeSnapshot(secret: string): Promise<SnapshotSummary> {
+  const service = getDefaultFileService();
+  return service.computeSnapshot(secret);
+}
+
+/**
+ * Returns a deterministic, chronological timeline of file events for a volume.
+ */
+export async function getTimeline(secret: string): Promise<TimelineEvent[]> {
+  const service = getDefaultFileService();
+  return service.getTimeline(secret);
 }
 
 function getDefaultFileService(): FileService {
@@ -220,25 +280,7 @@ async function listFilesWithDeps(
   const volume = await openVolume(normalizeSecret(secret), crypto, storage, pathMapper);
   const entries = await loadEventLog(volume, channelStorage);
   await verifyEventLog(entries, volume, crypto);
-
-  const fileEvents: FileEvent[] = [];
-  for (const entry of entries) {
-    const fileEvent = mapPayloadToFileEvent(entry.signedEvent.payload);
-    if (fileEvent) {
-      fileEvents.push(fileEvent);
-    }
-  }
-
-  const state = reconstructFileState(fileEvents);
-  const files = Array.from(state.values());
-  files.sort((a, b) => {
-    if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
-    if (a.filename < b.filename) return -1;
-    if (a.filename > b.filename) return 1;
-    return 0;
-  });
-
-  return files;
+  return materializeFilesFromEntries(entries);
 }
 
 async function getFileWithDeps(
@@ -254,35 +296,176 @@ async function getFileWithDeps(
   return Buffer.from(plaintext);
 }
 
-function mapPayloadToFileEvent(payload: EventPayload): FileEvent | null {
-  if (payload.type === EventType.CREATE_FILE) {
-    if (payload.size === undefined || payload.createdAt === undefined) {
-      return null;
+async function computeSnapshotWithDeps(
+  secret: string,
+  crypto: CryptoOperations,
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper,
+  now: () => number
+): Promise<SnapshotSummary> {
+  const volume = await openVolume(normalizeSecret(secret), crypto, storage, pathMapper);
+  const entries = await loadEventLog(volume, channelStorage);
+  await verifyEventLog(entries, volume, crypto);
+
+  const snapshot: StoredVolumeSnapshot = {
+    version: SNAPSHOT_VERSION,
+    generatedAt: now(),
+    eventCount: entries.length,
+    lastEventHash: entries.length > 0 ? entries[entries.length - 1].eventHash : null,
+    files: materializeFilesFromEntries(entries),
+  };
+
+  const snapshotPath = `${volume.path}/${SNAPSHOT_FILE_NAME}`;
+  const snapshotBytes = new TextEncoder().encode(JSON.stringify(snapshot));
+  await storage.writeFile(snapshotPath, snapshotBytes);
+
+  return {
+    generatedAt: snapshot.generatedAt,
+    eventCount: snapshot.eventCount,
+    fileCount: snapshot.files.length,
+    lastEventHash: snapshot.lastEventHash,
+  };
+}
+
+async function getTimelineWithDeps(
+  secret: string,
+  crypto: CryptoOperations,
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper
+): Promise<TimelineEvent[]> {
+  const volume = await openVolume(normalizeSecret(secret), crypto, storage, pathMapper);
+  const entries = await loadEventLog(volume, channelStorage);
+  await verifyEventLog(entries, volume, crypto);
+  return mapEntriesToTimeline(entries);
+}
+
+function materializeFilesFromEntries(entries: EventLogEntry[]): FileMetadata[] {
+  const timeline = mapEntriesToTimeline(entries);
+  const fileEvents = timelineToFileEvents(timeline);
+
+  const state = reconstructFileState(fileEvents);
+  const files = Array.from(state.values());
+  files.sort((a, b) => {
+    if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+    if (a.filename < b.filename) return -1;
+    if (a.filename > b.filename) return 1;
+    return 0;
+  });
+  return files;
+}
+
+function mapEntriesToTimeline(entries: EventLogEntry[]): TimelineEvent[] {
+  const rows: Array<{
+    event: TimelineEvent;
+    hasExplicitTimestamp: boolean;
+    sequence: number;
+  }> = [];
+
+  for (let sequence = 0; sequence < entries.length; sequence += 1) {
+    const entry = entries[sequence];
+    const payload = entry.signedEvent.payload;
+
+    if (payload.type === EventType.CREATE_FILE) {
+      const inferredTimestamp = payload.createdAt ?? sequence;
+      rows.push({
+        sequence,
+        hasExplicitTimestamp: payload.createdAt !== undefined,
+        event: {
+          eventHash: entry.eventHash,
+          type: 'CREATE_FILE',
+          filename: payload.fileName,
+          timestamp: inferredTimestamp,
+          blobHash: payload.hash,
+          size: payload.size ?? 0,
+          mimeType: payload.mimeType,
+          createdAt: inferredTimestamp,
+        },
+      });
+      continue;
     }
-    const event: FileEvent = {
-      type: 'CREATE_FILE',
-      filename: payload.fileName,
-      blobHash: payload.hash,
-      size: payload.size,
-      mimeType: payload.mimeType,
-      createdAt: payload.createdAt,
-    };
-    return isFileEvent(event) ? event : null;
+
+    if (payload.type === EventType.DELETE_FILE) {
+      const inferredTimestamp = payload.deletedAt ?? sequence;
+      rows.push({
+        sequence,
+        hasExplicitTimestamp: payload.deletedAt !== undefined,
+        event: {
+          eventHash: entry.eventHash,
+          type: 'DELETE_FILE',
+          filename: payload.fileName,
+          timestamp: inferredTimestamp,
+          deletedAt: inferredTimestamp,
+        },
+      });
+    }
   }
 
-  if (payload.type === EventType.DELETE_FILE) {
-    if (payload.deletedAt === undefined) {
-      return null;
+  rows.sort(compareTimelineRows);
+  return rows.map((row) => row.event);
+}
+
+function timelineToFileEvents(timeline: TimelineEvent[]): FileEvent[] {
+  const fileEvents: FileEvent[] = [];
+  for (const event of timeline) {
+    if (event.type === 'CREATE_FILE') {
+      if (
+        event.blobHash === undefined ||
+        event.size === undefined ||
+        event.createdAt === undefined
+      ) {
+        continue;
+      }
+      fileEvents.push({
+        type: 'CREATE_FILE',
+        filename: event.filename,
+        blobHash: event.blobHash,
+        size: event.size,
+        mimeType: event.mimeType,
+        createdAt: event.createdAt,
+      });
+      continue;
     }
-    const event: FileEvent = {
+    if (event.deletedAt === undefined) {
+      continue;
+    }
+    fileEvents.push({
       type: 'DELETE_FILE',
-      filename: payload.fileName,
-      deletedAt: payload.deletedAt,
-    };
-    return isFileEvent(event) ? event : null;
+      filename: event.filename,
+      deletedAt: event.deletedAt,
+    });
+  }
+  return fileEvents;
+}
+
+function compareTimelineRows(
+  left: { event: TimelineEvent; hasExplicitTimestamp: boolean; sequence: number },
+  right: { event: TimelineEvent; hasExplicitTimestamp: boolean; sequence: number }
+): number {
+  if (left.hasExplicitTimestamp !== right.hasExplicitTimestamp) {
+    return left.sequence - right.sequence;
   }
 
-  return null;
+  if (left.hasExplicitTimestamp && right.hasExplicitTimestamp) {
+    if (left.event.timestamp !== right.event.timestamp) {
+      return left.event.timestamp - right.event.timestamp;
+    }
+  } else if (left.sequence !== right.sequence) {
+    return left.sequence - right.sequence;
+  }
+
+  if (left.event.filename < right.event.filename) return -1;
+  if (left.event.filename > right.event.filename) return 1;
+
+  const leftTie = left.event.type === 'CREATE_FILE' ? `C:${left.event.blobHash ?? ''}` : 'D';
+  const rightTie = right.event.type === 'CREATE_FILE' ? `C:${right.event.blobHash ?? ''}` : 'D';
+  if (leftTie < rightTie) return -1;
+  if (leftTie > rightTie) return 1;
+
+  if (left.event.eventHash < right.event.eventHash) return -1;
+  if (left.event.eventHash > right.event.eventHash) return 1;
+  return 0;
 }
 
 function assertNonEmptyFilename(filename: string): void {
