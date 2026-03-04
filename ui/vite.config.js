@@ -11,7 +11,7 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
         runtimeCaching: [
           {
-            urlPattern: /^\/(open|files|upload|file|health|timeline|snapshot)/,
+            urlPattern: /^\/(open|files|upload|file|health|timeline|snapshot|config)/,
             handler: 'NetworkFirst',
             options: {
               cacheName: 'nearbytes-api-cache',
@@ -77,6 +77,10 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/__debug': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
+      '/config': {
         target: 'http://localhost:3000',
         changeOrigin: true,
       },

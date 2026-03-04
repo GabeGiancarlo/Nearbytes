@@ -4,7 +4,8 @@ import path from 'path';
 import { createCryptoOperations } from '../crypto/index.js';
 import { createFileService } from '../domain/fileService.js';
 import { getDefaultStorageDir } from '../storagePath.js';
-import { FilesystemStorageBackend } from '../storage/filesystem.js';
+import { loadOrCreateRootsConfig } from '../config/roots.js';
+import { MultiRootStorageBackend } from '../storage/multiRoot.js';
 import { createApp } from './app.js';
 import { parseTokenKey } from './auth.js';
 import {
@@ -13,8 +14,8 @@ import {
 } from './storageDiagnostics.js';
 
 const port = parsePort(process.env.PORT);
-const storageDirRaw = getDefaultStorageDir();
-const storageDir = path.resolve(storageDirRaw);
+const defaultStorageDirRaw = getDefaultStorageDir();
+const defaultStorageDir = path.resolve(defaultStorageDirRaw);
 const corsOrigin = parseCorsOrigin(process.env.NEARBYTES_CORS_ORIGIN ?? 'http://localhost:5173');
 const maxUploadBytes = parseMaxUploadBytes(process.env.NEARBYTES_MAX_UPLOAD_MB);
 const tokenKey = process.env.NEARBYTES_SERVER_TOKEN_KEY
@@ -22,12 +23,23 @@ const tokenKey = process.env.NEARBYTES_SERVER_TOKEN_KEY
   : undefined;
 
 const crypto = createCryptoOperations();
-const storage = new FilesystemStorageBackend(storageDir);
-const fileService = createFileService({ crypto, storage });
 
 async function main(): Promise<void> {
-  console.log(`Using storage dir: ${storageDir}`);
-  const diagnostics = await getStorageDiagnostics(storageDir);
+  const loaded = await loadOrCreateRootsConfig({
+    defaultRootPath: defaultStorageDir,
+  });
+  if (loaded.created) {
+    console.log(`Created default roots config at: ${loaded.configPath}`);
+  }
+
+  const storage = new MultiRootStorageBackend(loaded.config);
+  const fileService = createFileService({ crypto, storage });
+  const primaryMainRoot = loaded.config.roots.find((root) => root.kind === 'main')?.path ?? defaultStorageDir;
+
+  console.log(`Using roots config: ${loaded.configPath}`);
+  console.log(`Using default storage bootstrap path: ${defaultStorageDir}`);
+  console.log(`Configured roots: ${loaded.config.roots.length}`);
+  const diagnostics = await getStorageDiagnostics(primaryMainRoot);
   logStorageDiagnostics(diagnostics);
 
   // Ensure channels/ and blocks/ exist and are writable (fail fast if path wrong or read-only)
@@ -41,7 +53,8 @@ async function main(): Promise<void> {
     tokenKey,
     corsOrigin,
     maxUploadBytes,
-    resolvedStorageDir: storageDir,
+    resolvedStorageDir: primaryMainRoot,
+    rootsConfigPath: loaded.configPath,
   });
 
   app.listen(port, () => {

@@ -6,9 +6,14 @@
     uploadFiles,
     deleteFile,
     downloadFile,
+    getRootsConfig,
+    updateRootsConfig,
     type Auth,
     type FileMetadata,
     type TimelineEvent,
+    type RootConfigEntry,
+    type RootsConfig,
+    type RootsRuntimeSnapshot,
   } from './lib/api.js';
   import { getCachedFiles, setCachedFiles } from './lib/cache.js';
   import ArmedActionButton from './components/ArmedActionButton.svelte';
@@ -110,6 +115,14 @@
   let showPinMenu = $state(false);
   let pinClock = $state(Date.now());
   let timelinePlayTimer: ReturnType<typeof setInterval> | null = null;
+  let showRootsPanel = $state(false);
+  let rootsConfigPath = $state<string | null>(null);
+  let rootsRuntime = $state<RootsRuntimeSnapshot | null>(null);
+  let rootsDraft = $state<RootConfigEntry[]>([]);
+  let rootsError = $state('');
+  let rootsSuccess = $state('');
+  let rootsLoading = $state(false);
+  let rootsSaving = $state(false);
 
   const activePins = $derived.by(() => {
     pinClock;
@@ -462,6 +475,147 @@
     showPinMenu = !showPinMenu;
   }
 
+  function createDraftRoot(kind: 'main' | 'backup'): RootConfigEntry {
+    const idPrefix = kind === 'main' ? 'main' : 'backup';
+    const uniqueSuffix = Math.random().toString(16).slice(2, 8);
+    return {
+      id: `${idPrefix}-${uniqueSuffix}`,
+      kind,
+      path: '',
+      enabled: true,
+      writable: true,
+      strategy: kind === 'main' ? { name: 'all-keys' } : { name: 'allowlist', channelKeys: [] },
+    };
+  }
+
+  function cloneRoot(root: RootConfigEntry): RootConfigEntry {
+    return {
+      ...root,
+      strategy:
+        root.strategy.name === 'allowlist'
+          ? { name: 'allowlist', channelKeys: [...root.strategy.channelKeys] }
+          : { name: 'all-keys' },
+    };
+  }
+
+  function applyRootsState(config: RootsConfig, runtime: RootsRuntimeSnapshot, configPath: string | null) {
+    rootsConfigPath = configPath;
+    rootsRuntime = runtime;
+    rootsDraft = config.roots.map(cloneRoot);
+  }
+
+  function getAllowlistText(root: RootConfigEntry): string {
+    if (root.strategy.name !== 'allowlist') return '';
+    return root.strategy.channelKeys.join(', ');
+  }
+
+  function setAllowlistText(index: number, value: string) {
+    const next = [...rootsDraft];
+    const target = next[index];
+    if (!target || target.kind !== 'backup') return;
+
+    const channelKeys = value
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0);
+
+    next[index] = {
+      ...target,
+      strategy: {
+        name: 'allowlist',
+        channelKeys,
+      },
+    };
+    rootsDraft = next;
+  }
+
+  function updateRootField<K extends keyof RootConfigEntry>(index: number, field: K, value: RootConfigEntry[K]) {
+    const next = [...rootsDraft];
+    if (!next[index]) return;
+    next[index] = {
+      ...next[index],
+      [field]: value,
+    };
+    rootsDraft = next;
+  }
+
+  function updateRootKind(index: number, kind: 'main' | 'backup') {
+    const next = [...rootsDraft];
+    const current = next[index];
+    if (!current) return;
+
+    next[index] = {
+      ...current,
+      kind,
+      strategy: kind === 'main' ? { name: 'all-keys' } : { name: 'allowlist', channelKeys: [] },
+    };
+    rootsDraft = next;
+  }
+
+  function addRoot(kind: 'main' | 'backup') {
+    rootsDraft = [...rootsDraft, createDraftRoot(kind)];
+  }
+
+  function removeRoot(index: number) {
+    rootsDraft = rootsDraft.filter((_, i) => i !== index);
+  }
+
+  async function reloadRootsPanel() {
+    rootsLoading = true;
+    rootsError = '';
+    rootsSuccess = '';
+    try {
+      const response = await getRootsConfig();
+      applyRootsState(response.config, response.runtime, response.configPath);
+    } catch (error) {
+      rootsError = error instanceof Error ? error.message : 'Failed to load roots configuration';
+    } finally {
+      rootsLoading = false;
+    }
+  }
+
+  function buildRootsConfigPayload(): RootsConfig {
+    return {
+      version: 1,
+      roots: rootsDraft.map((root) => ({
+        ...root,
+        strategy:
+          root.kind === 'main'
+            ? { name: 'all-keys' as const }
+            : {
+                name: 'allowlist' as const,
+                channelKeys:
+                  root.strategy.name === 'allowlist'
+                    ? [...root.strategy.channelKeys]
+                    : [],
+              },
+      })),
+    };
+  }
+
+  async function saveRootsPanel() {
+    rootsSaving = true;
+    rootsError = '';
+    rootsSuccess = '';
+    try {
+      const payload = buildRootsConfigPayload();
+      const response = await updateRootsConfig(payload);
+      applyRootsState(response.config, response.runtime, response.configPath);
+      rootsSuccess = 'Roots configuration saved.';
+    } catch (error) {
+      rootsError = error instanceof Error ? error.message : 'Failed to save roots configuration';
+    } finally {
+      rootsSaving = false;
+    }
+  }
+
+  async function toggleRootsPanel() {
+    showRootsPanel = !showRootsPanel;
+    if (showRootsPanel && rootsDraft.length === 0 && !rootsLoading) {
+      await reloadRootsPanel();
+    }
+  }
+
   $effect(() => {
     if (visibleFiles.length === 0) {
       selectedBlobHash = null;
@@ -801,6 +955,15 @@
           ariaExpanded={matchedPinned ? undefined : showPinMenu}
           onPress={handlePinButtonAction}
         />
+        <button
+          type="button"
+          class="roots-btn"
+          onclick={toggleRootsPanel}
+          aria-expanded={showRootsPanel}
+          aria-label="Manage storage roots"
+        >
+          {showRootsPanel ? 'Hide Roots' : 'Roots'}
+        </button>
         {#if isLoading}
           <span class="loading-spinner"></span>
         {/if}
@@ -892,6 +1055,152 @@
     ondragleave={handleDragLeave}
     ondrop={handleDrop}
   >
+    {#if showRootsPanel}
+      <section class="roots-panel" aria-label="Storage roots configuration">
+        <div class="roots-panel-header">
+          <div>
+            <p class="roots-eyebrow">Storage Roots</p>
+            <p class="roots-path" title={rootsConfigPath ?? ''}>
+              {rootsConfigPath ? `Config: ${rootsConfigPath}` : 'Config path unavailable'}
+            </p>
+          </div>
+          <div class="roots-actions">
+            <button type="button" class="roots-action-btn" onclick={() => addRoot('main')}>
+              Add Main
+            </button>
+            <button type="button" class="roots-action-btn" onclick={() => addRoot('backup')}>
+              Add Backup
+            </button>
+            <button type="button" class="roots-action-btn" onclick={reloadRootsPanel} disabled={rootsLoading}>
+              Reload
+            </button>
+            <button
+              type="button"
+              class="roots-action-btn primary"
+              onclick={saveRootsPanel}
+              disabled={rootsSaving || rootsLoading}
+            >
+              {rootsSaving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+
+        {#if rootsError}
+          <p class="roots-error">{rootsError}</p>
+        {/if}
+        {#if rootsSuccess}
+          <p class="roots-success">{rootsSuccess}</p>
+        {/if}
+
+        <div class="roots-scroll">
+          {#if rootsLoading}
+            <p class="roots-info">Loading roots configuration…</p>
+          {:else if rootsDraft.length === 0}
+            <p class="roots-info">No roots configured yet. Add a main root first.</p>
+          {:else}
+            <div class="roots-list">
+              {#each rootsDraft as root, index (root.id + ':' + index)}
+                <article class="root-card">
+                  <div class="root-row">
+                    <label>
+                      <span>ID</span>
+                      <input
+                        type="text"
+                        class="root-input"
+                        value={root.id}
+                        oninput={(e) => updateRootField(index, 'id', (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Kind</span>
+                      <select
+                        class="root-input"
+                        value={root.kind}
+                        onchange={(e) => updateRootKind(index, (e.currentTarget as HTMLSelectElement).value as 'main' | 'backup')}
+                      >
+                        <option value="main">main</option>
+                        <option value="backup">backup</option>
+                      </select>
+                    </label>
+                    <label class="root-check">
+                      <input
+                        type="checkbox"
+                        checked={root.enabled}
+                        onchange={(e) => updateRootField(index, 'enabled', (e.currentTarget as HTMLInputElement).checked)}
+                      />
+                      enabled
+                    </label>
+                    <label class="root-check">
+                      <input
+                        type="checkbox"
+                        checked={root.writable}
+                        onchange={(e) => updateRootField(index, 'writable', (e.currentTarget as HTMLInputElement).checked)}
+                      />
+                      writable
+                    </label>
+                    <button type="button" class="root-remove" onclick={() => removeRoot(index)}>
+                      Remove
+                    </button>
+                  </div>
+
+                  <label>
+                    <span>Path</span>
+                    <input
+                      type="text"
+                      class="root-input root-path-input"
+                      value={root.path}
+                      oninput={(e) => updateRootField(index, 'path', (e.currentTarget as HTMLInputElement).value)}
+                    />
+                  </label>
+
+                  <div class="root-row strategy-row">
+                    <label>
+                      <span>Strategy</span>
+                      <select class="root-input" disabled={root.kind === 'main'}>
+                        <option value={root.kind === 'main' ? 'all-keys' : 'allowlist'}>
+                          {root.kind === 'main' ? 'all-keys' : 'allowlist'}
+                        </option>
+                      </select>
+                    </label>
+                    {#if root.kind === 'backup'}
+                      <label class="root-allowlist">
+                        <span>Allowlist channel keys (comma-separated)</span>
+                        <input
+                          type="text"
+                          class="root-input"
+                          value={getAllowlistText(root)}
+                          oninput={(e) => setAllowlistText(index, (e.currentTarget as HTMLInputElement).value)}
+                        />
+                      </label>
+                    {/if}
+                  </div>
+
+                  {#if rootsRuntime}
+                    {@const runtime = rootsRuntime.roots.find((entry) => entry.id === root.id)}
+                    {#if runtime}
+                      <div class="root-runtime">
+                        <span>exists: {runtime.exists ? 'yes' : 'no'}</span>
+                        <span>canWrite: {runtime.canWrite ? 'yes' : 'no'}</span>
+                        <span>
+                          free:
+                          {runtime.availableBytes !== undefined ? formatSize(runtime.availableBytes) : 'n/a'}
+                        </span>
+                        {#if runtime.lastWriteFailure}
+                          <span class="root-runtime-error">
+                            last error: {runtime.lastWriteFailure.code}
+                          </span>
+                        {/if}
+                      </div>
+                    {/if}
+                  {/if}
+                </article>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </section>
+    {/if}
+
     {#if address.trim() === ''}
       <!-- Initial state -->
       <div class="empty-state">
@@ -1174,7 +1483,7 @@
     flex: 1;
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto auto;
     gap: 0.75rem;
     align-items: center;
     position: relative;
@@ -1249,6 +1558,20 @@
   :global(.pin-btn:disabled) {
     opacity: 0.45;
     cursor: not-allowed;
+  }
+
+  .roots-btn {
+    border: 1px solid rgba(125, 211, 252, 0.35);
+    background: rgba(15, 23, 42, 0.45);
+    color: #dbeafe;
+    border-radius: 10px;
+    padding: 0.75rem 0.95rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+  }
+
+  .roots-btn:hover {
+    background: rgba(14, 116, 144, 0.25);
   }
 
   .pin-menu {
@@ -1429,6 +1752,188 @@
     flex-direction: column;
     gap: 1rem;
     min-height: 0;
+  }
+
+  .roots-panel {
+    max-width: 1200px;
+    margin: 0 auto 1rem;
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    border-radius: 14px;
+    background: linear-gradient(130deg, rgba(15, 23, 42, 0.78), rgba(30, 41, 59, 0.7));
+    padding: 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-height: 42vh;
+    min-height: 200px;
+  }
+
+  .roots-panel-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+
+  .roots-eyebrow {
+    margin: 0;
+    color: rgba(125, 211, 252, 0.85);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 0.72rem;
+  }
+
+  .roots-path {
+    margin: 0.2rem 0 0;
+    font-size: 0.78rem;
+    color: rgba(191, 219, 254, 0.82);
+    max-width: 56ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .roots-actions {
+    display: flex;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .roots-action-btn {
+    border: 1px solid rgba(125, 211, 252, 0.35);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.55);
+    color: #dbeafe;
+    padding: 0.35rem 0.6rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+
+  .roots-action-btn.primary {
+    border-color: rgba(110, 231, 183, 0.55);
+    color: #bbf7d0;
+    background: rgba(6, 95, 70, 0.35);
+  }
+
+  .roots-action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .roots-error,
+  .roots-success,
+  .roots-info {
+    margin: 0;
+    font-size: 0.82rem;
+  }
+
+  .roots-error {
+    color: #fecaca;
+  }
+
+  .roots-success {
+    color: #bbf7d0;
+  }
+
+  .roots-info {
+    color: rgba(191, 219, 254, 0.85);
+  }
+
+  .roots-scroll {
+    overflow: auto;
+    min-height: 0;
+    scrollbar-width: none;
+    padding-right: 0.15rem;
+  }
+
+  .roots-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  .roots-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+  }
+
+  .root-card {
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    border-radius: 10px;
+    padding: 0.65rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    background: rgba(15, 23, 42, 0.42);
+  }
+
+  .root-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+  }
+
+  .root-row label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 120px;
+    color: rgba(191, 219, 254, 0.85);
+    font-size: 0.74rem;
+  }
+
+  .root-input {
+    border: 1px solid rgba(125, 211, 252, 0.34);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.55);
+    color: #e2e8f0;
+    padding: 0.4rem 0.55rem;
+    font-size: 0.8rem;
+    min-width: 0;
+  }
+
+  .root-path-input {
+    width: 100%;
+  }
+
+  .root-check {
+    flex-direction: row;
+    align-items: center;
+    min-width: 0;
+    gap: 0.35rem;
+    font-size: 0.76rem;
+  }
+
+  .root-remove {
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    background: rgba(127, 29, 29, 0.32);
+    color: #fecaca;
+    border-radius: 8px;
+    padding: 0.42rem 0.6rem;
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+
+  .strategy-row {
+    align-items: stretch;
+  }
+
+  .root-allowlist {
+    flex: 1;
+    min-width: 220px;
+  }
+
+  .root-runtime {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    font-size: 0.72rem;
+    color: rgba(191, 219, 254, 0.82);
+  }
+
+  .root-runtime-error {
+    color: #fda4af;
   }
 
   .time-machine {
@@ -1865,7 +2370,7 @@
     }
 
     .secret-input-wrapper {
-      grid-template-columns: 1fr 1fr auto auto;
+      grid-template-columns: 1fr 1fr auto auto auto;
     }
 
     .pins-bar {
@@ -1913,11 +2418,11 @@
 
   @media (max-width: 640px) {
     .secret-input-wrapper {
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       grid-template-areas:
-        'address address'
-        'password password'
-        'pin spinner';
+        'address address address'
+        'password password password'
+        'pin roots spinner';
     }
 
     .secret-input-wrapper > input:first-child {
@@ -1931,6 +2436,12 @@
     :global(.pin-btn) {
       grid-area: pin;
       width: fit-content;
+    }
+
+    .roots-btn {
+      grid-area: roots;
+      width: fit-content;
+      justify-self: start;
     }
 
     .loading-spinner {

@@ -3,11 +3,13 @@ import { Router } from 'express';
 import { promises as fs } from 'fs';
 import os from 'os';
 import multer from 'multer';
+import { parseRootsConfig, saveRootsConfig } from '../config/roots.js';
 import type { CryptoOperations } from '../crypto/index.js';
 import type { FileService } from '../domain/fileService.js';
 import type { StorageBackend } from '../types/storage.js';
 import { openVolume } from '../domain/volume.js';
 import { bytesToHex } from '../utils/encoding.js';
+import { MultiRootStorageBackend, isMultiRootStorageBackend } from '../storage/multiRoot.js';
 import { ApiError } from './errors.js';
 import { encodeSecretToken, getSecretFromRequest, validateSecret } from './auth.js';
 import {
@@ -33,6 +35,8 @@ export interface RouteDependencies {
   readonly maxUploadBytes: number;
   /** Resolved absolute storage path; used for debug endpoints. */
   readonly resolvedStorageDir?: string;
+  /** Absolute roots config path for /config/roots endpoints. */
+  readonly rootsConfigPath?: string;
 }
 
 /**
@@ -54,6 +58,47 @@ export function createRoutes(deps: RouteDependencies): Router {
   router.get('/health', (_req, res) => {
     res.json({ ok: true });
   });
+
+  router.get('/config/roots', asyncHandler(async (req, res) => {
+    assertLocalConfigRequest(req);
+    const multiRootStorage = getMultiRootStorageOrThrow(deps.storage);
+    const runtime = await multiRootStorage.getRuntimeSnapshot();
+    res.json({
+      configPath: deps.rootsConfigPath ?? null,
+      config: multiRootStorage.getRootsConfig(),
+      runtime,
+    });
+  }));
+
+  router.put('/config/roots', asyncHandler(async (req, res) => {
+    assertLocalConfigRequest(req);
+    if (!deps.rootsConfigPath) {
+      throw new ApiError(500, 'INTERNAL_ERROR', 'Roots config path is not configured');
+    }
+
+    const candidate = extractRootsConfigBody(req.body);
+    let nextConfig;
+    try {
+      nextConfig = parseRootsConfig(candidate);
+    } catch (error) {
+      throw new ApiError(
+        400,
+        'INVALID_REQUEST',
+        error instanceof Error ? error.message : 'Invalid roots config'
+      );
+    }
+
+    await saveRootsConfig(deps.rootsConfigPath, nextConfig);
+    const multiRootStorage = getMultiRootStorageOrThrow(deps.storage);
+    multiRootStorage.updateRootsConfig(nextConfig);
+    const runtime = await multiRootStorage.getRuntimeSnapshot();
+
+    res.json({
+      configPath: deps.rootsConfigPath,
+      config: nextConfig,
+      runtime,
+    });
+  }));
 
   if (deps.resolvedStorageDir) {
     router.get('/__debug/storage', asyncHandler(async (_req, res) => {
@@ -228,14 +273,13 @@ export function createRoutes(deps: RouteDependencies): Router {
 }
 
 function requireSecret(deps: RouteDependencies): RequestHandler {
-  return async (req, res, next) => {
-    try {
-      const secret = await getSecretFromRequest(req, { tokenKey: deps.tokenKey });
-      res.locals.secret = secret;
-      next();
-    } catch (error) {
-      next(error);
-    }
+  return (req, res, next) => {
+    void getSecretFromRequest(req, { tokenKey: deps.tokenKey })
+      .then((secret) => {
+        res.locals.secret = secret;
+        next();
+      })
+      .catch((error: unknown) => next(error));
   };
 }
 
@@ -296,4 +340,48 @@ async function safeUnlink(path: string): Promise<void> {
   } catch {
     // Ignore cleanup errors for temp files.
   }
+}
+
+function extractRootsConfigBody(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || !('config' in value)) {
+    return value;
+  }
+  return (value as { config: unknown }).config;
+}
+
+function getMultiRootStorageOrThrow(storage: StorageBackend): MultiRootStorageBackend {
+  if (!isMultiRootStorageBackend(storage)) {
+    throw new ApiError(501, 'NOT_IMPLEMENTED', 'Multi-root storage is not enabled');
+  }
+  return storage;
+}
+
+function assertLocalConfigRequest(req: Request): void {
+  const forwardedFor = req.get('x-forwarded-for');
+  if (forwardedFor) {
+    const first = forwardedFor.split(',')[0]?.trim();
+    if (first && !isLoopbackAddress(first)) {
+      throw new ApiError(403, 'FORBIDDEN', 'Config endpoints are local-only');
+    }
+  }
+
+  const candidates = [req.ip, req.socket.remoteAddress];
+  if (candidates.some((candidate) => isLoopbackAddress(candidate))) {
+    return;
+  }
+
+  throw new ApiError(403, 'FORBIDDEN', 'Config endpoints are local-only');
+}
+
+function isLoopbackAddress(value: string | undefined): boolean {
+  if (!value) return false;
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === '127.0.0.1' || normalized === '::1') {
+    return true;
+  }
+  if (normalized.startsWith('::ffff:')) {
+    return normalized.slice('::ffff:'.length) === '127.0.0.1';
+  }
+  return false;
 }

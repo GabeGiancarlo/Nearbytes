@@ -76,6 +76,40 @@ Returns the file list for the authenticated volume.
 }
 ```
 
+### GET /timeline
+
+Returns deterministic file events (chronological) for the authenticated volume.
+
+```json
+{
+  "volumeId": "hex",
+  "eventCount": 2,
+  "events": [
+    {
+      "eventHash": "hex",
+      "type": "CREATE_FILE",
+      "filename": "photo.jpg",
+      "timestamp": 1738790900000
+    }
+  ]
+}
+```
+
+### POST /snapshot
+
+Computes and persists an on-demand snapshot file in the volume channel directory.
+
+```json
+{
+  "snapshot": {
+    "generatedAt": 1738790900000,
+    "eventCount": 12,
+    "fileCount": 3,
+    "lastEventHash": "hex-or-null"
+  }
+}
+```
+
 ### POST /upload
 
 Multipart upload. Fields:
@@ -115,12 +149,49 @@ Downloads and decrypts the file by blob hash.
 
 Returns raw bytes (not JSON).
 
+### GET /config/roots (local-only)
+
+Returns local multi-root configuration and runtime root status. Requests are accepted only from loopback clients.
+
+```json
+{
+  "configPath": "/Users/alice/.nearbytes/roots.json",
+  "config": { "version": 1, "roots": [] },
+  "runtime": { "roots": [], "writeFailures": [] }
+}
+```
+
+### PUT /config/roots (local-only)
+
+Persists and applies multi-root configuration immediately.
+
+Request body:
+
+```json
+{
+  "config": {
+    "version": 1,
+    "roots": [
+      {
+        "id": "main-default",
+        "kind": "main",
+        "path": "/abs/path",
+        "enabled": true,
+        "writable": true,
+        "strategy": { "name": "all-keys" }
+      }
+    ]
+  }
+}
+```
+
 ## Configuration
 
 Environment variables:
 
 - `PORT` (default `3000`)
-- `NEARBYTES_STORAGE_DIR` (default `$HOME/MEGA/NearbytesStorage` on macOS/Linux, `%USERPROFILE%\MEGA\NearbytesStorage` on Windows)
+- `NEARBYTES_STORAGE_DIR` (default `$HOME/MEGA/NearbytesStorage/NearbytesStorage` on macOS/Linux, `%USERPROFILE%\MEGA\NearbytesStorage\NearbytesStorage` on Windows)
+- `NEARBYTES_ROOTS_CONFIG` (optional; default `~/.nearbytes/roots.json`) - local multi-root manifest path
 - `NEARBYTES_SERVER_TOKEN_KEY` (optional; enables Bearer tokens)
 - `NEARBYTES_CORS_ORIGIN` (default `http://localhost:5173`, use `*` for any origin)
 - `NEARBYTES_MAX_UPLOAD_MB` (default `50`)
@@ -144,6 +215,12 @@ curl -L http://localhost:3000/file/<hash> \
   -o out.bin
 
 curl -X DELETE http://localhost:3000/files/photo.jpg \
+  -H "x-nearbytes-secret: my volume"
+
+curl http://localhost:3000/timeline \
+  -H "x-nearbytes-secret: my volume"
+
+curl -X POST http://localhost:3000/snapshot \
   -H "x-nearbytes-secret: my volume"
 ```
 

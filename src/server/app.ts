@@ -18,6 +18,8 @@ export interface AppDependencies {
   readonly maxUploadBytes: number;
   /** Resolved absolute storage path; used for debug endpoints and diagnostics. */
   readonly resolvedStorageDir?: string;
+  /** Absolute roots config path; used by /config/roots endpoints. */
+  readonly rootsConfigPath?: string;
 }
 
 /**
@@ -30,7 +32,7 @@ export function createApp(deps: AppDependencies): express.Express {
   app.use(
     cors({
       origin: deps.corsOrigin,
-      methods: ['GET', 'POST', 'DELETE'],
+      methods: ['GET', 'POST', 'PUT', 'DELETE'],
       allowedHeaders: ['Content-Type', 'Authorization', 'x-nearbytes-secret'],
     })
   );

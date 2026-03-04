@@ -60,6 +60,59 @@ export interface TimelineResponse {
   events: TimelineEvent[];
 }
 
+export type RootKind = 'main' | 'backup';
+export type RootStrategy =
+  | { name: 'all-keys' }
+  | { name: 'allowlist'; channelKeys: string[] };
+
+export interface RootConfigEntry {
+  id: string;
+  kind: RootKind;
+  path: string;
+  enabled: boolean;
+  writable: boolean;
+  strategy: RootStrategy;
+}
+
+export interface RootsConfig {
+  version: 1;
+  roots: RootConfigEntry[];
+}
+
+export interface RootWriteFailure {
+  rootId: string;
+  code: string;
+  message: string;
+  at: number;
+  relativePath: string;
+  channelKeyHex?: string;
+  category: 'resource_exhausted' | 'unavailable' | 'unknown';
+}
+
+export interface RootRuntimeStatus {
+  id: string;
+  kind: RootKind;
+  path: string;
+  enabled: boolean;
+  writable: boolean;
+  exists: boolean;
+  isDirectory: boolean;
+  canWrite: boolean;
+  availableBytes?: number;
+  lastWriteFailure?: RootWriteFailure;
+}
+
+export interface RootsRuntimeSnapshot {
+  roots: RootRuntimeStatus[];
+  writeFailures: RootWriteFailure[];
+}
+
+export interface RootsConfigResponse {
+  configPath: string | null;
+  config: RootsConfig;
+  runtime: RootsRuntimeSnapshot;
+}
+
 export interface ApiError {
   error: {
     code: string;
@@ -224,6 +277,25 @@ export async function computeSnapshot(auth: Auth): Promise<SnapshotResponse> {
   return apiRequest<SnapshotResponse>('/snapshot', {
     method: 'POST',
     auth,
+  });
+}
+
+/**
+ * Reads local multi-root storage configuration.
+ */
+export async function getRootsConfig(): Promise<RootsConfigResponse> {
+  return apiRequest<RootsConfigResponse>('/config/roots', {
+    method: 'GET',
+  });
+}
+
+/**
+ * Saves local multi-root storage configuration.
+ */
+export async function updateRootsConfig(config: RootsConfig): Promise<RootsConfigResponse> {
+  return apiRequest<RootsConfigResponse>('/config/roots', {
+    method: 'PUT',
+    body: JSON.stringify({ config }),
   });
 }
 

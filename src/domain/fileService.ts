@@ -216,7 +216,7 @@ async function addFileWithDeps(
   const symmetricKey = await crypto.deriveSymKey(keyPair.privateKey);
   const encryptedData = await crypto.encryptSym(data, symmetricKey);
   const blobHash = await crypto.computeHash(encryptedData);
-  await channelStorage.storeEncryptedData(blobHash, encryptedData, true);
+  await channelStorage.storeEncryptedData(blobHash, encryptedData, true, keyPair.publicKey);
 
   const createdAt = now();
   const payload: EventPayload = {
@@ -291,7 +291,7 @@ async function getFileWithDeps(
 ): Promise<Buffer> {
   const keyPair = await crypto.deriveKeys(normalizeSecret(secret));
   const symmetricKey = await crypto.deriveSymKey(keyPair.privateKey);
-  const encryptedData = await channelStorage.retrieveEncryptedData(blobHash as Hash);
+  const encryptedData = await channelStorage.retrieveEncryptedData(blobHash as Hash, keyPair.publicKey);
   const plaintext = await crypto.decryptSym(encryptedData, symmetricKey);
   return Buffer.from(plaintext);
 }
