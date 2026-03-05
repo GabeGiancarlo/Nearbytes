@@ -18,6 +18,12 @@ export const fileHashParamSchema = z.object({
   hash: z.string().min(1, 'Blob hash is required'),
 });
 
+export const renameFolderBodySchema = z.object({
+  from: z.string().min(1, 'Source folder is required'),
+  to: z.string().min(1, 'Destination folder is required'),
+  merge: z.boolean().optional().default(false),
+});
+
 /**
  * Parses and validates input using a Zod schema.
  */

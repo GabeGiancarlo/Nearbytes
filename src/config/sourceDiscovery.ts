@@ -8,6 +8,7 @@ export interface DiscoveredNearbytesSource {
   readonly path: string;
   readonly markerFile: string;
   readonly autoUpdate: boolean;
+  readonly sourceType: 'marker' | 'suggested';
 }
 
 export interface MarkerEnsureResult {
@@ -32,6 +33,7 @@ interface QueueEntry {
 const DEFAULT_MAX_DEPTH = 4;
 const DEFAULT_MAX_DIRECTORIES = 4000;
 export const NEARBYTES_MARKER_FILE = '.nearbytes';
+const DEFAULT_NEARBYTES_DIRECTORY = 'nearbytes';
 const SKIP_DIRECTORY_NAMES = new Set([
   '.git',
   '.idea',
@@ -73,8 +75,28 @@ export async function discoverNearbytesSources(options?: {
         path: canonicalDir,
         markerFile: path.join(canonicalDir, NEARBYTES_MARKER_FILE),
         autoUpdate: true,
+        sourceType: 'marker',
       });
     }
+
+    if (!isSyncedProvider(candidate.provider)) {
+      continue;
+    }
+    const suggestedPath = buildSuggestedNearbytesPath(candidate.path);
+    const canonicalSuggestedPath = await resolveCanonicalDirectoryPath(suggestedPath);
+    const resolvedSuggestedPath = canonicalSuggestedPath ?? path.resolve(suggestedPath);
+    const suggestionKey = toCanonicalPathKey(resolvedSuggestedPath);
+    if (seenRoots.has(suggestionKey)) {
+      continue;
+    }
+    seenRoots.add(suggestionKey);
+    discovered.push({
+      provider: candidate.provider,
+      path: resolvedSuggestedPath,
+      markerFile: path.join(resolvedSuggestedPath, NEARBYTES_MARKER_FILE),
+      autoUpdate: true,
+      sourceType: 'suggested',
+    });
   }
 
   discovered.sort((left, right) => {
@@ -284,6 +306,19 @@ function classifyProvider(entryName: string): RootProvider | null {
     return 'mega';
   }
   return null;
+}
+
+function isSyncedProvider(provider: RootProvider): boolean {
+  return provider === 'dropbox' || provider === 'mega' || provider === 'gdrive';
+}
+
+function buildSuggestedNearbytesPath(candidatePath: string): string {
+  const normalized = path.resolve(candidatePath).replace(/[\\/]+$/, '');
+  const currentBaseName = path.basename(normalized).toLowerCase();
+  if (currentBaseName === DEFAULT_NEARBYTES_DIRECTORY) {
+    return normalized;
+  }
+  return path.join(normalized, DEFAULT_NEARBYTES_DIRECTORY);
 }
 
 function parseScanPathsFromEnv(value: string | undefined): string[] {

@@ -60,6 +60,17 @@ export interface TimelineResponse {
   events: TimelineEvent[];
 }
 
+export interface RenameFolderSummary {
+  fromFolder: string;
+  toFolder: string;
+  movedFiles: number;
+  mergedConflicts: number;
+}
+
+export interface RenameFolderResponse {
+  renamed: RenameFolderSummary;
+}
+
 export type RootKind = 'main' | 'backup';
 export type RootProvider = 'local' | 'dropbox' | 'mega' | 'gdrive';
 export type RootStrategy =
@@ -120,6 +131,7 @@ export interface DiscoveredNearbytesSource {
   path: string;
   markerFile: string;
   autoUpdate: boolean;
+  sourceType: 'marker' | 'suggested';
 }
 
 export interface DiscoverSourcesResponse {
@@ -313,6 +325,22 @@ export async function deleteFile(auth: Auth, filename: string): Promise<void> {
   await apiRequest(`/files/${encodedName}`, {
     method: 'DELETE',
     auth,
+  });
+}
+
+/**
+ * Renames a virtual folder prefix by rewriting file metadata events.
+ */
+export async function renameFolder(
+  auth: Auth,
+  from: string,
+  to: string,
+  merge = false
+): Promise<RenameFolderResponse> {
+  return apiRequest<RenameFolderResponse>('/folders/rename', {
+    method: 'POST',
+    auth,
+    body: JSON.stringify({ from, to, merge }),
   });
 }
 

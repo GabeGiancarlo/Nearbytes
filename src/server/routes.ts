@@ -23,6 +23,7 @@ import {
   fileNameParamSchema,
   openBodySchema,
   parseWithSchema,
+  renameFolderBodySchema,
   uploadFieldsSchema,
 } from './validation.js';
 
@@ -316,6 +317,17 @@ export function createRoutes(deps: RouteDependencies): Router {
       const secret = res.locals.secret as string;
       await deps.fileService.deleteFile(secret, filename);
       res.json({ deleted: true, filename });
+    })
+  );
+
+  router.post(
+    '/folders/rename',
+    requireSecret(deps),
+    asyncHandler(async (req, res) => {
+      const { from, to, merge } = parseWithSchema(renameFolderBodySchema, req.body);
+      const secret = res.locals.secret as string;
+      const renamed = await deps.fileService.renameFolder(secret, from, to, { merge });
+      res.json({ renamed });
     })
   );
 

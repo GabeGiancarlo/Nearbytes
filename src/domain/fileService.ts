@@ -1,4 +1,4 @@
-import type { Secret } from '../types/keys.js';
+import type { KeyPair, Secret } from '../types/keys.js';
 import { createSecret } from '../types/keys.js';
 import type { CryptoOperations } from '../crypto/index.js';
 import type { StorageBackend, ChannelPathMapper } from '../types/storage.js';
@@ -45,6 +45,13 @@ export interface TimelineEvent {
   deletedAt?: number;
 }
 
+export interface RenameFolderSummary {
+  fromFolder: string;
+  toFolder: string;
+  movedFiles: number;
+  mergedConflicts: number;
+}
+
 export interface FileServiceDependencies {
   crypto: CryptoOperations;
   storage: StorageBackend;
@@ -62,6 +69,12 @@ export interface FileService {
   deleteFile(secret: string, filename: string): Promise<void>;
   listFiles(secret: string): Promise<FileMetadata[]>;
   getFile(secret: string, blobHash: string): Promise<Buffer>;
+  renameFolder(
+    secret: string,
+    fromFolder: string,
+    toFolder: string,
+    options?: { merge?: boolean }
+  ): Promise<RenameFolderSummary>;
   computeSnapshot(secret: string): Promise<SnapshotSummary>;
   getTimeline(secret: string): Promise<TimelineEvent[]>;
 }
@@ -103,6 +116,18 @@ export function createFileService(dependencies: FileServiceDependencies): FileSe
       listFilesWithDeps(secret, dependencies.crypto, dependencies.storage, channelStorage, pathMapper),
     getFile: async (secret, blobHash) =>
       getFileWithDeps(secret, blobHash, dependencies.crypto, channelStorage),
+    renameFolder: async (secret, fromFolder, toFolder, options) =>
+      renameFolderWithDeps(
+        secret,
+        fromFolder,
+        toFolder,
+        options?.merge ?? false,
+        dependencies.crypto,
+        dependencies.storage,
+        channelStorage,
+        pathMapper,
+        now
+      ),
     computeSnapshot: async (secret) =>
       computeSnapshotWithDeps(
         secret,
@@ -167,6 +192,19 @@ export async function getFile(secret: string, blobHash: string): Promise<Buffer>
 }
 
 /**
+ * Renames a virtual folder by replaying metadata events for every file under it.
+ */
+export async function renameFolder(
+  secret: string,
+  fromFolder: string,
+  toFolder: string,
+  options?: { merge?: boolean }
+): Promise<RenameFolderSummary> {
+  const service = getDefaultFileService();
+  return service.renameFolder(secret, fromFolder, toFolder, options);
+}
+
+/**
  * Computes and persists a point-in-time snapshot of the current volume state.
  * Snapshot generation is explicit (on-demand) and never automatic.
  */
@@ -219,19 +257,13 @@ async function addFileWithDeps(
   await channelStorage.storeEncryptedData(blobHash, encryptedData, true, keyPair.publicKey);
 
   const createdAt = now();
-  const payload: EventPayload = {
-    type: EventType.CREATE_FILE,
-    fileName: filename,
-    hash: blobHash,
-    encryptedKey: createEncryptedData(new Uint8Array(0)),
+  await appendCreateEvent(channelStorage, crypto, keyPair, {
+    filename,
+    blobHash,
     size: data.length,
     mimeType,
     createdAt,
-  };
-
-  const payloadBytes = serializeEventPayload(payload);
-  const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);
-  await channelStorage.storeEvent(keyPair.publicKey, { payload, signature });
+  });
 
   return {
     filename,
@@ -257,17 +289,101 @@ async function deleteFileWithDeps(
 
   const keyPair = await crypto.deriveKeys(normalizedSecret);
   const deletedAt = now();
-  const payload: EventPayload = {
-    type: EventType.DELETE_FILE,
-    fileName: filename,
-    hash: EMPTY_HASH,
-    encryptedKey: createEncryptedData(new Uint8Array(0)),
-    deletedAt,
-  };
+  await appendDeleteEvent(channelStorage, crypto, keyPair, filename, deletedAt);
+}
 
-  const payloadBytes = serializeEventPayload(payload);
-  const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);
-  await channelStorage.storeEvent(keyPair.publicKey, { payload, signature });
+async function renameFolderWithDeps(
+  secret: string,
+  fromFolder: string,
+  toFolder: string,
+  merge: boolean,
+  crypto: CryptoOperations,
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper,
+  now: () => number
+): Promise<RenameFolderSummary> {
+  const normalizedFrom = normalizeFolderPath(fromFolder);
+  const normalizedTo = normalizeFolderPath(toFolder);
+  if (normalizedFrom.length === 0 || normalizedTo.length === 0) {
+    throw new Error('Folder names are required');
+  }
+  if (normalizedFrom === normalizedTo) {
+    throw new Error('Source and destination folders are the same');
+  }
+
+  const normalizedSecret = normalizeSecret(secret);
+  const volume = await openVolume(normalizedSecret, crypto, storage, pathMapper);
+  const entries = await loadEventLog(volume, channelStorage);
+  await verifyEventLog(entries, volume, crypto);
+
+  const files = materializeFilesFromEntries(entries);
+  const sourceFiles = files.filter((file) => file.filename.startsWith(`${normalizedFrom}/`));
+  if (sourceFiles.length === 0) {
+    throw new Error(`Folder "${normalizedFrom}" is empty or does not exist`);
+  }
+
+  const existingByName = new Map<string, FileMetadata>(files.map((file) => [file.filename, file]));
+  const sourceNameSet = new Set(sourceFiles.map((file) => file.filename));
+
+  const plan = sourceFiles
+    .map((file) => ({
+      fromName: file.filename,
+      toName: `${normalizedTo}/${file.filename.slice(normalizedFrom.length + 1)}`,
+      file,
+    }))
+    .sort((left, right) => left.fromName.localeCompare(right.fromName));
+
+  const duplicateTargets = new Set<string>();
+  const targetSet = new Set<string>();
+  for (const item of plan) {
+    if (targetSet.has(item.toName)) {
+      duplicateTargets.add(item.toName);
+      continue;
+    }
+    targetSet.add(item.toName);
+  }
+  if (duplicateTargets.size > 0) {
+    throw new Error('Rename would produce duplicate target paths');
+  }
+
+  const conflicts = plan.filter((item) => {
+    const existing = existingByName.get(item.toName);
+    if (!existing) return false;
+    return !sourceNameSet.has(item.toName);
+  });
+
+  if (conflicts.length > 0 && !merge) {
+    throw new Error(
+      `Destination folder already contains ${conflicts.length} file(s). Retry with merge enabled.`
+    );
+  }
+
+  const timeline = mapEntriesToTimeline(entries);
+  const maxTimestamp = timeline.reduce((max, event) => Math.max(max, event.timestamp), 0);
+  const baseTimestamp = Math.max(now(), maxTimestamp + 1);
+  const keyPair = await crypto.deriveKeys(normalizedSecret);
+
+  let cursor = baseTimestamp;
+  for (const item of plan) {
+    await appendCreateEvent(channelStorage, crypto, keyPair, {
+      filename: item.toName,
+      blobHash: item.file.blobHash,
+      size: item.file.size,
+      mimeType: item.file.mimeType,
+      createdAt: cursor,
+    });
+    cursor += 1;
+    await appendDeleteEvent(channelStorage, crypto, keyPair, item.fromName, cursor);
+    cursor += 1;
+  }
+
+  return {
+    fromFolder: normalizedFrom,
+    toFolder: normalizedTo,
+    movedFiles: plan.length,
+    mergedConflicts: conflicts.length,
+  };
 }
 
 async function listFilesWithDeps(
@@ -472,6 +588,60 @@ function assertNonEmptyFilename(filename: string): void {
   if (!filename || filename.trim().length === 0) {
     throw new Error('File name cannot be empty');
   }
+}
+
+function normalizeFolderPath(folder: string): string {
+  return folder
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '')
+    .replace(/\/{2,}/g, '/');
+}
+
+async function appendCreateEvent(
+  channelStorage: ChannelStorage,
+  crypto: CryptoOperations,
+  keyPair: KeyPair,
+  input: {
+    filename: string;
+    blobHash: string;
+    size: number;
+    mimeType?: string;
+    createdAt: number;
+  }
+): Promise<void> {
+  const payload: EventPayload = {
+    type: EventType.CREATE_FILE,
+    fileName: input.filename,
+    hash: input.blobHash as Hash,
+    encryptedKey: createEncryptedData(new Uint8Array(0)),
+    size: input.size,
+    mimeType: input.mimeType,
+    createdAt: input.createdAt,
+  };
+  const payloadBytes = serializeEventPayload(payload);
+  const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);
+  await channelStorage.storeEvent(keyPair.publicKey, { payload, signature });
+}
+
+async function appendDeleteEvent(
+  channelStorage: ChannelStorage,
+  crypto: CryptoOperations,
+  keyPair: KeyPair,
+  filename: string,
+  deletedAt: number
+): Promise<void> {
+  const payload: EventPayload = {
+    type: EventType.DELETE_FILE,
+    fileName: filename,
+    hash: EMPTY_HASH,
+    encryptedKey: createEncryptedData(new Uint8Array(0)),
+    deletedAt,
+  };
+  const payloadBytes = serializeEventPayload(payload);
+  const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);
+  await channelStorage.storeEvent(keyPair.publicKey, { payload, signature });
 }
 
 function normalizeSecret(secret: string): Secret {

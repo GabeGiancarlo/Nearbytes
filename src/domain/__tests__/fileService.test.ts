@@ -143,6 +143,53 @@ describe('FileService', () => {
     await cleanup();
   });
 
+  it('renames a folder prefix across all nested files', async () => {
+    const { service, cleanup } = await createTestService(START_TIME);
+    const secret = 'test:secret:rename-folder';
+
+    await service.addFile(secret, 'photos/a.jpg', Buffer.from('a'));
+    await service.addFile(secret, 'photos/2024/b.jpg', Buffer.from('b'));
+    await service.addFile(secret, 'notes/todo.txt', Buffer.from('todo'));
+
+    const renamed = await service.renameFolder(secret, 'photos', 'archive/photos');
+    const files = await service.listFiles(secret);
+    const names = files.map((file) => file.filename).sort((left, right) => left.localeCompare(right));
+
+    expect(renamed.fromFolder).toBe('photos');
+    expect(renamed.toFolder).toBe('archive/photos');
+    expect(renamed.movedFiles).toBe(2);
+    expect(renamed.mergedConflicts).toBe(0);
+    expect(names).toEqual(['archive/photos/2024/b.jpg', 'archive/photos/a.jpg', 'notes/todo.txt']);
+
+    await cleanup();
+  });
+
+  it('requires merge when destination folder already contains files', async () => {
+    const { service, cleanup } = await createTestService(START_TIME);
+    const secret = 'test:secret:rename-merge';
+
+    await service.addFile(secret, 'src/a.txt', Buffer.from('src-version'));
+    await service.addFile(secret, 'dst/a.txt', Buffer.from('dst-version'));
+
+    await expect(service.renameFolder(secret, 'src', 'dst')).rejects.toThrow(
+      'Destination folder already contains 1 file(s). Retry with merge enabled.'
+    );
+
+    const renamed = await service.renameFolder(secret, 'src', 'dst', { merge: true });
+    const files = await service.listFiles(secret);
+    const moved = files.find((file) => file.filename === 'dst/a.txt');
+
+    expect(renamed.movedFiles).toBe(1);
+    expect(renamed.mergedConflicts).toBe(1);
+    expect(files.some((file) => file.filename.startsWith('src/'))).toBe(false);
+    expect(moved).toBeDefined();
+
+    const payload = await service.getFile(secret, moved!.blobHash);
+    expect(payload.toString('utf8')).toBe('src-version');
+
+    await cleanup();
+  });
+
   it('includes legacy log events without metadata in timeline replay', async () => {
     const { service, dir, cleanup } = await createTestService(START_TIME);
     const secret = 'test:secret:legacy';

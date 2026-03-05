@@ -15,6 +15,7 @@ const SECRET_ISOLATION = 'nearbytes-isolation-secret';
 const SECRET_OTHER = 'nearbytes-other-secret';
 const SECRET_SNAPSHOT = 'nearbytes-snapshot-secret';
 const SECRET_TIMELINE = 'nearbytes-timeline-secret';
+const SECRET_RENAME_FOLDER = 'nearbytes-rename-folder-secret';
 
 describe('Nearbytes API', () => {
   let tempDir: string;
@@ -111,6 +112,65 @@ describe('Nearbytes API', () => {
       .expect(200);
 
     expect(emptyList.body.files).toHaveLength(0);
+  });
+
+  it('renames folders and supports merge mode', async () => {
+    const openRes = await request(app).post('/open').send({ secret: SECRET_RENAME_FOLDER }).expect(200);
+    const token = openRes.body.token as string;
+
+    await request(app)
+      .post('/upload')
+      .set('Authorization', `Bearer ${token}`)
+      .field('filename', 'alpha/a.txt')
+      .attach('file', Buffer.from('alpha-payload'), 'a.txt')
+      .expect(200);
+
+    await request(app)
+      .post('/upload')
+      .set('Authorization', `Bearer ${token}`)
+      .field('filename', 'beta/a.txt')
+      .attach('file', Buffer.from('beta-payload'), 'a.txt')
+      .expect(200);
+
+    await request(app)
+      .post('/folders/rename')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ from: 'alpha', to: 'beta' })
+      .expect(500);
+
+    const renameRes = await request(app)
+      .post('/folders/rename')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ from: 'alpha', to: 'beta', merge: true })
+      .expect(200);
+
+    expect(renameRes.body.renamed.movedFiles).toBe(1);
+    expect(renameRes.body.renamed.mergedConflicts).toBe(1);
+
+    const listRes = await request(app)
+      .get('/files')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(listRes.body.files.some((file: { filename: string }) => file.filename.startsWith('alpha/'))).toBe(
+      false
+    );
+    const moved = listRes.body.files.find((file: { filename: string }) => file.filename === 'beta/a.txt');
+    expect(moved).toBeDefined();
+
+    const downloadRes = await request(app)
+      .get(`/file/${moved.blobHash as string}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    const downloaded =
+      typeof downloadRes.body === 'string'
+        ? downloadRes.body
+        : downloadRes.body instanceof Buffer
+          ? downloadRes.body.toString('utf8')
+          : (downloadRes as any).text || '';
+
+    expect(downloaded).toBe('alpha-payload');
   });
 
   it('rejects wrong secrets and isolates volumes', async () => {

@@ -30,10 +30,7 @@ describe('source discovery', () => {
     });
 
     const realRoot = await pathReal(markerRoot);
-    const matches = await Promise.all(
-      sources.map(async (source) => ((await pathReal(source.path)) === realRoot ? source : null))
-    );
-    const discoveredForRoot = matches.filter((entry) => entry !== null);
+    const discoveredForRoot = sources.filter((source) => path.resolve(source.path) === realRoot);
     expect(discoveredForRoot).toHaveLength(1);
 
     await rm(tempDir, { recursive: true, force: true });

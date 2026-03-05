@@ -5,6 +5,7 @@
     getTimeline,
     uploadFiles,
     deleteFile,
+    renameFolder,
     downloadFile,
     getRootsConfig,
     updateRootsConfig,
@@ -113,6 +114,7 @@
   let previewText = $state('');
   let previewLoading = $state(false);
   let previewError = $state('');
+  let selectedFolder = $state('');
   let currentPreviewObjectUrl: string | null = null;
   const previewBlobCache = new Map<string, Blob>();
   let pinnedVolumes = $state<PinnedVolume[]>(loadPinnedVolumes());
@@ -141,6 +143,16 @@
     source: DiscoveredNearbytesSource;
     alreadyRegistered: boolean;
   };
+  type VolumeRouteRow = {
+    index: number;
+    rootId: string;
+    provider: RootProvider;
+    kind: 'main' | 'backup';
+    selected: boolean;
+    routable: boolean;
+    enabled: boolean;
+    writable: boolean;
+  };
 
   const activePins = $derived.by(() => {
     pinClock;
@@ -154,19 +166,21 @@
   });
 
   const discoveredSourceRows = $derived.by(() => {
-    const seen = new Set<string>();
-    const rows: SourceRow[] = [];
+    const uniqueSources = new Map<string, DiscoveredNearbytesSource>();
     for (const source of discoveredSources) {
       const key = normalizeComparablePath(source.path);
-      if (seen.has(key)) {
-        continue;
+      const existing = uniqueSources.get(key);
+      if (!existing || source.sourceType === 'marker') {
+        uniqueSources.set(key, source);
       }
-      seen.add(key);
+    }
+    const rows: SourceRow[] = Array.from(uniqueSources.values()).map((source) => {
+      const key = normalizeComparablePath(source.path);
       const alreadyRegistered = rootsDraft.some(
         (root) => normalizeComparablePath(root.path) === key
       );
-      rows.push({ source, alreadyRegistered });
-    }
+      return { source, alreadyRegistered };
+    });
     rows.sort((left, right) => left.source.path.localeCompare(right.source.path));
     return rows;
   });
@@ -175,6 +189,33 @@
   const alreadyRegisteredSourceCount = $derived.by(
     () => discoveredSourceRows.filter((row) => row.alreadyRegistered).length
   );
+  const currentVolumeKey = $derived.by(() => {
+    const raw = volumeId?.trim() ?? '';
+    if (raw === '') return null;
+    return normalizeChannelKey(raw);
+  });
+  const volumeRouteRows = $derived.by(() => {
+    const key = currentVolumeKey;
+    if (!key) return [] as VolumeRouteRow[];
+    return rootsDraft.map((root, index) => {
+      const selected =
+        root.kind === 'main'
+          ? true
+          : root.strategy.name === 'allowlist' &&
+            root.strategy.channelKeys.some((entry) => normalizeChannelKey(entry) === key);
+      return {
+        index,
+        rootId: root.id,
+        provider: root.provider,
+        kind: root.kind,
+        selected,
+        routable: selected && root.enabled && root.writable,
+        enabled: root.enabled,
+        writable: root.writable,
+      };
+    });
+  });
+  const routedRootCount = $derived.by(() => volumeRouteRows.filter((row) => row.routable).length);
 
   $effect(() => {
     const interval = setInterval(() => {
@@ -244,11 +285,30 @@
     return materialized;
   });
 
+  const folderPaths = $derived.by(() => {
+    const folders = new Set<string>();
+    for (const file of viewFiles) {
+      const parts = file.filename.split('/').filter((part) => part.length > 0);
+      for (let i = 1; i < parts.length; i += 1) {
+        folders.add(parts.slice(0, i).join('/'));
+      }
+    }
+    return Array.from(folders).sort((left, right) => left.localeCompare(right));
+  });
+
+  const filesInSelectedFolder = $derived.by(() => {
+    if (selectedFolder.trim() === '') {
+      return viewFiles;
+    }
+    const prefix = `${selectedFolder}/`;
+    return viewFiles.filter((file) => file.filename.startsWith(prefix));
+  });
+
   const visibleFiles = $derived.by(() => {
     const query = searchQuery.trim().toLowerCase();
     const filtered = query
-      ? viewFiles.filter((file) => file.filename.toLowerCase().includes(query))
-      : viewFiles;
+      ? filesInSelectedFolder.filter((file) => file.filename.toLowerCase().includes(query))
+      : filesInSelectedFolder;
     const sorted = [...filtered];
     if (sortBy === 'name') {
       sorted.sort((a, b) => a.filename.localeCompare(b.filename));
@@ -264,6 +324,13 @@
     }
     sorted.sort((a, b) => b.createdAt - a.createdAt);
     return sorted;
+  });
+
+  $effect(() => {
+    if (selectedFolder.trim() === '') return;
+    if (!folderPaths.includes(selectedFolder)) {
+      selectedFolder = '';
+    }
   });
 
   const selectedFile = $derived.by(
@@ -730,18 +797,42 @@
     return normalized.toLowerCase();
   }
 
+  function normalizeChannelKey(value: string): string {
+    return value.trim().toLowerCase();
+  }
+
+  function ensureNearbytesPath(pathValue: string, provider: RootProvider): string {
+    if (provider === 'local') {
+      return pathValue;
+    }
+    const trimmed = pathValue.trim().replace(/[/\\]+$/, '');
+    if (trimmed === '') {
+      return pathValue;
+    }
+    const normalized = trimmed.replace(/\\/g, '/');
+    if (normalized.endsWith('/nearbytes') || normalized.toLowerCase().endsWith('/nearbytes')) {
+      return trimmed;
+    }
+    return `${trimmed}/nearbytes`;
+  }
+
+  function sourceTypeLabel(source: DiscoveredNearbytesSource): string {
+    return source.sourceType === 'marker' ? 'marker found' : 'default suggestion';
+  }
+
   function rootIdFromSource(source: DiscoveredNearbytesSource, kind: 'main' | 'backup'): string {
     const base = `${kind}-${source.provider}-${Math.random().toString(16).slice(2, 8)}`;
     return base.toLowerCase();
   }
 
   function addSourceAsRoot(source: DiscoveredNearbytesSource, kind: 'main' | 'backup') {
-    const normalizedPath = normalizeComparablePath(source.path);
+    const sourcePath = ensureNearbytesPath(source.path, source.provider);
+    const normalizedPath = normalizeComparablePath(sourcePath);
     const exists = rootsDraft.some(
       (root) => normalizeComparablePath(root.path) === normalizedPath
     );
     if (exists) {
-      rootsSuccess = `${source.path} is already configured.`;
+      rootsSuccess = `${sourcePath} is already configured.`;
       return;
     }
 
@@ -749,7 +840,7 @@
       id: rootIdFromSource(source, kind),
       kind,
       provider: source.provider,
-      path: source.path,
+      path: sourcePath,
       enabled: true,
       writable: true,
       strategy: kind === 'main' ? { name: 'all-keys' } : { name: 'allowlist', channelKeys: [] },
@@ -768,13 +859,14 @@
       const uniqueDiscovered = new Map<string, DiscoveredNearbytesSource>();
       for (const source of response.sources) {
         const key = normalizeComparablePath(source.path);
-        if (!uniqueDiscovered.has(key)) {
+        const existing = uniqueDiscovered.get(key);
+        if (!existing || source.sourceType === 'marker') {
           uniqueDiscovered.set(key, source);
         }
       }
       const dedupedCount = uniqueDiscovered.size;
       if (dedupedCount === 0) {
-        rootsSuccess = 'No .nearbytes sources found in synced folders.';
+        rootsSuccess = 'No synced sources found.';
       } else {
         const registeredKeys = new Set(
           rootsDraft.map((root) => normalizeComparablePath(root.path))
@@ -782,10 +874,13 @@
         const newCount = Array.from(uniqueDiscovered.keys()).filter(
           (key) => !registeredKeys.has(key)
         ).length;
+        const suggestedCount = Array.from(uniqueDiscovered.values()).filter(
+          (source) => source.sourceType === 'suggested'
+        ).length;
         if (newCount === 0) {
           rootsSuccess = 'All discovered sources are already registered.';
         } else {
-          rootsSuccess = `Discovered ${newCount} new source${newCount === 1 ? '' : 's'}.`;
+          rootsSuccess = `Found ${newCount} new source${newCount === 1 ? '' : 's'} (${suggestedCount} default suggestion${suggestedCount === 1 ? '' : 's'}).`;
         }
       }
     } catch (error) {
@@ -793,6 +888,75 @@
     } finally {
       sourceDiscoveryLoading = false;
     }
+  }
+
+  function routeRootForCurrentVolume(index: number) {
+    const key = currentVolumeKey;
+    if (!key) {
+      rootsError = 'Open a volume first to route roots.';
+      return;
+    }
+
+    const next = [...rootsDraft];
+    const root = next[index];
+    if (!root) return;
+
+    if (root.kind === 'main') {
+      next[index] = {
+        ...root,
+        enabled: true,
+        writable: true,
+      };
+      rootsDraft = next;
+      rootsSuccess = `Main root "${root.id}" is now active for all volumes. Save to apply.`;
+      return;
+    }
+
+    const existingKeys =
+      root.strategy.name === 'allowlist'
+        ? root.strategy.channelKeys.map((entry) => normalizeChannelKey(entry))
+        : [];
+    const hasKey = existingKeys.includes(key);
+    const shouldEnableRoute = !hasKey || !root.enabled || !root.writable;
+
+    if (shouldEnableRoute) {
+      const merged = Array.from(new Set([...existingKeys, key])).sort((a, b) => a.localeCompare(b));
+      next[index] = {
+        ...root,
+        enabled: true,
+        writable: true,
+        strategy: {
+          name: 'allowlist',
+          channelKeys: merged,
+        },
+      };
+      rootsDraft = next;
+      rootsSuccess = `Volume routed to backup root "${root.id}". Save to apply.`;
+      return;
+    }
+
+    next[index] = {
+      ...root,
+      strategy: {
+        name: 'allowlist',
+        channelKeys: existingKeys.filter((entry) => entry !== key),
+      },
+    };
+    rootsDraft = next;
+    rootsSuccess = `Volume removed from backup root "${root.id}". Save to apply.`;
+  }
+
+  function routeButtonLabel(row: VolumeRouteRow): string {
+    if (row.kind === 'main') {
+      return row.routable ? 'Main Active' : 'Enable Main';
+    }
+    if (row.routable) {
+      return 'Using Volume';
+    }
+    if (row.selected && (!row.enabled || !row.writable)) {
+      return 'Enable Root';
+    }
+    return 'Use Volume';
   }
 
   async function saveRootsPanel() {
@@ -958,6 +1122,95 @@
     if (e.key === ' ') {
       e.preventDefault();
       selectFile(file);
+    }
+  }
+
+  function normalizeFolderInput(value: string): string {
+    return value
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '')
+      .replace(/\/+$/, '')
+      .replace(/\/{2,}/g, '/');
+  }
+
+  function displayFileName(file: FileMetadata): string {
+    if (selectedFolder.trim() === '') {
+      return file.filename;
+    }
+    const prefix = `${selectedFolder}/`;
+    if (!file.filename.startsWith(prefix)) {
+      return file.filename;
+    }
+    return file.filename.slice(prefix.length);
+  }
+
+  async function handleRenameFolder() {
+    if (!auth) return;
+    if (isHistoryMode) {
+      errorMessage = 'History mode is read-only. Jump to Latest before renaming folders.';
+      return;
+    }
+    const sourceFolder = normalizeFolderInput(selectedFolder);
+    if (sourceFolder.length === 0) {
+      errorMessage = 'Select a folder to rename.';
+      return;
+    }
+
+    const input = window.prompt('Rename folder', sourceFolder);
+    if (input === null) {
+      return;
+    }
+
+    const destinationFolder = normalizeFolderInput(input);
+    if (destinationFolder.length === 0) {
+      errorMessage = 'Destination folder cannot be empty.';
+      return;
+    }
+    if (destinationFolder === sourceFolder) {
+      return;
+    }
+
+    let merge = false;
+    const destinationExists = folderPaths.includes(destinationFolder);
+    if (destinationExists) {
+      merge = window.confirm(
+        `Folder "${destinationFolder}" already exists. Merge "${sourceFolder}" into it?`
+      );
+      if (!merge) {
+        return;
+      }
+    }
+
+    try {
+      errorMessage = '';
+      await renameFolder(auth, sourceFolder, destinationFolder, merge);
+      selectedFolder = destinationFolder;
+      await refreshFiles();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Folder rename failed';
+      if (
+        !merge &&
+        message.toLowerCase().includes('destination folder already contains')
+      ) {
+        const retryMerge = window.confirm(
+          `Folder "${destinationFolder}" already contains files. Merge and continue?`
+        );
+        if (!retryMerge) {
+          return;
+        }
+        try {
+          errorMessage = '';
+          await renameFolder(auth, sourceFolder, destinationFolder, true);
+          selectedFolder = destinationFolder;
+          await refreshFiles();
+          return;
+        } catch (retryError) {
+          errorMessage = retryError instanceof Error ? retryError.message : 'Folder merge failed';
+          return;
+        }
+      }
+      errorMessage = message;
     }
   }
 
@@ -1334,12 +1587,15 @@
           {:else}
             {#if sourceRows.length > 0}
               <section class="source-discovery" aria-label="Discovered synced sources">
-                <p class="roots-info">Discovered `.nearbytes` sources</p>
+                <p class="roots-info">Discovered and suggested synced sources</p>
                 <div class="source-list">
                   {#each sourceRows as row (row.source.path)}
                     <article class="source-card">
                       <div class="source-meta">
-                        <span class="source-provider">{formatProvider(row.source.provider)}</span>
+                        <div class="source-provider-row">
+                          <span class="source-provider">{formatProvider(row.source.provider)}</span>
+                          <span class="source-origin">{sourceTypeLabel(row.source)}</span>
+                        </div>
                         <span class="source-path" title={row.source.path}>{row.source.path}</span>
                       </div>
                       <div class="source-actions">
@@ -1364,6 +1620,38 @@
               </section>
             {:else if discoveredSourceRows.length > 0 && alreadyRegisteredSourceCount > 0}
               <p class="roots-info">All discovered sources are already registered.</p>
+            {/if}
+
+            {#if volumeId && volumeRouteRows.length > 0}
+              <section class="volume-root-selector" aria-label="Route current volume across roots">
+                <div class="volume-selector-head">
+                  <p class="roots-info">
+                    Volume routing for <code>{volumeId}</code>
+                  </p>
+                  <span class="volume-selector-summary">
+                    {routedRootCount} active root{routedRootCount === 1 ? '' : 's'}
+                  </span>
+                </div>
+                <div class="volume-selector-grid">
+                  {#each volumeRouteRows as row (row.rootId + ':' + row.index)}
+                    <button
+                      type="button"
+                      class="volume-route-btn"
+                      class:routed={row.routable}
+                      class:main={row.kind === 'main'}
+                      class:inactive={!row.routable}
+                      disabled={row.kind === 'main' && row.routable}
+                      onclick={() => routeRootForCurrentVolume(row.index)}
+                      title={row.kind === 'main' ? 'Main roots always write all keys when enabled and writable' : 'Toggle this volume on this backup root'}
+                    >
+                      <span class="volume-route-provider">{formatProvider(row.provider)}</span>
+                      <span class="volume-route-id">{row.rootId}</span>
+                      <span class="volume-route-state">{routeButtonLabel(row)}</span>
+                    </button>
+                  {/each}
+                </div>
+                <p class="roots-info">Changes apply to runtime after pressing Save.</p>
+              </section>
             {/if}
 
             <div class="roots-list">
@@ -1456,6 +1744,35 @@
                       </label>
                     {/if}
                   </div>
+
+                  {#if volumeId}
+                    {@const routeRow = volumeRouteRows.find((entry) => entry.index === index)}
+                    {#if routeRow}
+                      <div class="root-volume-route">
+                        <span class="root-volume-label">Current volume</span>
+                        <span class="root-volume-state" class:active={routeRow.routable}>
+                          {routeRow.kind === 'main'
+                            ? routeRow.routable
+                              ? 'active (main)'
+                              : 'disabled (main)'
+                            : routeRow.routable
+                              ? 'active'
+                              : routeRow.selected
+                                ? 'selected but disabled'
+                                : 'not selected'}
+                        </span>
+                        <button
+                          type="button"
+                          class="root-route-btn"
+                          class:active={routeRow.routable}
+                          disabled={routeRow.kind === 'main' && routeRow.routable}
+                          onclick={() => routeRootForCurrentVolume(index)}
+                        >
+                          {routeButtonLabel(routeRow)}
+                        </button>
+                      </div>
+                    {/if}
+                  {/if}
 
                   {#if rootsRuntime}
                     {@const runtime = rootsRuntime.roots.find((entry) => entry.id === root.id)}
@@ -1601,6 +1918,21 @@
                 <option value="name">Name</option>
                 <option value="size">Size</option>
               </select>
+              <select class="manager-folder" bind:value={selectedFolder} aria-label="Filter by folder">
+                <option value="">All folders</option>
+                {#each folderPaths as folder (folder)}
+                  <option value={folder}>{folder}</option>
+                {/each}
+              </select>
+              <button
+                type="button"
+                class="manager-btn toolbar-btn"
+                onclick={handleRenameFolder}
+                disabled={selectedFolder.trim() === '' || isHistoryMode}
+                title={isHistoryMode ? 'Jump to Latest before renaming folders' : 'Rename selected folder'}
+              >
+                Rename Folder
+              </button>
             </div>
             <div class="file-list-head">
               <span>Name</span>
@@ -1622,7 +1954,7 @@
                     ondblclick={() => openFileInViewer(file)}
                     onkeydown={(e) => handleFileRowKeydown(e, file)}
                   >
-                    <span class="file-row-name" title={file.filename}>{file.filename}</span>
+                    <span class="file-row-name" title={file.filename}>{displayFileName(file)}</span>
                     <span class="file-row-size">{formatSize(file.size)}</span>
                     <span class="file-row-date">{formatShortDate(file.createdAt)}</span>
                   </div>
@@ -2172,11 +2504,28 @@
     flex: 1;
   }
 
+  .source-provider-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+
   .source-provider {
     font-size: 0.7rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: rgba(103, 232, 249, 0.92);
+  }
+
+  .source-origin {
+    font-size: 0.64rem;
+    color: rgba(191, 219, 254, 0.78);
+    border: 1px solid rgba(148, 163, 184, 0.32);
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
 
   .source-path {
@@ -2192,6 +2541,89 @@
     display: flex;
     gap: 0.35rem;
     flex-wrap: wrap;
+  }
+
+  .volume-root-selector {
+    border: 1px solid rgba(125, 211, 252, 0.2);
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.34);
+    padding: 0.55rem;
+    margin-bottom: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .volume-selector-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+
+  .volume-selector-summary {
+    font-size: 0.7rem;
+    color: rgba(191, 219, 254, 0.84);
+  }
+
+  .volume-selector-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.45rem;
+  }
+
+  .volume-route-btn {
+    border: 1px solid rgba(125, 211, 252, 0.3);
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.42);
+    color: #dbeafe;
+    padding: 0.45rem 0.55rem;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.18rem;
+    cursor: pointer;
+    min-width: 0;
+  }
+
+  .volume-route-btn.routed {
+    border-color: rgba(16, 185, 129, 0.6);
+    background: rgba(6, 78, 59, 0.28);
+  }
+
+  .volume-route-btn.main {
+    border-style: dashed;
+  }
+
+  .volume-route-btn.inactive {
+    opacity: 0.92;
+  }
+
+  .volume-route-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .volume-route-provider {
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(103, 232, 249, 0.9);
+  }
+
+  .volume-route-id {
+    font-size: 0.78rem;
+    color: rgba(224, 242, 254, 0.94);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+  }
+
+  .volume-route-state {
+    font-size: 0.7rem;
+    color: rgba(191, 219, 254, 0.82);
   }
 
   .root-card {
@@ -2259,6 +2691,54 @@
   .root-allowlist {
     flex: 1;
     min-width: 220px;
+  }
+
+  .root-volume-route {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+    border: 1px solid rgba(125, 211, 252, 0.18);
+    border-radius: 8px;
+    padding: 0.4rem 0.5rem;
+    background: rgba(15, 23, 42, 0.35);
+  }
+
+  .root-volume-label {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(125, 211, 252, 0.8);
+  }
+
+  .root-volume-state {
+    font-size: 0.72rem;
+    color: rgba(191, 219, 254, 0.86);
+  }
+
+  .root-volume-state.active {
+    color: #86efac;
+  }
+
+  .root-route-btn {
+    margin-left: auto;
+    border: 1px solid rgba(125, 211, 252, 0.35);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.6);
+    color: #dbeafe;
+    font-size: 0.72rem;
+    padding: 0.3rem 0.55rem;
+    cursor: pointer;
+  }
+
+  .root-route-btn.active {
+    border-color: rgba(16, 185, 129, 0.55);
+    color: #bbf7d0;
+  }
+
+  .root-route-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
 
   .root-runtime {
@@ -2478,14 +2958,15 @@
 
   .manager-toolbar {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.5rem;
     padding: 0.75rem;
     border-bottom: 1px solid rgba(102, 126, 234, 0.18);
   }
 
   .manager-search,
-  .manager-sort {
+  .manager-sort,
+  .manager-folder {
     border: 1px solid rgba(102, 126, 234, 0.35);
     background: rgba(10, 10, 15, 0.35);
     color: #e0e0e0;
@@ -2496,9 +2977,18 @@
   }
 
   .manager-search:focus,
-  .manager-sort:focus {
+  .manager-sort:focus,
+  .manager-folder:focus {
     border-color: #667eea;
     box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
+  }
+
+  .manager-folder {
+    min-width: 0;
+  }
+
+  .toolbar-btn {
+    justify-self: end;
   }
 
   .file-list-head {
