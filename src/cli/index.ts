@@ -17,7 +17,7 @@ const program = new Command();
 program
   .name('nearbytes')
   .description('NearBytes cryptographic storage protocol CLI')
-  .version('0.1.0');
+  .version('0.1.1');
 
 // Register all commands
 registerSetupCommand(program);

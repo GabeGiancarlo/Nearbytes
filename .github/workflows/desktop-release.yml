@@ -45,13 +45,5 @@ jobs:
         run: npm run production-build:publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional signing/notarization secrets. Missing secrets fall back to unsigned artifacts.
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          CSC_NAME: ${{ secrets.CSC_NAME }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-
+          # Default to unsigned CI artifacts to avoid empty-signing env failures.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"

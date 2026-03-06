@@ -1,6 +1,6 @@
 {
   "name": "nearbytes-crypto",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "NearBytes cryptographic storage protocol - immutable data collections with end-to-end encryption",
   "type": "module",
   "main": "dist/index.js",
@@ -41,7 +41,7 @@
     "immutable",
     "protocol"
   ],
-  "author": "",
+  "author": "Vincenzo Ciancia <vincenzoml@gmail.com>",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
@@ -109,13 +109,16 @@
         "AppImage",
         "deb"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "maintainer": "Vincenzo Ciancia <vincenzoml@gmail.com>"
     },
     "publish": [
       {
         "provider": "github",
         "owner": "${env.NEARBYTES_RELEASE_OWNER}",
-        "repo": "${env.NEARBYTES_RELEASE_REPO}"
+        "repo": "${env.NEARBYTES_RELEASE_REPO}",
+        "releaseType": "release",
+        "tagName": "v${version}"
       }
     ]
   }
