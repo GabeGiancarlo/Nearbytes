@@ -11,13 +11,21 @@ import { createApp } from '../app.js';
 
 describe('Desktop API token enforcement', () => {
   let tempDir: string;
+  let uiDistDir: string;
   let app: ReturnType<typeof createApp>;
 
   beforeAll(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nearbytes-desktop-auth-'));
     const mainRoot = path.join(tempDir, 'main-root');
     const rootsConfigPath = path.join(tempDir, 'roots.json');
+    uiDistDir = path.join(tempDir, 'ui-dist');
     await fs.mkdir(mainRoot, { recursive: true });
+    await fs.mkdir(uiDistDir, { recursive: true });
+    await fs.writeFile(
+      path.join(uiDistDir, 'index.html'),
+      '<!doctype html><html><body>nearbytes-ui</body></html>\n',
+      'utf8'
+    );
 
     const rootsConfig: RootsConfig = {
       version: 1,
@@ -47,6 +55,7 @@ describe('Desktop API token enforcement', () => {
       rootsConfigPath,
       resolvedStorageDir: mainRoot,
       desktopApiToken: 'desktop-token-value',
+      uiDistPath: uiDistDir,
     });
   });
 
@@ -69,5 +78,9 @@ describe('Desktop API token enforcement', () => {
 
     expect(Array.isArray(allowed.body.config?.roots)).toBe(true);
   });
-});
 
+  it('serves UI routes without desktop token in desktop mode', async () => {
+    const res = await request(app).get('/').expect(200);
+    expect(res.text).toContain('nearbytes-ui');
+  });
+});

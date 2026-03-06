@@ -72,7 +72,7 @@ export function createRoutes(deps: RouteDependencies): Router {
 
   if (deps.desktopApiToken) {
     router.use((req, _res, next) => {
-      if (req.path === '/health') {
+      if (!isDesktopProtectedApiPath(req.path) || req.path === '/health') {
         next();
         return;
       }
@@ -567,6 +567,27 @@ function tokensEqual(actual: string, expected: string): boolean {
     return false;
   }
   return timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+const DESKTOP_PROTECTED_API_PREFIXES = [
+  '/open',
+  '/files',
+  '/upload',
+  '/file',
+  '/health',
+  '/timeline',
+  '/snapshot',
+  '/config',
+  '/sources',
+  '/watch',
+  '/folders',
+  '/__debug',
+] as const;
+
+function isDesktopProtectedApiPath(pathname: string): boolean {
+  return DESKTOP_PROTECTED_API_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+  );
 }
 
 async function openInFileManager(targetPath: string): Promise<void> {
