@@ -277,6 +277,7 @@ interface NearbytesDesktopBridge {
   getRuntimeConfig?: () => Promise<DesktopRuntimeConfig>;
   getApiBaseUrl?: () => Promise<string>;
   getDesktopToken?: () => Promise<string>;
+  chooseDirectory?: (initialPath?: string) => Promise<string | null>;
   isDesktop?: (() => boolean) | boolean;
 }
 
@@ -311,6 +312,19 @@ function getDesktopBridge(): NearbytesDesktopBridge | null {
     return null;
   }
   return globalWindow.nearbytesDesktop;
+}
+
+export function hasDesktopDirectoryPicker(): boolean {
+  const bridge = getDesktopBridge();
+  return Boolean(bridge && typeof bridge.chooseDirectory === 'function');
+}
+
+export async function chooseDirectoryPath(initialPath = ''): Promise<string | null> {
+  const bridge = getDesktopBridge();
+  if (!bridge || typeof bridge.chooseDirectory !== 'function') {
+    return null;
+  }
+  return bridge.chooseDirectory(initialPath);
 }
 
 function isElectronRenderer(): boolean {

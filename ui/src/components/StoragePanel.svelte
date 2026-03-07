@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
+    chooseDirectoryPath,
     consolidateRoot,
     discoverSources,
     getRootConsolidationPlan,
     getRootsConfig,
+    hasDesktopDirectoryPicker,
     openRootInFileManager,
     updateRootsConfig,
     type DiscoveredNearbytesSource,
@@ -20,7 +22,6 @@
   import ArmedActionButton from './ArmedActionButton.svelte';
   import {
     ArrowRightLeft,
-    FileImage,
     FolderOpen,
     HardDrive,
     Plus,
@@ -29,35 +30,29 @@
     Search,
     Shield,
     Trash2,
+    WandSparkles,
   } from 'lucide-svelte';
 
   let {
     mode = 'volume',
     volumeId = null,
     currentVolumeHint = null,
-    currentVolumeHintIsFile = false,
   } = $props<{
     mode?: 'global' | 'volume';
     volumeId: string | null;
     currentVolumeHint?: string | null;
-    currentVolumeHintIsFile?: boolean;
   }>();
 
   const DISMISSED_DISCOVERY_KEY = 'nearbytes-source-discovery-dismissed-v1';
   const RESERVE_OPTIONS = [0, 5, 10, 15, 20, 25, 30];
-  const DESTINATION_MODES = [
-    { value: 'off', label: 'Off', caption: 'ignore this location' },
-    { value: 'history', label: 'History', caption: 'keep the event log' },
-    { value: 'new-files', label: 'New files', caption: 'keep what arrives now' },
-    { value: 'everything', label: 'Everything', caption: 'keep old and new files' },
-  ] as const;
+  const DEFAULT_RESERVE_PERCENT = 5;
   const DEFAULT_DESTINATION: VolumeDestinationConfig = {
     sourceId: '',
     enabled: true,
     storeEvents: true,
     storeBlocks: true,
     copySourceBlocks: true,
-    reservePercent: 10,
+    reservePercent: DEFAULT_RESERVE_PERCENT,
     fullPolicy: 'block-writes',
   };
 
@@ -78,25 +73,8 @@
   let mergeLoading = $state(false);
   let mergeApplying = $state(false);
   let mergeMessage = $state('');
-  let selectedPolicyVolumeId = $state<string | null>(null);
-
   onMount(() => {
     void loadPanel();
-  });
-
-  $effect(() => {
-    if (!configDraft) return;
-    if (volumeId && selectedPolicyVolumeId !== volumeId) {
-      selectedPolicyVolumeId = volumeId;
-      return;
-    }
-    if (selectedPolicyVolumeId && !orderedPolicyVolumeIds().includes(selectedPolicyVolumeId)) {
-      selectedPolicyVolumeId = volumeId ?? orderedPolicyVolumeIds()[0] ?? null;
-      return;
-    }
-    if (!volumeId && selectedPolicyVolumeId === null && orderedPolicyVolumeIds().length > 0) {
-      selectedPolicyVolumeId = orderedPolicyVolumeIds()[0];
-    }
   });
 
   $effect(() => {
@@ -190,30 +168,6 @@
     return `${value.slice(0, 10)}...${value.slice(-6)}`;
   }
 
-  function orderedPolicyVolumeIds(): string[] {
-    if (!configDraft) return [];
-    const ids = new Set<string>();
-    if (volumeId) ids.add(volumeId);
-    for (const entry of configDraft.volumes) {
-      ids.add(entry.volumeId);
-    }
-    return Array.from(ids);
-  }
-
-  function policyVolumeLabel(targetVolumeId: string): string {
-    if (volumeId === targetVolumeId && currentVolumeHint && currentVolumeHint.trim() !== '') {
-      return currentVolumeHint.trim();
-    }
-    return volumeShortLabel(targetVolumeId);
-  }
-
-  function policyVolumeMeta(targetVolumeId: string): string {
-    if (volumeId === targetVolumeId && currentVolumeHint && currentVolumeHint.trim() !== '') {
-      return volumeShortLabel(targetVolumeId);
-    }
-    return 'public key';
-  }
-
   function generateSourceId(provider: SourceProvider): string {
     const existing = new Set(configDraft?.sources.map((source) => source.id) ?? []);
     const prefix = `src-${provider === 'local' ? 'disk' : provider}`;
@@ -232,7 +186,7 @@
       path: pathValue,
       enabled: true,
       writable: true,
-      reservePercent: 10,
+      reservePercent: DEFAULT_RESERVE_PERCENT,
       opportunisticPolicy: 'drop-older-blocks',
     };
   }
@@ -377,9 +331,6 @@
       ...configDraft,
       volumes: configDraft.volumes.filter((entry) => entry.volumeId !== targetVolumeId),
     };
-    if (selectedPolicyVolumeId === targetVolumeId) {
-      selectedPolicyVolumeId = volumeId ?? configDraft.volumes[0]?.volumeId ?? null;
-    }
   }
 
   function updateSourceField<K extends keyof SourceConfigEntry>(
@@ -428,65 +379,44 @@
   function protectionTone(destination: VolumeDestinationConfig | null, sourceId: string): 'durable' | 'replica' | 'events' | 'off' {
     if (!destination || !destination.enabled) return 'off';
     if (isDurableDestination(destination, sourceId)) return 'durable';
-    if (destination.storeBlocks) return 'replica';
-    if (destination.storeEvents) return 'events';
+    if (keepsFullCopy(destination)) return 'replica';
     return 'off';
   }
 
   function protectionLabel(destination: VolumeDestinationConfig | null, sourceId: string): string {
     const tone = protectionTone(destination, sourceId);
-    if (tone === 'durable') return 'Guaranteed';
-    if (tone === 'replica') return 'New files';
-    if (tone === 'events') return 'History';
+    if (tone === 'durable') return 'Protected here';
+    if (tone === 'replica') return 'Spare copy';
     return 'Off';
   }
 
   function volumeBadgeText(targetVolumeId: string | null): string {
-    return hasDurableDestination(targetVolumeId) ? 'Guaranteed somewhere' : 'Not guaranteed';
+    return hasDurableDestination(targetVolumeId) ? 'Protected somewhere' : 'Needs one protected copy';
   }
 
-  function destinationMode(
-    destination: VolumeDestinationConfig | null
-  ): 'off' | 'history' | 'new-files' | 'everything' {
-    if (!destination || !destination.enabled) return 'off';
-    if (!destination.storeEvents) return 'off';
-    if (!destination.storeBlocks) return 'history';
-    if (!destination.copySourceBlocks) return 'new-files';
-    return 'everything';
+  function keepsFullCopy(destination: VolumeDestinationConfig | null): boolean {
+    return Boolean(
+      destination?.enabled &&
+      destination.storeEvents &&
+      destination.storeBlocks &&
+      destination.copySourceBlocks
+    );
   }
 
-  function setDestinationMode(
+  function setKeepFullCopy(
     targetVolumeId: string | null,
     sourceId: string,
-    nextMode: 'off' | 'history' | 'new-files' | 'everything'
+    keepFullCopy: boolean
   ): void {
     if (!configDraft) return;
     upsertDestination(targetVolumeId, sourceId);
     const apply = (destination: VolumeDestinationConfig): VolumeDestinationConfig => {
-      if (nextMode === 'off') {
+      if (!keepFullCopy) {
         return {
           ...destination,
           enabled: false,
           storeEvents: false,
           storeBlocks: false,
-          copySourceBlocks: false,
-        };
-      }
-      if (nextMode === 'history') {
-        return {
-          ...destination,
-          enabled: true,
-          storeEvents: true,
-          storeBlocks: false,
-          copySourceBlocks: false,
-        };
-      }
-      if (nextMode === 'new-files') {
-        return {
-          ...destination,
-          enabled: true,
-          storeEvents: true,
-          storeBlocks: true,
           copySourceBlocks: false,
         };
       }
@@ -524,6 +454,36 @@
       ...configDraft,
       volumes: nextVolumes,
     };
+  }
+
+  function canReuseOtherGuaranteedCopies(destination: VolumeDestinationConfig | null): boolean {
+    return keepsFullCopy(destination) && destination?.fullPolicy === 'drop-older-blocks';
+  }
+
+  function fullPolicyLabel(destination: VolumeDestinationConfig | null): string {
+    return canReuseOtherGuaranteedCopies(destination)
+      ? 'Prefer another protected copy'
+      : 'Keep this copy';
+  }
+
+  function protectedCopyHint(targetVolumeId: string | null): string {
+    if (hasDurableDestination(targetVolumeId)) {
+      return 'Suggestion: you can keep one spare copy on a second location if you want quicker recovery.';
+    }
+    return 'Suggestion: turn on “Keep a full copy” for at least one writable location.';
+  }
+
+  function setReuseOtherGuaranteedCopies(
+    targetVolumeId: string | null,
+    sourceId: string,
+    reuse: boolean
+  ): void {
+    updateDestinationField(
+      targetVolumeId,
+      sourceId,
+      'fullPolicy',
+      reuse ? 'drop-older-blocks' : 'block-writes'
+    );
   }
 
   function sourceSuggestionRows(): Array<{
@@ -570,47 +530,11 @@
     dismissedDiscoveries = [];
   }
 
-  function selectedPolicyTitle(): string {
-    if (selectedPolicyVolumeId === null) return 'Volume storage';
-    return policyVolumeLabel(selectedPolicyVolumeId);
-  }
-
-  function selectedPolicyMeta(): string {
-    if (selectedPolicyVolumeId === null) return 'Open or save a volume policy to edit it here';
-    if (volumeId === selectedPolicyVolumeId && currentVolumeHint && currentVolumeHint.trim() !== '') {
-      return volumeShortLabel(selectedPolicyVolumeId);
-    }
-    return 'Saved by public key';
-  }
-
   function usageVolumeLabel(targetVolumeId: string): string {
     if (volumeId === targetVolumeId && currentVolumeHint && currentVolumeHint.trim() !== '') {
       return currentVolumeHint.trim();
     }
     return volumeShortLabel(targetVolumeId);
-  }
-
-  function policyCards(): Array<{
-    key: string;
-    volumeId: string | null;
-    title: string;
-    meta: string;
-    usesFile: boolean;
-    isCurrent: boolean;
-    isDefault: boolean;
-    safe: boolean;
-  }> {
-    const cards = orderedPolicyVolumeIds().map((targetVolumeId) => ({
-      key: targetVolumeId,
-      volumeId: targetVolumeId,
-      title: policyVolumeLabel(targetVolumeId),
-      meta: policyVolumeMeta(targetVolumeId),
-      usesFile: volumeId === targetVolumeId && currentVolumeHintIsFile,
-      isCurrent: volumeId === targetVolumeId,
-      isDefault: false,
-      safe: hasDurableDestination(targetVolumeId),
-    }));
-    return cards;
   }
 
   async function loadPanel() {
@@ -662,12 +586,49 @@
     }
   }
 
-  function addSourceCard() {
+  async function pickFolderPath(initialPath = ''): Promise<string | null> {
+    const picked = await chooseDirectoryPath(initialPath);
+    return typeof picked === 'string' && picked.trim() !== '' ? picked.trim() : null;
+  }
+
+  async function addSourceCard() {
     if (!configDraft) return;
+    if (hasDesktopDirectoryPicker()) {
+      const selectedPath = await pickFolderPath();
+      if (!selectedPath) return;
+      const normalized = normalizeComparablePath(selectedPath);
+      if (configDraft.sources.some((entry) => normalizeComparablePath(entry.path) === normalized)) {
+        successMessage = 'Already added.';
+        return;
+      }
+      configDraft = {
+        ...configDraft,
+        sources: [...configDraft.sources, createSource(selectedPath)],
+      };
+      successMessage = 'Added.';
+      return;
+    }
     configDraft = {
       ...configDraft,
       sources: [...configDraft.sources, createSource()],
     };
+  }
+
+  async function chooseSourceFolder(sourceId: string): Promise<void> {
+    if (!configDraft) return;
+    const source = configDraft.sources.find((entry) => entry.id === sourceId);
+    const selectedPath = await pickFolderPath(source?.path ?? '');
+    if (!selectedPath) return;
+    const normalized = normalizeComparablePath(selectedPath);
+    const duplicate = configDraft.sources.find(
+      (entry) => entry.id !== sourceId && normalizeComparablePath(entry.path) === normalized
+    );
+    if (duplicate) {
+      errorMessage = 'That folder is already in the list.';
+      return;
+    }
+    updateSourceField(sourceId, 'path', selectedPath);
+    successMessage = 'Folder selected.';
   }
 
   function addDiscoveredSource(source: DiscoveredNearbytesSource) {
@@ -871,12 +832,17 @@
 
               <label class="field-block">
                 <span>Folder</span>
-                <input
-                  type="text"
-                  class="panel-input"
-                  value={source.path}
-                  oninput={(event) => updateSourceField(source.id, 'path', (event.currentTarget as HTMLInputElement).value)}
-                />
+                <div class="input-with-action">
+                  <input
+                    type="text"
+                    class="panel-input"
+                    value={source.path}
+                    oninput={(event) => updateSourceField(source.id, 'path', (event.currentTarget as HTMLInputElement).value)}
+                  />
+                  <button type="button" class="panel-btn subtle compact icon-only" onclick={() => chooseSourceFolder(source.id)} title="Choose folder" aria-label="Choose folder">
+                    <Search size={14} strokeWidth={2} />
+                  </button>
+                </div>
               </label>
 
               <div class="field-grid two-up">
@@ -902,7 +868,7 @@
                       updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
                   >
                     <option value="block-writes">Stop new data</option>
-                    <option value="drop-older-blocks">Reuse non-guaranteed copies</option>
+                    <option value="drop-older-blocks">Reuse copies guaranteed elsewhere</option>
                   </select>
                 </label>
               </div>
@@ -945,6 +911,10 @@
               {/if}
 
               <div class="source-actions">
+                <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
+                  <Search size={14} strokeWidth={2} />
+                  <span>Choose</span>
+                </button>
                 <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
                   <FolderOpen size={14} strokeWidth={2} />
                   <span>Open</span>
@@ -1000,12 +970,15 @@
             {volumeBadgeText(null)}
           </span>
         </div>
+        <p class="panel-tip">
+          <WandSparkles size={13} strokeWidth={2} />
+          <span>{protectedCopyHint(null)}</span>
+        </p>
 
         <div class="destination-grid">
           {#each configDraft.sources as source (source.id)}
             {@const destination = destinationFor(null, source.id)}
             {@const status = sourceStatus(source.id)}
-            {@const modeValue = destinationMode(destination)}
             <article class="destination-card" class:safe={protectionTone(destination, source.id) === 'durable'}>
               <div class="destination-head">
                 <div>
@@ -1016,37 +989,52 @@
                 <span class={`mini-badge tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
               </div>
 
-              <div class="mode-grid" role="group" aria-label={`Default storage mode for ${compactPath(source.path)}`}>
-                {#each DESTINATION_MODES as option (option.value)}
-                  <button
-                    type="button"
-                    class="mode-btn"
-                    class:selected={modeValue === option.value}
-                    onclick={() => setDestinationMode(null, source.id, option.value)}
-                  >
-                    <span class="mode-label">{option.label}</span>
-                    <span class="mode-caption">{option.caption}</span>
-                  </button>
-                {/each}
+              <div class="compact-toggle-stack">
+                <label class="toggle-chip strong large">
+                  <input
+                    type="checkbox"
+                    checked={keepsFullCopy(destination)}
+                    onchange={(event) => setKeepFullCopy(null, source.id, (event.currentTarget as HTMLInputElement).checked)}
+                  />
+                  <span>Keep a full copy</span>
+                </label>
               </div>
 
               <div class="field-grid two-up compact-fields">
                 <label class="field-block compact-field">
                   <span>Keep free</span>
-                  <select class="panel-input" value={String(destination?.reservePercent ?? 10)} onchange={(event) => updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
+                  <select class="panel-input" disabled={!keepsFullCopy(destination)} value={String(destination?.reservePercent ?? DEFAULT_RESERVE_PERCENT)} onchange={(event) => updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
                     {#each RESERVE_OPTIONS as option}
                       <option value={option}>{formatPercent(option)}</option>
                     {/each}
                   </select>
                 </label>
                 <label class="field-block compact-field">
-                  <span>If space still runs out</span>
-                  <select class="panel-input" value={destination?.fullPolicy ?? 'block-writes'} onchange={(event) => updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}>
-                    <option value="block-writes">Stop here</option>
-                    <option value="drop-older-blocks">Reuse non-guaranteed copies</option>
+                  <span>When full</span>
+                  <select
+                    class="panel-input"
+                    disabled={!keepsFullCopy(destination)}
+                    value={destination?.fullPolicy ?? 'block-writes'}
+                    onchange={(event) =>
+                      updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
+                  >
+                    <option value="block-writes">Keep this copy</option>
+                    <option value="drop-older-blocks">Prefer another protected copy</option>
                   </select>
                 </label>
               </div>
+
+              <p class="card-help">
+                {#if keepsFullCopy(destination)}
+                  {#if canReuseOtherGuaranteedCopies(destination)}
+                    This location keeps a spare copy and may yield only after another protected copy exists.
+                  {:else}
+                    This location keeps a protected copy that Nearbytes will not reclaim automatically.
+                  {/if}
+                {:else}
+                  This location is not keeping this volume yet.
+                {/if}
+              </p>
 
               <div class="source-facts">
                 <span>{source.enabled ? 'Source on' : 'Source off'}</span>
@@ -1058,23 +1046,35 @@
         </div>
       </section>
     {:else}
-      <div class="panel-head">
-        <div>
-          <p class="panel-eyebrow">Keep</p>
-          <h2>Volume storage</h2>
-          <p class="panel-caption">Choose where each volume keeps its history and encrypted files.</p>
-        </div>
-        <div class="panel-actions">
-          <button type="button" class="panel-btn subtle" onclick={loadPanel}>
-            <RefreshCw size={14} strokeWidth={2} />
-            <span>Reload</span>
-          </button>
-          <button type="button" class="panel-btn primary" onclick={savePanel} disabled={saving}>
-            <Save size={14} strokeWidth={2} />
-            <span>{saving ? 'Saving...' : 'Save'}</span>
-          </button>
-        </div>
+      <div class="panel-actions compact-actions">
+        <button type="button" class="panel-btn subtle compact" onclick={toggleDiscovery} disabled={discoveryLoading}>
+          <Search size={14} strokeWidth={2} />
+          <span>{discoveryOpen ? 'Hide scan' : 'Find folders'}</span>
+        </button>
+        <button type="button" class="panel-btn subtle compact" onclick={addSourceCard}>
+          <Plus size={14} strokeWidth={2} />
+          <span>Add folder</span>
+        </button>
+        <button type="button" class="panel-btn subtle compact" onclick={loadPanel}>
+          <RefreshCw size={14} strokeWidth={2} />
+          <span>Reload</span>
+        </button>
+        <button type="button" class="panel-btn primary compact" onclick={savePanel} disabled={saving}>
+          <Save size={14} strokeWidth={2} />
+          <span>{saving ? 'Saving...' : 'Save'}</span>
+        </button>
+        {#if volumeId}
+          <span class="summary-badge" class:warning={!hasDurableDestination(volumeId)}>
+            {volumeBadgeText(volumeId)}
+          </span>
+        {/if}
       </div>
+      {#if volumeId}
+        <p class="panel-tip">
+          <WandSparkles size={13} strokeWidth={2} />
+          <span>{protectedCopyHint(volumeId)}</span>
+        </p>
+      {/if}
 
       {#if errorMessage}
         <p class="panel-error">{errorMessage}</p>
@@ -1083,120 +1083,161 @@
         <p class="panel-success">{successMessage}</p>
       {/if}
 
-      <div class="volume-grid">
-        {#each policyCards() as card (card.key)}
-          <button
-            type="button"
-            class="volume-card"
-            class:active={selectedPolicyVolumeId === card.volumeId}
-            onclick={() => {
-              selectedPolicyVolumeId = card.volumeId;
-            }}
-          >
-            <div class="volume-card-mark" class:safe={card.safe}>
-              {#if card.isCurrent && card.usesFile}
-                <FileImage size={18} strokeWidth={2} />
-              {:else}
-                <Shield size={18} strokeWidth={2} />
-              {/if}
+      {#if discoveryOpen}
+        <section class="panel-cluster scan-cluster compact-scan">
+          <div class="cluster-head">
+            <div>
+              <p class="cluster-title">Discovered folders</p>
+              <p class="cluster-caption">Use a found folder right here without leaving this sheet.</p>
             </div>
-            <div class="volume-card-copy">
-              <p class="volume-card-name" title={card.title}>{card.title}</p>
-              <p class="volume-card-meta">{card.meta}</p>
+          </div>
+          {#if discoveryLoading}
+            <p class="storage-message">Scanning...</p>
+          {:else if sourceSuggestionRows().length === 0}
+            <p class="storage-message">No new folders found.</p>
+          {:else}
+            <div class="discovery-grid">
+              {#each sourceSuggestionRows() as row (row.source.path)}
+                <article class="scan-card">
+                  <div class="scan-copy">
+                    <p class="scan-provider">{formatProvider(row.source.provider)}</p>
+                    <p class="scan-path">{row.source.path}</p>
+                  </div>
+                  <div class="scan-actions">
+                    <button type="button" class="panel-btn subtle compact" onclick={() => addDiscoveredSource(row.source)}>
+                      <span>Use</span>
+                    </button>
+                    <button type="button" class="panel-btn subtle compact danger" onclick={() => dismissDiscovery(row.source)}>
+                      <span>Hide</span>
+                    </button>
+                  </div>
+                </article>
+              {/each}
             </div>
-            <span class="volume-card-badge" class:safe={card.safe} class:warning={!card.safe}>
-              {card.safe ? 'Guaranteed somewhere' : 'Not guaranteed'}
-            </span>
-          </button>
-        {/each}
-      </div>
-
-      {#if orderedPolicyVolumeIds().length === 0}
-        <p class="storage-message">Open a volume once and its public key will stay here, even after you close it.</p>
+          {/if}
+        </section>
       {/if}
 
-      {#if selectedPolicyVolumeId !== null}
-        <section class="detail-shell">
-          <div class="detail-head">
-            <div>
-              <p class="cluster-title">{selectedPolicyTitle()}</p>
-              <p class="cluster-caption">{selectedPolicyMeta()}</p>
-            </div>
-            <div class="detail-head-actions">
-              <span class="summary-badge" class:warning={!hasDurableDestination(selectedPolicyVolumeId)}>
-                {volumeBadgeText(selectedPolicyVolumeId)}
-              </span>
-              {#if explicitVolumePolicy(selectedPolicyVolumeId)}
+      {#if !volumeId}
+        <p class="storage-message">Open this volume first, then choose which locations keep a full copy.</p>
+      {:else}
+        <div class="destination-grid compact-destination-grid">
+          {#each configDraft.sources as source (source.id)}
+            {@const destination = destinationFor(volumeId, source.id)}
+            {@const status = sourceStatus(source.id)}
+            <article class="destination-card compact-destination-card" class:safe={protectionTone(destination, source.id) === 'durable'}>
+              <div class="destination-head">
+                <div>
+                  <p class="source-provider">{formatProvider(source.provider)}</p>
+                  <h3>{compactPath(source.path)}</h3>
+                  <p class="source-path">{source.path || 'Choose a folder'}</p>
+                </div>
+                <span class={`mini-badge tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
+              </div>
+
+              <label class="field-block compact-field">
+                <span>Folder</span>
+                <div class="input-with-action">
+                  <input
+                    type="text"
+                    class="panel-input"
+                    value={source.path}
+                    oninput={(event) => updateSourceField(source.id, 'path', (event.currentTarget as HTMLInputElement).value)}
+                  />
+                  <button type="button" class="panel-btn subtle compact icon-only" onclick={() => chooseSourceFolder(source.id)} title="Choose folder" aria-label="Choose folder">
+                    <Search size={14} strokeWidth={2} />
+                  </button>
+                </div>
+              </label>
+
+              <label class="toggle-chip strong large">
+                <input
+                  type="checkbox"
+                  checked={keepsFullCopy(destination)}
+                  onchange={(event) => setKeepFullCopy(volumeId, source.id, (event.currentTarget as HTMLInputElement).checked)}
+                />
+                <span>Keep a full copy</span>
+              </label>
+
+              <label class="field-block compact-field">
+                <span>Keep free</span>
+                <select class="panel-input" disabled={!keepsFullCopy(destination)} value={String(destination?.reservePercent ?? DEFAULT_RESERVE_PERCENT)} onchange={(event) => updateDestinationField(volumeId, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
+                  {#each RESERVE_OPTIONS as option}
+                    <option value={option}>{formatPercent(option)}</option>
+                  {/each}
+                </select>
+              </label>
+
+              <label class="field-block compact-field">
+                <span>When full</span>
+                <select
+                  class="panel-input"
+                  disabled={!keepsFullCopy(destination)}
+                  value={destination?.fullPolicy ?? 'block-writes'}
+                  onchange={(event) =>
+                    updateDestinationField(volumeId, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
+                >
+                  <option value="block-writes">Keep this copy</option>
+                  <option value="drop-older-blocks">Prefer another protected copy</option>
+                </select>
+              </label>
+
+              <p class="card-help">
+                {#if keepsFullCopy(destination)}
+                  {#if canReuseOtherGuaranteedCopies(destination)}
+                    This location keeps a spare copy and may yield only after another protected copy exists.
+                  {:else}
+                    This location keeps a protected copy that Nearbytes will not reclaim automatically.
+                  {/if}
+                {:else}
+                  This location is not keeping this volume yet.
+                {/if}
+              </p>
+
+              <div class="source-facts">
+                <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
+                <span>{source.enabled ? 'Source on' : 'Source off'}</span>
+                <span>{source.writable ? 'Can write' : 'Read only'}</span>
+              </div>
+
+              <div class="source-actions compact-source-actions">
+                <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
+                  <Search size={14} strokeWidth={2} />
+                  <span>Choose</span>
+                </button>
+                <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
+                  <FolderOpen size={14} strokeWidth={2} />
+                  <span>Open</span>
+                </button>
                 <ArmedActionButton
                   class="panel-btn subtle compact danger"
                   icon={Trash2}
-                  text="Forget"
+                  text="Remove"
                   armed={true}
                   autoDisarmMs={3000}
-                  onPress={() => removeVolumePolicy(selectedPolicyVolumeId)}
+                  onPress={() => removeSource(source.id)}
                 />
-              {/if}
-            </div>
+              </div>
+            </article>
+          {/each}
+          <button type="button" class="add-source-card" onclick={addSourceCard}>
+            <Plus size={18} strokeWidth={2} />
+            <span>Add folder</span>
+          </button>
+        </div>
+
+        {#if explicitVolumePolicy(volumeId)}
+          <div class="detail-head-actions">
+            <ArmedActionButton
+              class="panel-btn subtle compact danger"
+              icon={Trash2}
+              text="Forget saved keep rule"
+              armed={true}
+              autoDisarmMs={3000}
+              onPress={() => removeVolumePolicy(volumeId)}
+            />
           </div>
-
-          <p class="detail-note">Pick at least one location marked <strong>Guaranteed</strong> if this volume must never be discarded.</p>
-
-          <div class="destination-grid">
-            {#each configDraft.sources as source (source.id)}
-              {@const destination = destinationFor(selectedPolicyVolumeId, source.id)}
-              {@const status = sourceStatus(source.id)}
-              {@const modeValue = destinationMode(destination)}
-              <article class="destination-card" class:safe={protectionTone(destination, source.id) === 'durable'}>
-                <div class="destination-head">
-                  <div>
-                    <p class="source-provider">{formatProvider(source.provider)}</p>
-                    <h3>{compactPath(source.path)}</h3>
-                    <p class="source-path">{source.path || 'Choose a folder'}</p>
-                  </div>
-                  <span class={`mini-badge tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
-                </div>
-
-                <div class="mode-grid" role="group" aria-label={`Storage mode for ${compactPath(source.path)}`}>
-                  {#each DESTINATION_MODES as option (option.value)}
-                    <button
-                      type="button"
-                      class="mode-btn"
-                      class:selected={modeValue === option.value}
-                      onclick={() => setDestinationMode(selectedPolicyVolumeId, source.id, option.value)}
-                    >
-                      <span class="mode-label">{option.label}</span>
-                      <span class="mode-caption">{option.caption}</span>
-                    </button>
-                  {/each}
-                </div>
-
-                <div class="field-grid two-up compact-fields">
-                  <label class="field-block compact-field">
-                    <span>Keep free</span>
-                    <select class="panel-input" value={String(destination?.reservePercent ?? 10)} onchange={(event) => updateDestinationField(selectedPolicyVolumeId, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
-                      {#each RESERVE_OPTIONS as option}
-                        <option value={option}>{formatPercent(option)}</option>
-                      {/each}
-                    </select>
-                  </label>
-                  <label class="field-block compact-field">
-                    <span>If space still runs out</span>
-                    <select class="panel-input" value={destination?.fullPolicy ?? 'block-writes'} onchange={(event) => updateDestinationField(selectedPolicyVolumeId, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}>
-                      <option value="block-writes">Stop here</option>
-                      <option value="drop-older-blocks">Reuse non-guaranteed copies</option>
-                    </select>
-                  </label>
-                </div>
-
-                <div class="source-facts">
-                  <span>{source.enabled ? 'Source on' : 'Source off'}</span>
-                  <span>{source.writable ? 'Can write' : 'Read only'}</span>
-                  <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
-                </div>
-              </article>
-            {/each}
-          </div>
-        </section>
+        {/if}
       {/if}
     {/if}
   </section>
@@ -1224,7 +1265,6 @@
   .panel-actions,
   .chip-row,
   .source-facts,
-  .detail-head,
   .detail-head-actions,
   .merge-actions,
   .scan-actions,
@@ -1236,8 +1276,7 @@
   }
 
   .panel-head,
-  .cluster-head,
-  .detail-head {
+  .cluster-head {
     justify-content: space-between;
   }
 
@@ -1317,6 +1356,19 @@
     border: 1px solid rgba(45, 212, 191, 0.22);
   }
 
+  .panel-tip {
+    margin: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.46rem;
+    font-size: 0.78rem;
+    color: rgba(204, 251, 241, 0.9);
+    padding: 0.7rem 0.82rem;
+    border-radius: 12px;
+    border: 1px solid rgba(45, 212, 191, 0.16);
+    background: rgba(8, 56, 49, 0.2);
+  }
+
   .panel-cluster,
   .detail-shell {
     display: grid;
@@ -1393,6 +1445,13 @@
     font-size: 0.74rem;
   }
 
+  .panel-btn.icon-only,
+  :global(.panel-btn.icon-only) {
+    min-width: 30px;
+    width: 30px;
+    padding: 0;
+  }
+
   .panel-btn:hover:not(:disabled),
   :global(.panel-btn:hover:not(:disabled)) {
     transform: translateY(-1px);
@@ -1450,6 +1509,18 @@
     box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.12);
   }
 
+  .panel-input:disabled {
+    opacity: 0.54;
+    cursor: not-allowed;
+  }
+
+  .input-with-action {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
   .field-grid {
     display: grid;
     gap: 0.7rem;
@@ -1461,8 +1532,7 @@
 
   .source-grid,
   .destination-grid,
-  .discovery-grid,
-  .volume-grid {
+  .discovery-grid {
     display: grid;
     gap: 0.85rem;
   }
@@ -1476,14 +1546,9 @@
     grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   }
 
-  .volume-grid {
-    grid-template-columns: repeat(auto-fit, minmax(150px, 190px));
-  }
-
   .scan-card,
   .source-card,
-  .destination-card,
-  .volume-card {
+  .destination-card {
     border-radius: 16px;
     border: 1px solid rgba(56, 189, 248, 0.14);
     background: rgba(8, 17, 31, 0.74);
@@ -1514,8 +1579,7 @@
     justify-content: space-between;
   }
 
-  .source-mark,
-  .volume-card-mark {
+  .source-mark {
     width: 34px;
     height: 34px;
     border-radius: 12px;
@@ -1526,12 +1590,6 @@
     background: rgba(10, 24, 42, 0.78);
     color: rgba(148, 163, 184, 0.96);
     flex: 0 0 auto;
-  }
-
-  .volume-card-mark.safe {
-    border-color: rgba(45, 212, 191, 0.34);
-    color: rgba(153, 246, 228, 0.98);
-    background: rgba(8, 61, 56, 0.54);
   }
 
   .source-copy {
@@ -1547,9 +1605,7 @@
   }
 
   .source-path,
-  .scan-path,
-  .volume-card-name,
-  .volume-card-meta {
+  .scan-path {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1590,10 +1646,33 @@
     color: rgba(240, 253, 250, 0.96);
   }
 
+  .toggle-chip.large {
+    min-height: 36px;
+    padding: 0.28rem 0.84rem;
+    align-items: center;
+    justify-content: flex-start;
+  }
+
+  .compact-toggle-stack {
+    display: grid;
+    gap: 0.55rem;
+  }
+
   .source-facts {
     font-size: 0.76rem;
     color: rgba(186, 230, 253, 0.72);
     justify-content: space-between;
+  }
+
+  .compact-source-actions {
+    justify-content: flex-end;
+  }
+
+  .card-help {
+    margin: 0;
+    font-size: 0.75rem;
+    line-height: 1.35;
+    color: rgba(186, 230, 253, 0.72);
   }
 
   .usage-strip,
@@ -1720,52 +1799,61 @@
       rgba(8, 17, 31, 0.78);
   }
 
-  .mode-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.55rem;
+  .compact-destination-grid {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 250px));
   }
 
-  .mode-btn {
-    min-width: 0;
+  .compact-destination-card {
+    display: grid;
+    gap: 0.72rem;
+    align-content: start;
+    min-height: 248px;
+  }
+
+  .compact-actions {
+    justify-content: flex-end;
+  }
+
+  .add-source-card {
+    border: 1px dashed rgba(56, 189, 248, 0.24);
+    border-radius: 16px;
+    background: rgba(9, 18, 33, 0.48);
+    color: rgba(191, 219, 254, 0.84);
+    min-height: 248px;
+    display: grid;
+    align-content: center;
+    justify-items: center;
+    gap: 0.55rem;
+    cursor: pointer;
+    font-size: 0.84rem;
+    font-weight: 700;
+    transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+  }
+
+  .add-source-card:hover {
+    transform: translateY(-1px);
+    border-color: rgba(96, 165, 250, 0.34);
+    background: rgba(12, 24, 43, 0.72);
+  }
+
+  .card-side-note {
     display: grid;
     gap: 0.18rem;
-    justify-items: start;
-    text-align: left;
-    min-height: 64px;
-    padding: 0.72rem 0.78rem;
-    border-radius: 14px;
-    border: 1px solid rgba(56, 189, 248, 0.16);
-    background: rgba(10, 19, 34, 0.52);
-    color: rgba(226, 232, 240, 0.88);
-    cursor: pointer;
-    transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
+    align-content: start;
+    padding: 0.2rem 0;
   }
 
-  .mode-btn:hover {
-    transform: translateY(-1px);
-    border-color: rgba(96, 165, 250, 0.28);
-    background: rgba(12, 24, 43, 0.84);
-  }
-
-  .mode-btn.selected {
-    border-color: rgba(34, 211, 238, 0.42);
-    background:
-      radial-gradient(140% 120% at 0% 0%, rgba(34, 211, 238, 0.14), transparent 44%),
-      rgba(12, 24, 43, 0.88);
-    box-shadow: 0 10px 22px rgba(2, 6, 23, 0.2);
-  }
-
-  .mode-label {
-    font-size: 0.8rem;
-    font-weight: 700;
-    color: rgba(240, 249, 255, 0.98);
-  }
-
-  .mode-caption {
-    font-size: 0.71rem;
+  .card-side-note-label {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
     color: rgba(186, 230, 253, 0.72);
-    line-height: 1.25;
+  }
+
+  .card-side-note-copy {
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: rgba(186, 230, 253, 0.68);
   }
 
   .detail-head-actions {
@@ -1773,14 +1861,9 @@
     margin-left: auto;
   }
 
-  .detail-note strong {
-    color: rgba(240, 249, 255, 0.96);
-  }
-
   @media (max-width: 920px) {
     .panel-head,
-    .cluster-head,
-    .detail-head {
+    .cluster-head {
       align-items: flex-start;
     }
 
@@ -1788,11 +1871,7 @@
       grid-template-columns: 1fr;
     }
 
-    .volume-grid {
-      grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
-    }
-
-    .mode-grid {
+    .compact-destination-grid {
       grid-template-columns: 1fr;
     }
   }

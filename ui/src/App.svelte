@@ -902,9 +902,6 @@
   const currentMountedVolumeHint = $derived.by(
     () => (activeMount ? mountLabel(activeMount) : null)
   );
-  const currentMountedVolumeUsesFile = $derived.by(
-    () => (activeMount ? hasFileSecret(activeMount) : false)
-  );
 
   function stopTimelinePlayback() {
     if (timelinePlayTimer) {
@@ -2219,17 +2216,43 @@
             </div>
           {/if}
         {/each}
-        <button
-          type="button"
-          class="mount-add-btn"
-          class:visible={isHeaderHovering || isSecretDropTarget}
-          onclick={addMount}
-          aria-label="Add volume"
-          title="Add volume"
-        >
-          <Plus size={16} strokeWidth={2.2} />
-        </button>
+        <div class="mounts-actions">
+          <button
+            type="button"
+            class="mount-add-btn"
+            class:visible={isHeaderHovering || isSecretDropTarget}
+            onclick={addMount}
+            aria-label="Add volume"
+            title="Add volume"
+          >
+            <Plus size={15} strokeWidth={2.2} />
+          </button>
+          <div class="sources-launcher">
+            <button
+              type="button"
+              class="sources-launcher-btn"
+              class:active={showSourcesPanel}
+              aria-label="Sources"
+              title="Sources"
+              onclick={(event) => {
+                event.stopPropagation();
+                toggleSourcesPanel();
+              }}
+            >
+              <HardDrive class="button-icon" size={14} strokeWidth={2} />
+            </button>
+          </div>
+        </div>
       </div>
+      {#if showSourcesPanel}
+        <div class="sources-flyout">
+          <StoragePanel
+            mode="global"
+            {volumeId}
+            currentVolumeHint={currentMountedVolumeHint}
+          />
+        </div>
+      {/if}
     </div>
   </header>
 
@@ -2303,40 +2326,11 @@
     ondragleave={handleDragLeave}
     ondrop={handleDrop}
   >
-    <div class="file-area-top">
-      <div class="sources-launcher">
-        <button
-          type="button"
-          class="sources-launcher-btn"
-          class:active={showSourcesPanel}
-          aria-label="Sources"
-          title="Sources"
-          onclick={(event) => {
-            event.stopPropagation();
-            toggleSourcesPanel();
-          }}
-        >
-          <HardDrive class="button-icon" size={15} strokeWidth={2} />
-        </button>
-      </div>
-      {#if showSourcesPanel}
-        <div class="sources-flyout">
-          <StoragePanel
-            mode="global"
-            {volumeId}
-            currentVolumeHint={currentMountedVolumeHint}
-            currentVolumeHintIsFile={currentMountedVolumeUsesFile}
-          />
-        </div>
-      {/if}
-    </div>
-
     {#if showVolumeStoragePanel}
       <StoragePanel
         mode="volume"
         {volumeId}
         currentVolumeHint={currentMountedVolumeHint}
-        currentVolumeHintIsFile={currentMountedVolumeUsesFile}
       />
     {/if}
 
@@ -2645,6 +2639,14 @@
     align-items: center;
     gap: 0.45rem;
     flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .mounts-actions {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.38rem;
   }
 
   .volume-chip {
@@ -3259,14 +3261,14 @@
     box-shadow: 0 12px 24px rgba(127, 29, 29, 0.24);
   }
 
-  .mount-add-btn {
+  .mount-add-btn,
+  .sources-launcher-btn {
     border: 1px solid rgba(56, 189, 248, 0.14);
     background: rgba(10, 19, 34, 0.52);
     color: rgba(191, 219, 254, 0.78);
-    border-radius: 999px;
-    width: 30px;
-    height: 30px;
-    font-size: 1rem;
+    border-radius: 10px;
+    width: 28px;
+    height: 28px;
     line-height: 1;
     display: inline-flex;
     align-items: center;
@@ -3286,13 +3288,26 @@
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   }
 
+  .sources-launcher-btn {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .mount-add-btn {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-3px) scale(0.94);
+  }
+
   .mount-add-btn.visible {
     opacity: 1;
     pointer-events: auto;
     transform: translateY(0) scale(1);
   }
 
-  .mount-add-btn:hover {
+  .mount-add-btn:hover,
+  .sources-launcher-btn:hover {
     background: rgba(16, 32, 56, 0.88);
     border-color: rgba(96, 165, 250, 0.28);
     color: rgba(224, 242, 254, 0.96);
@@ -3412,40 +3427,10 @@
     align-content: start;
   }
 
-  .file-area-top {
-    display: grid;
-    gap: 0.85rem;
-    justify-items: end;
-  }
-
   .sources-launcher {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    width: 100%;
-  }
-
-  .sources-launcher-btn {
-    width: 32px;
-    height: 32px;
-    border-radius: 11px;
-    border: 1px solid rgba(56, 189, 248, 0.18);
-    background: rgba(9, 18, 33, 0.7);
-    color: rgba(186, 230, 253, 0.82);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 0;
-    cursor: pointer;
-    transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-  }
-
-  .sources-launcher-btn:hover {
-    transform: translateY(-1px);
-    border-color: rgba(96, 165, 250, 0.3);
-    background: rgba(12, 24, 43, 0.9);
-    color: rgba(224, 242, 254, 0.96);
   }
 
   .sources-launcher-btn.active {
@@ -3455,8 +3440,8 @@
   }
 
   .sources-flyout {
-    width: min(880px, 100%);
-    justify-self: end;
+    width: min(1040px, 100%);
+    align-self: flex-end;
   }
 
   .sources-flyout :global(.storage-panel.global-mode) {
@@ -4071,9 +4056,10 @@
       width: 100%;
     }
 
-    .mount-add-btn {
-      width: 32px;
-      height: 32px;
+    .mount-add-btn,
+    .sources-launcher-btn {
+      width: 30px;
+      height: 30px;
     }
 
     .secret-input-wrapper {

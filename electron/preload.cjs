@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('nearbytesDesktop', {
   readClipboardImage: () => ipcRenderer.invoke('nearbytes-desktop:read-clipboard-image'),
   loadUiState: () => ipcRenderer.invoke('nearbytes-desktop:load-ui-state'),
   saveUiState: (state) => ipcRenderer.invoke('nearbytes-desktop:save-ui-state', state),
+  chooseDirectory: (initialPath) => ipcRenderer.invoke('nearbytes-desktop:choose-directory', initialPath),
   getApiBaseUrl: async () => {
     const config = await ipcRenderer.invoke('nearbytes-desktop:get-runtime-config');
     return config.apiBaseUrl ?? '';

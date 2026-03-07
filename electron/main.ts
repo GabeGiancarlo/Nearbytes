@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell, type OpenDialogOptions } from 'electron';
 import { existsSync } from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -163,6 +163,23 @@ function registerIpc(): void {
     }
     await writeDesktopUiState(rawState as { volumeMounts?: unknown; dismissedRootSuggestions?: unknown });
     return true;
+  });
+  ipcMain.handle('nearbytes-desktop:choose-directory', async (_event, rawInitialPath: unknown) => {
+    const initialPath =
+      typeof rawInitialPath === 'string' && rawInitialPath.trim().length > 0
+        ? rawInitialPath.trim()
+        : app.getPath('home');
+    const dialogOptions: OpenDialogOptions = {
+      defaultPath: initialPath,
+      properties: ['openDirectory', 'createDirectory'],
+    };
+    const result = state.window
+      ? await dialog.showOpenDialog(state.window, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+    return result.filePaths[0] ?? null;
   });
 }
 
