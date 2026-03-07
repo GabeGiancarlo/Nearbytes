@@ -20,13 +20,12 @@
     type VolumePolicyEntry,
   } from '../lib/api.js';
   import ArmedActionButton from './ArmedActionButton.svelte';
+  import VolumeIdentity from './VolumeIdentity.svelte';
   import {
     ArrowRightLeft,
     FolderOpen,
     HardDrive,
     Plus,
-    RefreshCw,
-    Save,
     Search,
     Shield,
     Trash2,
@@ -36,11 +35,17 @@
   let {
     mode = 'volume',
     volumeId = null,
-    currentVolumeHint = null,
+    currentVolumePresentation = null,
   } = $props<{
     mode?: 'global' | 'volume';
     volumeId: string | null;
-    currentVolumeHint?: string | null;
+    currentVolumePresentation?: {
+      volumeId: string;
+      label: string;
+      filePayload: string;
+      fileMimeType: string;
+      fileName: string;
+    } | null;
   }>();
 
   const DISMISSED_DISCOVERY_KEY = 'nearbytes-source-discovery-dismissed-v1';
@@ -73,12 +78,27 @@
   let mergeLoading = $state(false);
   let mergeApplying = $state(false);
   let mergeMessage = $state('');
+  let autosaveStatus = $state<'idle' | 'pending' | 'saving' | 'saved' | 'error'>('idle');
+  let lastSavedSignature = $state('');
   onMount(() => {
     void loadPanel();
   });
 
   $effect(() => {
     persistDismissedDiscoveries(dismissedDiscoveries);
+  });
+
+  $effect(() => {
+    if (!configDraft || loading) return;
+    const nextSignature = serializeConfig(configDraft);
+    if (nextSignature === lastSavedSignature) return;
+    autosaveStatus = 'pending';
+    const timer = setTimeout(() => {
+      void autosavePanel(nextSignature);
+    }, 450);
+    return () => {
+      clearTimeout(timer);
+    };
   });
 
   function loadDismissedDiscoveries(): string[] {
@@ -107,15 +127,28 @@
   function cloneConfig(config: RootsConfig): RootsConfig {
     return {
       version: 2,
-      sources: config.sources.map((source) => ({ ...source })),
+      sources: config.sources.map((source) => ({
+        ...source,
+        reservePercent: source.reservePercent ?? DEFAULT_RESERVE_PERCENT,
+      })),
       defaultVolume: {
-        destinations: config.defaultVolume.destinations.map((destination) => ({ ...destination })),
+        destinations: config.defaultVolume.destinations.map((destination) => ({
+          ...destination,
+          reservePercent: destination.reservePercent ?? DEFAULT_RESERVE_PERCENT,
+        })),
       },
       volumes: config.volumes.map((volume) => ({
         volumeId: volume.volumeId,
-        destinations: volume.destinations.map((destination) => ({ ...destination })),
+        destinations: volume.destinations.map((destination) => ({
+          ...destination,
+          reservePercent: destination.reservePercent ?? DEFAULT_RESERVE_PERCENT,
+        })),
       })),
     };
+  }
+
+  function serializeConfig(config: RootsConfig): string {
+    return JSON.stringify(config);
   }
 
   function normalizeComparablePath(value: string): string {
@@ -160,6 +193,14 @@
       unit += 1;
     }
     return `${value >= 100 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+  }
+
+  function sourceReservePercent(source: SourceConfigEntry): number {
+    return Number.isFinite(source.reservePercent) ? source.reservePercent : DEFAULT_RESERVE_PERCENT;
+  }
+
+  function destinationReservePercent(destination: VolumeDestinationConfig | null): number {
+    return Number.isFinite(destination?.reservePercent) ? destination!.reservePercent : DEFAULT_RESERVE_PERCENT;
   }
 
   function volumeShortLabel(value: string | null): string {
@@ -394,6 +435,18 @@
     return hasDurableDestination(targetVolumeId) ? 'Protected somewhere' : 'Needs one protected copy';
   }
 
+  function autosaveLabel(): string {
+    if (autosaveStatus === 'saving') return 'Saving…';
+    if (autosaveStatus === 'saved') return 'Saved';
+    if (autosaveStatus === 'error') return 'Save failed';
+    if (autosaveStatus === 'pending') return 'Autosave';
+    return 'Autosave';
+  }
+
+  function canRemoveAnySource(): boolean {
+    return (configDraft?.sources.length ?? 0) > 1;
+  }
+
   function keepsFullCopy(destination: VolumeDestinationConfig | null): boolean {
     return Boolean(
       destination?.enabled &&
@@ -530,11 +583,27 @@
     dismissedDiscoveries = [];
   }
 
-  function usageVolumeLabel(targetVolumeId: string): string {
-    if (volumeId === targetVolumeId && currentVolumeHint && currentVolumeHint.trim() !== '') {
-      return currentVolumeHint.trim();
+  function mountedPresentationFor(targetVolumeId: string) {
+    if (currentVolumePresentation?.volumeId === targetVolumeId) {
+      return currentVolumePresentation;
     }
-    return volumeShortLabel(targetVolumeId);
+    return null;
+  }
+
+  function hasSourcePath(source: SourceConfigEntry): boolean {
+    return source.path.trim() !== '';
+  }
+
+  function sortedUsageVolumes(sourceId: string) {
+    const source = sourceStatus(sourceId);
+    return [...(source?.usage.volumeUsages ?? [])].sort((left, right) => {
+      const leftTotal = left.fileBytes + left.historyBytes;
+      const rightTotal = right.fileBytes + right.historyBytes;
+      if (rightTotal !== leftTotal) {
+        return rightTotal - leftTotal;
+      }
+      return right.fileCount + right.historyFileCount - (left.fileCount + left.historyFileCount);
+    });
   }
 
   async function loadPanel() {
@@ -546,6 +615,8 @@
       configPath = response.configPath;
       configDraft = cloneConfig(response.config);
       runtime = response.runtime;
+      lastSavedSignature = serializeConfig(cloneConfig(response.config));
+      autosaveStatus = 'idle';
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Failed to load storage settings';
     } finally {
@@ -553,19 +624,26 @@
     }
   }
 
-  async function savePanel() {
+  async function autosavePanel(expectedSignature: string) {
     if (!configDraft) return;
     saving = true;
     errorMessage = '';
-    successMessage = '';
+    autosaveStatus = 'saving';
     try {
       const response = await updateRootsConfig(configDraft);
       configPath = response.configPath;
       configDraft = cloneConfig(response.config);
       runtime = response.runtime;
-      successMessage = 'Saved.';
+      lastSavedSignature = serializeConfig(cloneConfig(response.config));
+      if (lastSavedSignature === expectedSignature) {
+        autosaveStatus = 'saved';
+      } else {
+        autosaveStatus = 'pending';
+      }
+      successMessage = '';
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Failed to save';
+      autosaveStatus = 'error';
     } finally {
       saving = false;
     }
@@ -703,6 +781,8 @@
       configPath = response.configPath;
       configDraft = cloneConfig(response.config);
       runtime = response.runtime;
+      lastSavedSignature = serializeConfig(cloneConfig(response.config));
+      autosaveStatus = 'saved';
       successMessage = 'Moved.';
       cancelMerge();
     } catch (error) {
@@ -741,14 +821,9 @@
             <Plus size={14} strokeWidth={2} />
             <span>Add folder</span>
           </button>
-          <button type="button" class="panel-btn subtle" onclick={loadPanel}>
-            <RefreshCw size={14} strokeWidth={2} />
-            <span>Reload</span>
-          </button>
-          <button type="button" class="panel-btn primary" onclick={savePanel} disabled={saving}>
-            <Save size={14} strokeWidth={2} />
-            <span>{saving ? 'Saving...' : 'Save'}</span>
-          </button>
+          <span class="summary-badge" class:warning={autosaveStatus === 'error'} title="Changes are saved automatically.">
+            {autosaveLabel()}
+          </span>
         </div>
       </div>
 
@@ -808,7 +883,9 @@
             <p class="cluster-title">Saved sources</p>
             <p class="cluster-caption">At least one source must remain connected.</p>
           </div>
-          <span class="summary-badge">{configDraft.sources.length} connected</span>
+          <span class="summary-badge" title="Saved locations Nearbytes can read from or write to.">
+            {configDraft.sources.length} connected
+          </span>
         </div>
 
         <div class="source-grid">
@@ -830,27 +907,25 @@
                 </div>
               </div>
 
-              <label class="field-block">
-                <span>Folder</span>
-                <div class="input-with-action">
-                  <input
-                    type="text"
-                    class="panel-input"
-                    value={source.path}
-                    oninput={(event) => updateSourceField(source.id, 'path', (event.currentTarget as HTMLInputElement).value)}
-                  />
-                  <button type="button" class="panel-btn subtle compact icon-only" onclick={() => chooseSourceFolder(source.id)} title="Choose folder" aria-label="Choose folder">
-                    <Search size={14} strokeWidth={2} />
-                  </button>
+              {#if hasSourcePath(source)}
+                <div class="source-location-block">
+                  <span class="source-location-label">Folder</span>
+                  <p class="source-location-value" title={source.path}>{source.path}</p>
                 </div>
-              </label>
+              {:else}
+                <button type="button" class="panel-btn subtle choose-folder-btn" onclick={() => chooseSourceFolder(source.id)}>
+                  <Search size={14} strokeWidth={2} />
+                  <span>Choose folder</span>
+                </button>
+              {/if}
 
               <div class="field-grid two-up">
                 <label class="field-block compact-field">
                   <span>Keep free</span>
                   <select
                     class="panel-input"
-                    value={String(source.reservePercent)}
+                    title="Nearbytes leaves this percentage of disk space free before it starts reclaiming spare encrypted data."
+                    value={String(sourceReservePercent(source))}
                     onchange={(event) =>
                       updateSourceField(source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
                   >
@@ -863,23 +938,21 @@
                   <span>If space is still tight</span>
                   <select
                     class="panel-input"
+                    title="If this disk is still full after Nearbytes has already reclaimed spare unprotected data, “Stop new data” preserves the protected copies already here and writes nothing new. “Reuse protected copies elsewhere” allows this location to free data only when another protected copy already exists somewhere else."
                     value={source.opportunisticPolicy}
                     onchange={(event) =>
                       updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
                   >
                     <option value="block-writes">Stop new data</option>
-                    <option value="drop-older-blocks">Reuse copies guaranteed elsewhere</option>
+                    <option value="drop-older-blocks">Reuse protected copies elsewhere</option>
                   </select>
                 </label>
               </div>
 
-              <div class="chip-row">
-                <label class="toggle-chip strong"><input type="checkbox" checked={source.enabled} onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)} /><span>Use</span></label>
-                <label class="toggle-chip"><input type="checkbox" checked={source.writable} onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)} /><span>Can write</span></label>
-              </div>
-
               <div class="source-facts">
                 <span>{status?.exists ? 'Ready' : 'Missing'}</span>
+                <span>{source.enabled ? 'In use' : 'Ignored'}</span>
+                <span>{source.writable ? 'Writable' : 'Read only'}</span>
                 <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
               </div>
 
@@ -889,48 +962,72 @@
                 <span>History {formatSize(status?.usage.channelBytes ?? 0)}</span>
               </div>
 
-              {#if (status?.usage.volumeUsages.length ?? 0) > 0}
-                <div class="usage-volume-list">
-                  {#each status?.usage.volumeUsages ?? [] as usage (usage.volumeId)}
-                    <div class="usage-volume-row">
-                      <div class="usage-volume-copy">
-                        <p class="usage-volume-name" title={usageVolumeLabel(usage.volumeId)}>{usageVolumeLabel(usage.volumeId)}</p>
-                        <p class="usage-volume-meta">{volumeShortLabel(usage.volumeId)}</p>
+              {#if sortedUsageVolumes(source.id).length > 0}
+                <details class="usage-details">
+                  <summary
+                    class="usage-details-summary"
+                    title="Show which volumes are using space in this location. Entries are sorted by total Nearbytes size."
+                  >
+                    <span>Stored volumes</span>
+                    <span class="mini-badge">{sortedUsageVolumes(source.id).length}</span>
+                  </summary>
+                  <div class="usage-volume-list">
+                    {#each sortedUsageVolumes(source.id) as usage (usage.volumeId)}
+                      {@const mountedPresentation = mountedPresentationFor(usage.volumeId)}
+                      <div class="usage-volume-row">
+                        <div class="usage-volume-copy">
+                          <VolumeIdentity
+                            compact={true}
+                            label={mountedPresentation ? mountedPresentation.label : volumeShortLabel(usage.volumeId)}
+                            secondary={mountedPresentation ? volumeShortLabel(usage.volumeId) : ''}
+                            title={usage.volumeId}
+                            filePayload={mountedPresentation?.filePayload ?? ''}
+                            fileMimeType={mountedPresentation?.fileMimeType ?? ''}
+                            fileName={mountedPresentation?.fileName ?? ''}
+                          />
+                        </div>
+                        <div class="usage-volume-stats">
+                          <span>{formatSize(usage.fileBytes + usage.historyBytes)} total</span>
+                          {#if usage.fileBytes > 0}
+                            <span>{formatSize(usage.fileBytes)} files</span>
+                          {/if}
+                          {#if usage.historyBytes > 0}
+                            <span>{formatSize(usage.historyBytes)} history</span>
+                          {/if}
+                        </div>
                       </div>
-                      <div class="usage-volume-stats">
-                        {#if usage.fileBytes > 0}
-                          <span>{formatSize(usage.fileBytes)} files</span>
-                        {/if}
-                        {#if usage.historyBytes > 0}
-                          <span>{formatSize(usage.historyBytes)} history</span>
-                        {/if}
-                      </div>
-                    </div>
-                  {/each}
-                </div>
+                    {/each}
+                  </div>
+                </details>
               {/if}
 
               <div class="source-actions">
-                <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
-                  <Search size={14} strokeWidth={2} />
-                  <span>Choose</span>
-                </button>
                 <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
                   <FolderOpen size={14} strokeWidth={2} />
                   <span>Open</span>
                 </button>
+                <label class="toggle-chip strong compact-inline-toggle">
+                  <input type="checkbox" checked={source.enabled} onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)} />
+                  <span>Use</span>
+                </label>
+                <label class="toggle-chip compact-inline-toggle">
+                  <input type="checkbox" checked={source.writable} onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)} />
+                  <span>Can write</span>
+                </label>
                 <button type="button" class="panel-btn subtle compact" onclick={() => startMerge(source.id)} disabled={configDraft.sources.length < 2}>
                   <ArrowRightLeft size={14} strokeWidth={2} />
                   <span>Move into...</span>
                 </button>
-                <ArmedActionButton
-                  class="panel-btn subtle compact danger"
-                  icon={Trash2}
-                  text="Remove"
-                  armed={true}
-                  autoDisarmMs={3000}
-                  onPress={() => removeSource(source.id)}
-                />
+                {#if canRemoveAnySource()}
+                  <ArmedActionButton
+                    class="panel-btn subtle compact danger"
+                    icon={Trash2}
+                    text="Remove"
+                    armed={true}
+                    autoDisarmMs={3000}
+                    onPress={() => removeSource(source.id)}
+                  />
+                {/if}
               </div>
 
               {#if mergeSourceId === source.id}
@@ -966,7 +1063,11 @@
             <p class="cluster-title">Default for newly opened volumes</p>
             <p class="cluster-caption">Used only when a volume does not have its own saved keep rule yet.</p>
           </div>
-          <span class="summary-badge" class:warning={!hasDurableDestination(null)}>
+          <span
+            class="summary-badge"
+            class:warning={!hasDurableDestination(null)}
+            title="A protected copy means Nearbytes will keep one full copy of the volume in at least one writable location."
+          >
             {volumeBadgeText(null)}
           </span>
         </div>
@@ -986,7 +1087,16 @@
                   <h3>{compactPath(source.path)}</h3>
                   <p class="source-path">{source.path || 'Choose a folder'}</p>
                 </div>
-                <span class={`mini-badge tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
+                <span
+                  class={`mini-badge tone-${protectionTone(destination, source.id)}`}
+                  title={keepsFullCopy(destination)
+                    ? canReuseOtherGuaranteedCopies(destination)
+                      ? 'This location keeps a spare full copy. If space runs tight, Nearbytes may drop it only after another protected full copy exists elsewhere.'
+                      : 'This location keeps a protected full copy. Nearbytes will not reclaim it automatically.'
+                    : 'This location is not currently keeping this volume.'}
+                >
+                  {protectionLabel(destination, source.id)}
+                </span>
               </div>
 
               <div class="compact-toggle-stack">
@@ -996,14 +1106,14 @@
                     checked={keepsFullCopy(destination)}
                     onchange={(event) => setKeepFullCopy(null, source.id, (event.currentTarget as HTMLInputElement).checked)}
                   />
-                  <span>Keep a full copy</span>
+                  <span title="Keep the full encrypted history and file blocks for this volume in this location. Turning this on in more than one location may duplicate the same encrypted data.">Keep a full copy</span>
                 </label>
               </div>
 
               <div class="field-grid two-up compact-fields">
                 <label class="field-block compact-field">
                   <span>Keep free</span>
-                  <select class="panel-input" disabled={!keepsFullCopy(destination)} value={String(destination?.reservePercent ?? DEFAULT_RESERVE_PERCENT)} onchange={(event) => updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
+                  <select class="panel-input" disabled={!keepsFullCopy(destination)} title="Nearbytes leaves this percentage of disk space free before it starts reclaiming spare encrypted data." value={String(destination?.reservePercent ?? DEFAULT_RESERVE_PERCENT)} onchange={(event) => updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
                     {#each RESERVE_OPTIONS as option}
                       <option value={option}>{formatPercent(option)}</option>
                     {/each}
@@ -1014,6 +1124,7 @@
                   <select
                     class="panel-input"
                     disabled={!keepsFullCopy(destination)}
+                    title="If this disk is still full after Nearbytes has already reclaimed spare unprotected data, “Keep this copy” stops placing new data here to preserve this full copy. “Prefer another protected copy” allows this location to free this full copy, but only after another protected full copy exists elsewhere."
                     value={destination?.fullPolicy ?? 'block-writes'}
                     onchange={(event) =>
                       updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
@@ -1055,16 +1166,15 @@
           <Plus size={14} strokeWidth={2} />
           <span>Add folder</span>
         </button>
-        <button type="button" class="panel-btn subtle compact" onclick={loadPanel}>
-          <RefreshCw size={14} strokeWidth={2} />
-          <span>Reload</span>
-        </button>
-        <button type="button" class="panel-btn primary compact" onclick={savePanel} disabled={saving}>
-          <Save size={14} strokeWidth={2} />
-          <span>{saving ? 'Saving...' : 'Save'}</span>
-        </button>
+        <span class="summary-badge" class:warning={autosaveStatus === 'error'} title="Changes are saved automatically.">
+          {autosaveLabel()}
+        </span>
         {#if volumeId}
-          <span class="summary-badge" class:warning={!hasDurableDestination(volumeId)}>
+          <span
+            class="summary-badge"
+            class:warning={!hasDurableDestination(volumeId)}
+            title="A protected copy means Nearbytes will keep one full copy of this volume in at least one writable location."
+          >
             {volumeBadgeText(volumeId)}
           </span>
         {/if}
@@ -1132,22 +1242,30 @@
                   <h3>{compactPath(source.path)}</h3>
                   <p class="source-path">{source.path || 'Choose a folder'}</p>
                 </div>
-                <span class={`mini-badge tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
+                <span
+                  class={`mini-badge tone-${protectionTone(destination, source.id)}`}
+                  title={keepsFullCopy(destination)
+                    ? canReuseOtherGuaranteedCopies(destination)
+                      ? 'This location keeps a spare full copy. If space runs tight, Nearbytes may drop it only after another protected full copy exists elsewhere.'
+                      : 'This location keeps a protected full copy. Nearbytes will not reclaim it automatically.'
+                    : 'This location is not currently keeping this volume.'}
+                >
+                  {protectionLabel(destination, source.id)}
+                </span>
               </div>
 
               <label class="field-block compact-field">
                 <span>Folder</span>
-                <div class="input-with-action">
-                  <input
-                    type="text"
-                    class="panel-input"
-                    value={source.path}
-                    oninput={(event) => updateSourceField(source.id, 'path', (event.currentTarget as HTMLInputElement).value)}
-                  />
-                  <button type="button" class="panel-btn subtle compact icon-only" onclick={() => chooseSourceFolder(source.id)} title="Choose folder" aria-label="Choose folder">
+                {#if hasSourcePath(source)}
+                  <div class="source-location-block compact">
+                    <p class="source-location-value" title={source.path}>{source.path}</p>
+                  </div>
+                {:else}
+                  <button type="button" class="panel-btn subtle compact choose-folder-btn" onclick={() => chooseSourceFolder(source.id)}>
                     <Search size={14} strokeWidth={2} />
+                    <span>Choose folder</span>
                   </button>
-                </div>
+                {/if}
               </label>
 
               <label class="toggle-chip strong large">
@@ -1156,12 +1274,12 @@
                   checked={keepsFullCopy(destination)}
                   onchange={(event) => setKeepFullCopy(volumeId, source.id, (event.currentTarget as HTMLInputElement).checked)}
                 />
-                <span>Keep a full copy</span>
+                <span title="Keep the full encrypted history and file blocks for this volume in this location. Turning this on in more than one location may duplicate the same encrypted data.">Keep a full copy</span>
               </label>
 
               <label class="field-block compact-field">
                 <span>Keep free</span>
-                <select class="panel-input" disabled={!keepsFullCopy(destination)} value={String(destination?.reservePercent ?? DEFAULT_RESERVE_PERCENT)} onchange={(event) => updateDestinationField(volumeId, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
+                <select class="panel-input" disabled={!keepsFullCopy(destination)} title="Nearbytes leaves this percentage of disk space free before it starts reclaiming spare encrypted data." value={String(destinationReservePercent(destination))} onchange={(event) => updateDestinationField(volumeId, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
                   {#each RESERVE_OPTIONS as option}
                     <option value={option}>{formatPercent(option)}</option>
                   {/each}
@@ -1173,6 +1291,7 @@
                 <select
                   class="panel-input"
                   disabled={!keepsFullCopy(destination)}
+                  title="If this disk is still full after Nearbytes has already reclaimed spare unprotected data, “Keep this copy” stops placing new data here to preserve this full copy. “Prefer another protected copy” allows this location to free this full copy, but only after another protected full copy exists elsewhere."
                   value={destination?.fullPolicy ?? 'block-writes'}
                   onchange={(event) =>
                     updateDestinationField(volumeId, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
@@ -1201,22 +1320,20 @@
               </div>
 
               <div class="source-actions compact-source-actions">
-                <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
-                  <Search size={14} strokeWidth={2} />
-                  <span>Choose</span>
-                </button>
                 <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
                   <FolderOpen size={14} strokeWidth={2} />
                   <span>Open</span>
                 </button>
-                <ArmedActionButton
-                  class="panel-btn subtle compact danger"
-                  icon={Trash2}
-                  text="Remove"
-                  armed={true}
-                  autoDisarmMs={3000}
-                  onPress={() => removeSource(source.id)}
-                />
+                {#if canRemoveAnySource()}
+                  <ArmedActionButton
+                    class="panel-btn subtle compact danger"
+                    icon={Trash2}
+                    text="Remove"
+                    armed={true}
+                    autoDisarmMs={3000}
+                    onPress={() => removeSource(source.id)}
+                  />
+                {/if}
               </div>
             </article>
           {/each}
@@ -1530,6 +1647,40 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .source-location-block {
+    display: grid;
+    gap: 0.2rem;
+    padding: 0.72rem 0.8rem;
+    border-radius: 12px;
+    border: 1px solid rgba(56, 189, 248, 0.12);
+    background: rgba(9, 18, 33, 0.5);
+  }
+
+  .source-location-block.compact {
+    padding: 0.62rem 0.72rem;
+  }
+
+  .source-location-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(148, 163, 184, 0.82);
+  }
+
+  .source-location-value {
+    margin: 0;
+    font-size: 0.8rem;
+    color: rgba(226, 232, 240, 0.94);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .choose-folder-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
   .source-grid,
   .destination-grid,
   .discovery-grid {
@@ -1537,7 +1688,10 @@
     gap: 0.85rem;
   }
 
-  .source-grid,
+  .source-grid {
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  }
+
   .destination-grid {
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   }
@@ -1595,6 +1749,10 @@
   .source-copy {
     min-width: 0;
     flex: 1 1 auto;
+  }
+
+  .compact-inline-toggle {
+    min-height: 28px;
   }
 
   .source-badges {
@@ -1692,6 +1850,36 @@
     display: grid;
     gap: 0.4rem;
     padding-top: 0.1rem;
+  }
+
+  .usage-details {
+    display: grid;
+    gap: 0.55rem;
+    padding-top: 0.1rem;
+  }
+
+  .usage-details[open] {
+    padding-top: 0.25rem;
+  }
+
+  .usage-details-summary {
+    list-style: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.7rem;
+    cursor: pointer;
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: rgba(226, 232, 240, 0.92);
+    padding: 0.58rem 0.68rem;
+    border-radius: 12px;
+    border: 1px solid rgba(56, 189, 248, 0.12);
+    background: rgba(9, 18, 33, 0.44);
+  }
+
+  .usage-details-summary::-webkit-details-marker {
+    display: none;
   }
 
   .usage-volume-row {

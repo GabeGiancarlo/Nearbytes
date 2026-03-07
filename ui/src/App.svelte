@@ -16,6 +16,7 @@
   import { getCachedFiles, setCachedFiles } from './lib/cache.js';
   import ArmedActionButton from './components/ArmedActionButton.svelte';
   import StoragePanel from './components/StoragePanel.svelte';
+  import VolumeIdentity from './components/VolumeIdentity.svelte';
   import {
     Activity,
     ClipboardPaste,
@@ -36,6 +37,7 @@
 
   const VOLUME_MOUNTS_KEY = 'nearbytes-volume-mounts-v1';
   const FILE_SECRET_PREFIX = 'nb-file-secret:v1:';
+  const NEARBYTES_DRAG_TYPE = 'application/x-nearbytes-file';
 
   type PreviewKind = 'none' | 'image' | 'text' | 'pdf' | 'video' | 'audio' | 'unsupported';
   type DesktopRemoteFile = {
@@ -72,6 +74,20 @@
     collapsed: boolean;
     createdAt: number;
   }
+
+  type MountedVolumePresentation = {
+    volumeId: string;
+    label: string;
+    filePayload: string;
+    fileMimeType: string;
+    fileName: string;
+  };
+
+  type NearbytesDragPayload = {
+    blobHash: string;
+    filename: string;
+    mimeType?: string;
+  };
 
   function createMount(overrides: Partial<VolumeMount> = {}): VolumeMount {
     return {
@@ -296,7 +312,7 @@
 
   function canHandleDropPayload(dataTransfer: DataTransfer | null | undefined): boolean {
     const types = transferTypes(dataTransfer);
-    if (types.includes('Files') || types.includes('DownloadURL')) {
+    if (types.includes('Files') || types.includes('DownloadURL') || types.includes(NEARBYTES_DRAG_TYPE)) {
       return true;
     }
     return types.some((type) =>
@@ -570,6 +586,45 @@
     });
   }
 
+  function parseNearbytesDragPayload(raw: string): NearbytesDragPayload | null {
+    if (trimSecretPart(raw) === '') {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<NearbytesDragPayload>;
+      if (
+        !parsed ||
+        typeof parsed.blobHash !== 'string' ||
+        typeof parsed.filename !== 'string'
+      ) {
+        return null;
+      }
+      return {
+        blobHash: parsed.blobHash,
+        filename: parsed.filename,
+        mimeType: typeof parsed.mimeType === 'string' ? parsed.mimeType : '',
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function fileFromNearbytesTransfer(dataTransfer: DataTransfer): Promise<File | null> {
+    const payload = parseNearbytesDragPayload(dataTransfer.getData(NEARBYTES_DRAG_TYPE));
+    if (!payload || !auth) {
+      return null;
+    }
+    const blob = await downloadFile(auth, payload.blobHash);
+    const mimeType =
+      trimSecretPart(payload.mimeType ?? '') ||
+      trimSecretPart(blob.type) ||
+      'application/octet-stream';
+    return new File([blob], sanitizeDroppedFilename(payload.filename, 'nearbytes-file'), {
+      type: mimeType,
+      lastModified: Date.now(),
+    });
+  }
+
   function localFilesFromTransfer(dataTransfer: DataTransfer | null | undefined): File[] {
     if (!dataTransfer) return [];
     const directFiles = Array.from(dataTransfer.files ?? []);
@@ -585,6 +640,10 @@
     const localFiles = localFilesFromTransfer(dataTransfer);
     if (localFiles.length > 0) {
       return localFiles;
+    }
+    const nearbytesFile = await fileFromNearbytesTransfer(dataTransfer);
+    if (nearbytesFile) {
+      return [nearbytesFile];
     }
     const remoteFile = await fileFromRemoteDrop(dataTransfer);
     return remoteFile ? [remoteFile] : [];
@@ -899,9 +958,18 @@
     () => visibleFiles.find((file) => file.blobHash === selectedBlobHash) ?? null
   );
   const activeMount = $derived.by(() => mounts.find((mount) => mount.id === activeMountId) ?? null);
-  const currentMountedVolumeHint = $derived.by(
-    () => (activeMount ? mountLabel(activeMount) : null)
-  );
+  const currentMountedVolumePresentation = $derived.by<MountedVolumePresentation | null>(() => {
+    if (!activeMount || !volumeId) {
+      return null;
+    }
+    return {
+      volumeId,
+      label: mountLabel(activeMount),
+      filePayload: activeMount.secretFilePayload,
+      fileMimeType: activeMount.secretFileMimeType,
+      fileName: activeMount.secretFileName,
+    };
+  });
 
   function stopTimelinePlayback() {
     if (timelinePlayTimer) {
@@ -1408,10 +1476,22 @@
     return mountNode?.dataset.mountId ?? null;
   }
 
-  function prepareMountForSecretDrop(target: EventTarget | null): string {
+  function createCollapsedMount(): string {
+    const nextMount = createMount();
+    const collapsedExisting = mounts.map((mount) => ({ ...mount, collapsed: true }));
+    mounts = [...collapsedExisting, nextMount];
+    activeMountId = nextMount.id;
+    return nextMount.id;
+  }
+
+  function prepareMountForSecretDrop(target: EventTarget | null, preferNewMount = false): string {
     const explicitTargetId = mountIdFromDropTarget(target);
     if (explicitTargetId && mounts.some((mount) => mount.id === explicitTargetId)) {
       return explicitTargetId;
+    }
+
+    if (preferNewMount) {
+      return createCollapsedMount();
     }
 
     const expandedActiveMount = mounts.find(
@@ -1421,11 +1501,7 @@
       return expandedActiveMount.id;
     }
 
-    const nextMount = createMount();
-    const collapsedExisting = mounts.map((mount) => ({ ...mount, collapsed: true }));
-    mounts = [...collapsedExisting, nextMount];
-    activeMountId = nextMount.id;
-    return nextMount.id;
+    return createCollapsedMount();
   }
 
   async function handleSecretFileDrop(event: DragEvent) {
@@ -1437,7 +1513,7 @@
 
     try {
       errorMessage = '';
-      const targetMountId = prepareMountForSecretDrop(event.target);
+      const targetMountId = prepareMountForSecretDrop(event.target, true);
       await applySecretFileToMount(file, targetMountId);
     } catch (error) {
       errorMessage = dropFailureMessage(error, 'Failed to use secret file');
@@ -1759,6 +1835,11 @@
     e.preventDefault();
     isDragging = false;
 
+    if (e.dataTransfer && transferTypes(e.dataTransfer).includes(NEARBYTES_DRAG_TYPE)) {
+      errorMessage = 'Drop Nearbytes files on the top volume bar to use them as a secret.';
+      return;
+    }
+
     if (!auth || !effectiveSecret) {
       errorMessage = 'Enter address and optional password first';
       return;
@@ -1797,6 +1878,20 @@
     }
 
     return target.closest('.header-shell') !== null;
+  }
+
+  function handleNearbytesFileDragStart(event: DragEvent, file: FileMetadata) {
+    if (!event.dataTransfer) {
+      return;
+    }
+    const payload: NearbytesDragPayload = {
+      blobHash: file.blobHash,
+      filename: file.filename,
+      mimeType: file.mimeType,
+    };
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData(NEARBYTES_DRAG_TYPE, JSON.stringify(payload));
+    event.dataTransfer.setData('text/plain', file.filename);
   }
 
   async function handlePaste(event: ClipboardEvent) {
@@ -2170,27 +2265,14 @@
                   <div class="header-dock-main">
                     <div class="header-dock-badge" class:loading={isPending}>
                       <div class="header-dock-badge-top">
-                        {#if hasFileSecret(mount)}
-                          <span class="secret-file-preview" class:image={hasImageSecretPreview(mount)}>
-                            {#if hasImageSecretPreview(mount) && secretFilePayloadDataUrl(mount)}
-                              <img
-                                class="secret-file-preview-image"
-                                src={secretFilePayloadDataUrl(mount) ?? ''}
-                                alt=""
-                                aria-hidden="true"
-                              />
-                            {:else}
-                              <span class="secret-file-preview-icon" aria-hidden="true">
-                                {#if trimSecretPart(mount.secretFileMimeType).startsWith('image/')}
-                                  <ImageIcon size={13} strokeWidth={2.1} />
-                                {:else}
-                                  <FileText size={13} strokeWidth={2.1} />
-                                {/if}
-                              </span>
-                            {/if}
-                          </span>
-                        {/if}
-                        <p class="header-dock-name" title={mountLabel(mount)}>{mountLabel(mount)}</p>
+                        <VolumeIdentity
+                          compact={true}
+                          label={mountLabel(mount)}
+                          title={mountLabel(mount)}
+                          filePayload={mount.secretFilePayload}
+                          fileMimeType={mount.secretFileMimeType}
+                          fileName={mount.secretFileName}
+                        />
                       </div>
                       {#if isPending}
                         <span class="badge-meter" aria-hidden="true">
@@ -2249,7 +2331,7 @@
           <StoragePanel
             mode="global"
             {volumeId}
-            currentVolumeHint={currentMountedVolumeHint}
+            currentVolumePresentation={currentMountedVolumePresentation}
           />
         </div>
       {/if}
@@ -2330,7 +2412,7 @@
       <StoragePanel
         mode="volume"
         {volumeId}
-        currentVolumeHint={currentMountedVolumeHint}
+        currentVolumePresentation={currentMountedVolumePresentation}
       />
     {/if}
 
@@ -2494,10 +2576,12 @@
                     class="file-row"
                     class:selected={selectedBlobHash === file.blobHash}
                     data-filename={file.filename}
+                    draggable="true"
                     tabindex="0"
                     role="button"
                     onclick={() => selectFile(file)}
                     ondblclick={() => openFileInViewer(file)}
+                    ondragstart={(event) => handleNearbytesFileDragStart(event, file)}
                     onkeydown={(e) => handleFileRowKeydown(e, file)}
                   >
                     <span class="file-row-name" title={file.filename}>{displayFileName(file)}</span>
@@ -2688,6 +2772,8 @@
   }
 
   .volume-chip.selected {
+    --volume-identity-label-color: rgba(236, 254, 255, 0.98);
+    --volume-identity-secondary-color: rgba(165, 243, 252, 0.82);
     border-color: rgba(45, 212, 191, 0.46);
     background:
       radial-gradient(120% 180% at 0% 0%, rgba(45, 212, 191, 0.16), transparent 52%),
@@ -2700,12 +2786,12 @@
   }
 
   .volume-chip.selected .header-dock {
-    padding-left: 0.78rem;
+    padding-left: 0.72rem;
   }
 
   .volume-chip.selected .header-dock-badge {
     position: relative;
-    padding-left: 0.72rem;
+    padding-left: 0.68rem;
   }
 
   .volume-chip.selected .header-dock-badge::before {
@@ -2723,11 +2809,6 @@
       0 0 14px rgba(34, 211, 238, 0.46);
   }
 
-  .volume-chip.selected .header-dock-name {
-    color: rgba(236, 254, 255, 0.98);
-    text-shadow: 0 0 16px rgba(34, 211, 238, 0.12);
-  }
-
   .volume-chip.selected .badge-meter {
     background: rgba(34, 211, 238, 0.18);
   }
@@ -2735,12 +2816,12 @@
   .header-dock {
     border: 0;
     background: transparent;
-    padding: 0.36rem 0.42rem 0.36rem 0.7rem;
+    padding: 0.26rem 0.36rem 0.26rem 0.62rem;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    min-height: 42px;
+    min-height: 36px;
     transition: padding 0.24s ease;
   }
 
@@ -2773,21 +2854,36 @@
   .volume-chip-config-btn {
     appearance: none;
     border: 0;
-    border-left: 1px solid rgba(56, 189, 248, 0.14);
+    border-left: 1px solid transparent;
     background: linear-gradient(180deg, rgba(9, 18, 33, 0.36), rgba(7, 14, 26, 0.18));
     color: rgba(186, 230, 253, 0.72);
-    width: 34px;
-    min-width: 34px;
+    width: 0;
+    min-width: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     padding: 0;
     cursor: pointer;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
     transition:
+      width 0.2s ease,
+      min-width 0.2s ease,
+      opacity 0.16s ease,
       background-color 0.2s ease,
       color 0.2s ease,
       border-color 0.2s ease,
       transform 0.2s ease;
+  }
+
+  .volume-chip.collapsed-shell:hover .volume-chip-config-btn,
+  .volume-chip.collapsed-shell:focus-within .volume-chip-config-btn {
+    width: 31px;
+    min-width: 31px;
+    border-left-color: rgba(56, 189, 248, 0.14);
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .volume-chip-config-btn:hover {
@@ -2825,10 +2921,6 @@
     padding: 0.1rem 0;
   }
 
-  .header-dock-badge.loading .header-dock-name {
-    color: rgba(224, 242, 254, 0.98);
-  }
-
   .header-dock-badge-top {
     min-width: 0;
     display: flex;
@@ -2851,52 +2943,6 @@
     transform: translateY(0);
     pointer-events: auto;
     padding: 0.5rem 0.35rem 0.35rem;
-  }
-
-  .header-dock-name {
-    margin: 0;
-    font-size: 0.92rem;
-    font-weight: 600;
-    color: rgba(240, 249, 255, 0.96);
-    min-width: 0;
-    max-width: min(52vw, 620px);
-    text-overflow: ellipsis;
-    overflow: hidden;
-    white-space: nowrap;
-    letter-spacing: 0.01em;
-  }
-
-  .secret-file-preview {
-    flex: 0 0 auto;
-    width: 22px;
-    height: 22px;
-    border-radius: 7px;
-    overflow: hidden;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(15, 23, 42, 0.7);
-    border: 1px solid rgba(96, 165, 250, 0.22);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  }
-
-  .secret-file-preview.image {
-    background: rgba(7, 14, 28, 0.94);
-    border-color: rgba(125, 211, 252, 0.28);
-  }
-
-  .secret-file-preview-image {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
-
-  .secret-file-preview-icon {
-    color: rgba(191, 219, 254, 0.9);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
   }
 
   .secret-file-card {
@@ -3015,14 +3061,14 @@
     background: rgba(12, 24, 43, 0.82);
     color: rgba(226, 232, 240, 0.92);
     border-radius: 11px;
-    padding: 0 0.72rem;
-    min-height: 30px;
+    padding: 0 0.68rem;
+    min-height: 28px;
     min-width: 116px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 0.46rem;
-    font-size: 0.76rem;
+    font-size: 0.74rem;
     font-weight: 600;
     letter-spacing: 0.01em;
     line-height: 1;
@@ -3217,14 +3263,14 @@
     background: rgba(12, 24, 43, 0.82);
     color: rgba(226, 232, 240, 0.92);
     border-radius: 11px;
-    padding: 0 0.72rem;
-    min-height: 30px;
+    padding: 0 0.68rem;
+    min-height: 28px;
     min-width: 116px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 0.46rem;
-    font-size: 0.76rem;
+    font-size: 0.74rem;
     font-weight: 600;
     letter-spacing: 0.01em;
     line-height: 1;
@@ -3266,9 +3312,9 @@
     border: 1px solid rgba(56, 189, 248, 0.14);
     background: rgba(10, 19, 34, 0.52);
     color: rgba(191, 219, 254, 0.78);
-    border-radius: 10px;
-    width: 28px;
-    height: 28px;
+    border-radius: 12px;
+    width: 36px;
+    height: 36px;
     line-height: 1;
     display: inline-flex;
     align-items: center;
@@ -3416,15 +3462,16 @@
 
   /* File area */
   .file-area {
-    flex: 0 0 auto;
-    min-height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
     padding: 2rem;
     overflow: visible;
     transition: background-color 0.3s ease;
     position: relative;
-    display: grid;
+    display: flex;
+    flex-direction: column;
     gap: 1rem;
-    align-content: start;
   }
 
   .sources-launcher {
@@ -3452,11 +3499,12 @@
     max-width: none;
     margin: 0;
     width: 100%;
-    height: auto;
+    height: 100%;
     display: flex;
     flex-direction: column;
     gap: 1rem;
-    min-height: auto;
+    min-height: 100%;
+    flex: 1 1 auto;
   }
 
   .volume-transition-state {
@@ -3797,13 +3845,17 @@
     gap: 0.75rem;
     align-items: center;
     padding: 0.6rem 0.75rem;
-    cursor: default;
+    cursor: grab;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     transition: background 0.15s ease;
   }
 
   .file-row:hover {
     background: rgba(102, 126, 234, 0.08);
+  }
+
+  .file-row:active {
+    cursor: grabbing;
   }
 
   .file-row.selected {
@@ -4041,10 +4093,6 @@
   }
 
   @media (max-width: 640px) {
-    .header-dock-name {
-      max-width: 92vw;
-    }
-
     .workspace-toggle {
       font-size: 0.72rem;
       min-width: auto;

@@ -54,7 +54,7 @@ const sourceConfigEntrySchema = z.object({
   path: z.string().trim().min(1, 'Source path is required'),
   enabled: z.boolean().default(true),
   writable: z.boolean().default(true),
-  reservePercent: z.number().int().min(0).max(95).default(10),
+  reservePercent: z.number().int().min(0).max(95).default(5),
   opportunisticPolicy: fullPolicySchema.default('drop-older-blocks'),
 });
 
@@ -64,7 +64,7 @@ const volumeDestinationSchema = z.object({
   storeEvents: z.boolean().default(true),
   storeBlocks: z.boolean().default(true),
   copySourceBlocks: z.boolean().default(true),
-  reservePercent: z.number().int().min(0).max(95).default(10),
+  reservePercent: z.number().int().min(0).max(95).default(5),
   fullPolicy: fullPolicySchema.default('block-writes'),
 });
 
@@ -127,7 +127,7 @@ export function createDefaultRootsConfig(defaultRootPath: string): RootsConfig {
         path: path.resolve(defaultRootPath),
         enabled: true,
         writable: true,
-        reservePercent: 10,
+        reservePercent: 5,
         opportunisticPolicy: 'drop-older-blocks',
       },
     ],
@@ -139,7 +139,7 @@ export function createDefaultRootsConfig(defaultRootPath: string): RootsConfig {
           storeEvents: true,
           storeBlocks: true,
           copySourceBlocks: true,
-          reservePercent: 10,
+          reservePercent: 5,
           fullPolicy: 'block-writes',
         },
       ],
@@ -351,7 +351,7 @@ function migrateLegacyRootsConfig(value: unknown): unknown {
     path: path.resolve(root.path),
     enabled: root.enabled,
     writable: root.writable,
-    reservePercent: 10,
+    reservePercent: 5,
     opportunisticPolicy: 'drop-older-blocks',
   }));
 
@@ -363,7 +363,7 @@ function migrateLegacyRootsConfig(value: unknown): unknown {
       storeEvents: true,
       storeBlocks: true,
       copySourceBlocks: true,
-      reservePercent: 10,
+      reservePercent: 5,
       fullPolicy: 'block-writes',
     }));
 
@@ -384,7 +384,7 @@ function migrateLegacyRootsConfig(value: unknown): unknown {
         storeEvents: true,
         storeBlocks: true,
         copySourceBlocks: true,
-        reservePercent: 10,
+        reservePercent: 5,
         fullPolicy: 'block-writes',
       });
       volumeMap.set(normalizedKey, destinations);
