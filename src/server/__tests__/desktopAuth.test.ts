@@ -28,18 +28,32 @@ describe('Desktop API token enforcement', () => {
     );
 
     const rootsConfig: RootsConfig = {
-      version: 1,
-      roots: [
+      version: 2,
+      sources: [
         {
-          id: 'main-1',
-          kind: 'main',
+          id: 'src-main',
           provider: 'local',
           path: mainRoot,
           enabled: true,
           writable: true,
-          strategy: { name: 'all-keys' },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
       ],
+      defaultVolume: {
+        destinations: [
+          {
+            sourceId: 'src-main',
+            enabled: true,
+            storeEvents: true,
+            storeBlocks: true,
+            copySourceBlocks: true,
+            reservePercent: 10,
+            fullPolicy: 'block-writes',
+          },
+        ],
+      },
+      volumes: [],
     };
     await fs.writeFile(rootsConfigPath, `${JSON.stringify(rootsConfig, null, 2)}\n`, 'utf8');
 
@@ -76,7 +90,7 @@ describe('Desktop API token enforcement', () => {
       .set('x-nearbytes-desktop-token', 'desktop-token-value')
       .expect(200);
 
-    expect(Array.isArray(allowed.body.config?.roots)).toBe(true);
+    expect(Array.isArray(allowed.body.config?.sources)).toBe(true);
   });
 
   it('serves UI routes without desktop token in desktop mode', async () => {

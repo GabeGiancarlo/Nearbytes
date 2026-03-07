@@ -71,25 +71,44 @@ export interface RenameFolderResponse {
   renamed: RenameFolderSummary;
 }
 
-export type RootKind = 'main' | 'backup';
-export type RootProvider = 'local' | 'dropbox' | 'mega' | 'gdrive';
-export type RootStrategy =
-  | { name: 'all-keys' }
-  | { name: 'allowlist'; channelKeys: string[] };
+export type SourceProvider = 'local' | 'dropbox' | 'mega' | 'gdrive';
+export type RootProvider = SourceProvider;
+export type StorageFullPolicy = 'block-writes' | 'drop-older-blocks';
 
-export interface RootConfigEntry {
+export interface SourceConfigEntry {
   id: string;
-  kind: RootKind;
-  provider: RootProvider;
+  provider: SourceProvider;
   path: string;
   enabled: boolean;
   writable: boolean;
-  strategy: RootStrategy;
+  reservePercent: number;
+  opportunisticPolicy: StorageFullPolicy;
+}
+
+export interface VolumeDestinationConfig {
+  sourceId: string;
+  enabled: boolean;
+  storeEvents: boolean;
+  storeBlocks: boolean;
+  copySourceBlocks: boolean;
+  reservePercent: number;
+  fullPolicy: StorageFullPolicy;
+}
+
+export interface DefaultVolumePolicy {
+  destinations: VolumeDestinationConfig[];
+}
+
+export interface VolumePolicyEntry {
+  volumeId: string;
+  destinations: VolumeDestinationConfig[];
 }
 
 export interface RootsConfig {
-  version: 1;
-  roots: RootConfigEntry[];
+  version: 2;
+  sources: SourceConfigEntry[];
+  defaultVolume: DefaultVolumePolicy;
+  volumes: VolumePolicyEntry[];
 }
 
 export interface RootWriteFailure {
@@ -104,10 +123,13 @@ export interface RootWriteFailure {
 
 export interface RootRuntimeStatus {
   id: string;
-  kind: RootKind;
+  kind: 'source';
+  provider: SourceProvider;
   path: string;
   enabled: boolean;
   writable: boolean;
+  reservePercent: number;
+  opportunisticPolicy: StorageFullPolicy;
   exists: boolean;
   isDirectory: boolean;
   canWrite: boolean;
@@ -116,7 +138,7 @@ export interface RootRuntimeStatus {
 }
 
 export interface RootsRuntimeSnapshot {
-  roots: RootRuntimeStatus[];
+  sources: RootRuntimeStatus[];
   writeFailures: RootWriteFailure[];
 }
 
@@ -128,8 +150,8 @@ export interface RootsConfigResponse {
 
 export interface RootConsolidationSource {
   id: string;
-  kind: RootKind;
-  provider: RootProvider;
+  kind: 'source';
+  provider: SourceProvider;
   path: string;
   fileCount: number;
   totalBytes: number;
@@ -137,8 +159,8 @@ export interface RootConsolidationSource {
 
 export interface RootConsolidationCandidate {
   id: string;
-  kind: RootKind;
-  provider: RootProvider;
+  kind: 'source';
+  provider: SourceProvider;
   path: string;
   sameDevice: boolean;
   filesToTransfer: number;
@@ -176,7 +198,7 @@ export interface RootConsolidationResponse extends RootsConfigResponse {
 }
 
 export interface DiscoveredNearbytesSource {
-  provider: RootProvider;
+  provider: SourceProvider;
   path: string;
   markerFile: string;
   autoUpdate: boolean;
@@ -193,7 +215,7 @@ export interface VolumeWatchReady {
   volumeId: string;
   autoUpdate: boolean;
   mode: 'filesystem' | 'none';
-  providers: RootProvider[];
+  providers: SourceProvider[];
 }
 
 export interface VolumeWatchUpdate {

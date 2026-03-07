@@ -5,7 +5,7 @@ import { timingSafeEqual } from 'crypto';
 import { promises as fs } from 'fs';
 import os from 'os';
 import multer from 'multer';
-import { parseRootsConfig, saveRootsConfig } from '../config/roots.js';
+import { getSourceById, parseRootsConfig, saveRootsConfig } from '../config/roots.js';
 import { discoverNearbytesSources, ensureNearbytesMarkers } from '../config/sourceDiscovery.js';
 import type { CryptoOperations } from '../crypto/index.js';
 import type { FileService } from '../domain/fileService.js';
@@ -90,7 +90,7 @@ export function createRoutes(deps: RouteDependencies): Router {
   router.get('/config/roots', asyncHandler(async (req, res) => {
     assertLocalConfigRequest(req);
     const multiRootStorage = getMultiRootStorageOrThrow(deps.storage);
-    await ensureNearbytesMarkers(multiRootStorage.getRootsConfig().roots);
+    await ensureNearbytesMarkers(multiRootStorage.getRootsConfig().sources);
     const runtime = await multiRootStorage.getRuntimeSnapshot();
     res.json({
       configPath: deps.rootsConfigPath ?? null,
@@ -120,7 +120,8 @@ export function createRoutes(deps: RouteDependencies): Router {
     await saveRootsConfig(deps.rootsConfigPath, nextConfig);
     const multiRootStorage = getMultiRootStorageOrThrow(deps.storage);
     multiRootStorage.updateRootsConfig(nextConfig);
-    await ensureNearbytesMarkers(nextConfig.roots);
+    await multiRootStorage.reconcileConfiguredVolumes();
+    await ensureNearbytesMarkers(nextConfig.sources);
     const runtime = await multiRootStorage.getRuntimeSnapshot();
 
     res.json({
@@ -148,7 +149,7 @@ export function createRoutes(deps: RouteDependencies): Router {
     const multiRootStorage = getMultiRootStorageOrThrow(deps.storage);
     const consolidated = await multiRootStorage.consolidateRoot(sourceId, targetId);
     await saveRootsConfig(deps.rootsConfigPath, consolidated.config);
-    await ensureNearbytesMarkers(consolidated.config.roots);
+    await ensureNearbytesMarkers(consolidated.config.sources);
     const runtime = await multiRootStorage.getRuntimeSnapshot();
 
     res.json({
@@ -163,16 +164,16 @@ export function createRoutes(deps: RouteDependencies): Router {
     assertLocalConfigRequest(req);
     const { rootId } = parseWithSchema(openRootInFileManagerBodySchema, req.body);
     const multiRootStorage = getMultiRootStorageOrThrow(deps.storage);
-    const root = multiRootStorage.getRootsConfig().roots.find((entry) => entry.id === rootId);
-    if (!root) {
-      throw new ApiError(404, 'NOT_FOUND', `Root not found: ${rootId}`);
+    const source = getSourceById(multiRootStorage.getRootsConfig(), rootId);
+    if (!source) {
+      throw new ApiError(404, 'NOT_FOUND', `Source not found: ${rootId}`);
     }
 
-    await openInFileManager(root.path);
+    await openInFileManager(source.path);
     res.json({
       ok: true,
-      rootId: root.id,
-      path: root.path,
+      rootId: source.id,
+      path: source.path,
     });
   });
   router.post('/config/roots/open-file-manager', openRootInFileManagerHandler);

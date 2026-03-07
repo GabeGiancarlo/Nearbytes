@@ -8,25 +8,14 @@
     deleteFile,
     renameFolder,
     downloadFile,
-    getRootsConfig,
-    updateRootsConfig,
-    getRootConsolidationPlan,
-    consolidateRoot as consolidateRootApi,
-    openRootInFileManager,
-    discoverSources,
     watchVolume,
     type Auth,
     type FileMetadata,
     type TimelineEvent,
-    type RootConfigEntry,
-    type RootConsolidationCandidate,
-    type RootProvider,
-    type RootsConfig,
-    type RootsRuntimeSnapshot,
-    type DiscoveredNearbytesSource,
   } from './lib/api.js';
   import { getCachedFiles, setCachedFiles } from './lib/cache.js';
   import ArmedActionButton from './components/ArmedActionButton.svelte';
+  import StoragePanel from './components/StoragePanel.svelte';
   import {
     Activity,
     ClipboardPaste,
@@ -46,7 +35,6 @@
   } from 'lucide-svelte';
 
   const VOLUME_MOUNTS_KEY = 'nearbytes-volume-mounts-v1';
-  const ROOT_SUGGESTIONS_DISMISSED_KEY = 'nearbytes-dismissed-suggestions-v1';
   const FILE_SECRET_PREFIX = 'nb-file-secret:v1:';
 
   type PreviewKind = 'none' | 'image' | 'text' | 'pdf' | 'video' | 'audio' | 'unsupported';
@@ -58,7 +46,6 @@
 
   type PersistedUiState = {
     volumeMounts?: unknown;
-    dismissedRootSuggestions?: unknown;
   };
 
   type NearbytesDesktopBridge = {
@@ -613,40 +600,6 @@
     return fallback;
   }
 
-  function loadDismissedRootSuggestions(): string[] {
-    return normalizeDismissedRootSuggestions(localStorage.getItem(ROOT_SUGGESTIONS_DISMISSED_KEY));
-  }
-
-  function normalizeDismissedRootSuggestions(input: unknown): string[] {
-    try {
-      const raw = typeof input === 'string' ? input : JSON.stringify(input);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      return parsed
-        .filter((value) => typeof value === 'string')
-        .map((value) => normalizeComparablePath(value))
-        .filter((value, index, all) => value.length > 0 && all.indexOf(value) === index);
-    } catch {
-      return [];
-    }
-  }
-
-  function persistDismissedRootSuggestions(values: string[]): void {
-    try {
-      localStorage.setItem(
-        ROOT_SUGGESTIONS_DISMISSED_KEY,
-        JSON.stringify(snapshotDismissedRootSuggestions(values))
-      );
-    } catch {
-      // ignore
-    }
-  }
-
-  function snapshotDismissedRootSuggestions(values: string[]): string[] {
-    return [...values];
-  }
-
   // State: address = main input; effectiveSecret = sent to API
   let address = $state('');
   let addressPassword = $state('');
@@ -691,26 +644,8 @@
   let timelinePlayTimer: ReturnType<typeof setInterval> | null = null;
   let showStatusPanel = $state(false);
   let showTimeMachinePanel = $state(false);
-  let showRootsPanel = $state(false);
-  let rootsConfigPath = $state<string | null>(null);
-  let rootsRuntime = $state<RootsRuntimeSnapshot | null>(null);
-  let rootsDraft = $state<RootConfigEntry[]>([]);
-  let rootsError = $state('');
-  let rootsSuccess = $state('');
-  let rootsLoading = $state(false);
-  let rootsSaving = $state(false);
-  let discoveredSources = $state<DiscoveredNearbytesSource[]>([]);
-  let dismissedRootSuggestions = $state<string[]>(loadDismissedRootSuggestions());
-  let rootsAdvancedOpen = $state(false);
-  let hasAutoScannedRoots = $state(false);
-  let consolidatingRootIndex = $state<number | null>(null);
-  let consolidateCandidates = $state<RootConsolidationCandidate[]>([]);
-  let consolidateTargetId = $state('');
-  let consolidateLoading = $state(false);
-  let consolidateApplying = $state(false);
-  let consolidateMessage = $state('');
-  let sourceDiscoveryLoading = $state(false);
-  let sourceDiscoveryError = $state('');
+  let showSourcesPanel = $state(false);
+  let showVolumeStoragePanel = $state(false);
   let autoSyncEnabled = $state(false);
   let autoSyncStatus = $state<'idle' | 'connecting' | 'active' | 'unsupported' | 'error'>('idle');
   let isRefreshing = $state(false);
@@ -719,29 +654,9 @@
   let autoRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let volumeOpenSerial = 0;
 
-  type SourceRow = {
-    source: DiscoveredNearbytesSource;
-    alreadyRegistered: boolean;
-    dismissed: boolean;
-  };
-  type VolumeRouteRow = {
-    index: number;
-    rootId: string;
-    provider: RootProvider;
-    kind: 'main' | 'backup';
-    selected: boolean;
-    routable: boolean;
-    enabled: boolean;
-    writable: boolean;
-  };
-
   function preferredActiveMountId(nextMounts: VolumeMount[]): string {
     return nextMounts.find((mount) => !mount.collapsed)?.id ?? nextMounts[0]?.id ?? '';
   }
-
-  const dismissedRootSuggestionSet = $derived.by(
-    () => new Set(dismissedRootSuggestions.map((value) => normalizeComparablePath(value)))
-  );
 
   onMount(() => {
     const bridge = getDesktopBridge();
@@ -754,17 +669,10 @@
       try {
         const nextState = await bridge.loadUiState();
         const hasPersistedMounts = Object.prototype.hasOwnProperty.call(nextState ?? {}, 'volumeMounts');
-        const hasPersistedDismissedSuggestions = Object.prototype.hasOwnProperty.call(
-          nextState ?? {},
-          'dismissedRootSuggestions'
-        );
         const nextMounts = normalizeMounts(nextState?.volumeMounts);
         if (hasPersistedMounts) {
           mounts = nextMounts.length > 0 ? nextMounts : [createMount()];
           activeMountId = preferredActiveMountId(mounts);
-        }
-        if (hasPersistedDismissedSuggestions) {
-          dismissedRootSuggestions = normalizeDismissedRootSuggestions(nextState?.dismissedRootSuggestions);
         }
       } catch (error) {
         console.warn('Failed to hydrate desktop UI state:', error);
@@ -830,76 +738,6 @@
     };
   });
 
-  const discoveredSourceRows = $derived.by(() => {
-    const uniqueSources = new Map<string, DiscoveredNearbytesSource>();
-    const dismissedSet = dismissedRootSuggestionSet;
-    for (const source of discoveredSources) {
-      const key = normalizeComparablePath(source.path);
-      const existing = uniqueSources.get(key);
-      if (!existing || source.sourceType === 'marker') {
-        uniqueSources.set(key, source);
-      }
-    }
-    const rows: SourceRow[] = Array.from(uniqueSources.values()).map((source) => {
-      const key = normalizeComparablePath(source.path);
-      const alreadyRegistered = rootsDraft.some(
-        (root) => normalizeComparablePath(root.path) === key
-      );
-      const dismissed = source.sourceType === 'suggested' && dismissedSet.has(key);
-      return { source, alreadyRegistered, dismissed };
-    });
-    rows.sort((left, right) => left.source.path.localeCompare(right.source.path));
-    return rows;
-  });
-
-  const sourceRows = $derived.by(
-    () => discoveredSourceRows.filter((row) => !row.alreadyRegistered && !row.dismissed)
-  );
-  const markerSourceRows = $derived.by(() => sourceRows.filter((row) => row.source.sourceType === 'marker'));
-  const suggestedSourceRows = $derived.by(
-    () => sourceRows.filter((row) => row.source.sourceType === 'suggested')
-  );
-  const dismissedSuggestionCount = $derived.by(
-    () =>
-      discoveredSourceRows.filter((row) => row.source.sourceType === 'suggested' && row.dismissed).length
-  );
-  const discoveredExistingSourceCount = $derived.by(
-    () => discoveredSourceRows.filter((row) => row.source.sourceType === 'marker').length
-  );
-  const discoveredSuggestedSourceCount = $derived.by(
-    () => discoveredSourceRows.filter((row) => row.source.sourceType === 'suggested').length
-  );
-  const alreadyRegisteredSourceCount = $derived.by(
-    () => discoveredSourceRows.filter((row) => row.alreadyRegistered).length
-  );
-  const currentVolumeKey = $derived.by(() => {
-    const raw = volumeId?.trim() ?? '';
-    if (raw === '') return null;
-    return normalizeChannelKey(raw);
-  });
-  const volumeRouteRows = $derived.by(() => {
-    const key = currentVolumeKey;
-    if (!key) return [] as VolumeRouteRow[];
-    return rootsDraft.map((root, index) => {
-      const selected =
-        root.kind === 'main'
-          ? true
-          : root.strategy.name === 'allowlist' &&
-            root.strategy.channelKeys.some((entry) => normalizeChannelKey(entry) === key);
-      return {
-        index,
-        rootId: root.id,
-        provider: root.provider,
-        kind: root.kind,
-        selected,
-        routable: selected && root.enabled && root.writable,
-        enabled: root.enabled,
-        writable: root.writable,
-      };
-    });
-  });
-  const routedRootCount = $derived.by(() => volumeRouteRows.filter((row) => row.routable).length);
-
   $effect(() => {
     const currentMount = mounts.find((mount) => mount.id === activeMountId);
     if (currentMount) return;
@@ -946,7 +784,6 @@
 
     const payload: PersistedUiState = {
       volumeMounts: snapshotVolumeMounts(mounts),
-      dismissedRootSuggestions: snapshotDismissedRootSuggestions(dismissedRootSuggestions),
     };
     const bridge = getDesktopBridge();
     const persistTimer = setTimeout(() => {
@@ -957,7 +794,6 @@
         return;
       }
       persistVolumeMounts(mounts);
-      persistDismissedRootSuggestions(dismissedRootSuggestions);
     }, 120);
 
     return () => {
@@ -1061,6 +897,13 @@
 
   const selectedFile = $derived.by(
     () => visibleFiles.find((file) => file.blobHash === selectedBlobHash) ?? null
+  );
+  const activeMount = $derived.by(() => mounts.find((mount) => mount.id === activeMountId) ?? null);
+  const currentMountedVolumeHint = $derived.by(
+    () => (activeMount ? mountLabel(activeMount) : null)
+  );
+  const currentMountedVolumeUsesFile = $derived.by(
+    () => (activeMount ? hasFileSecret(activeMount) : false)
   );
 
   function stopTimelinePlayback() {
@@ -1469,13 +1312,30 @@
   }
 
   function collapseExpandedMountFromOutside(target: EventTarget | null) {
+    if (!(target instanceof Element)) {
+      if (showSourcesPanel) {
+        showSourcesPanel = false;
+      }
+      if (activeMountId) {
+        const activeMount = mounts.find((mount) => mount.id === activeMountId);
+        if (activeMount && !activeMount.collapsed) {
+          collapseMount(activeMountId);
+        }
+      }
+      return;
+    }
+
+    if (
+      showSourcesPanel &&
+      !target.closest('.sources-flyout') &&
+      !target.closest('.sources-launcher')
+    ) {
+      showSourcesPanel = false;
+    }
+
     if (!activeMountId) return;
     const activeMount = mounts.find((mount) => mount.id === activeMountId);
     if (!activeMount || activeMount.collapsed) return;
-    if (!(target instanceof Element)) {
-      collapseMount(activeMountId);
-      return;
-    }
     if (target.closest('.volume-chip.expanded')) {
       return;
     }
@@ -1607,551 +1467,17 @@
     }
   }
 
-  function createDraftRoot(kind: 'main' | 'backup'): RootConfigEntry {
-    const idPrefix = kind === 'main' ? 'main' : 'backup';
-    const uniqueSuffix = Math.random().toString(16).slice(2, 8);
-    return {
-      id: `${idPrefix}-${uniqueSuffix}`,
-      kind,
-      provider: 'local',
-      path: '',
-      enabled: true,
-      writable: true,
-      strategy: kind === 'main' ? { name: 'all-keys' } : { name: 'allowlist', channelKeys: [] },
-    };
-  }
-
-  function cloneRoot(root: RootConfigEntry): RootConfigEntry {
-    return {
-      ...root,
-      strategy:
-        root.strategy.name === 'allowlist'
-          ? { name: 'allowlist', channelKeys: [...root.strategy.channelKeys] }
-          : { name: 'all-keys' },
-    };
-  }
-
-  function applyRootsState(config: RootsConfig, runtime: RootsRuntimeSnapshot, configPath: string | null) {
-    rootsConfigPath = configPath;
-    rootsRuntime = runtime;
-    rootsDraft = config.roots.map(cloneRoot);
-    cancelConsolidation();
-  }
-
-  function getAllowlistText(root: RootConfigEntry): string {
-    if (root.strategy.name !== 'allowlist') return '';
-    return root.strategy.channelKeys.join(', ');
-  }
-
-  function setAllowlistText(index: number, value: string) {
-    const next = [...rootsDraft];
-    const target = next[index];
-    if (!target || target.kind !== 'backup') return;
-
-    const channelKeys = value
-      .split(',')
-      .map((entry) => entry.trim().toLowerCase())
-      .filter((entry) => entry.length > 0);
-
-    next[index] = {
-      ...target,
-      strategy: {
-        name: 'allowlist',
-        channelKeys,
-      },
-    };
-    rootsDraft = next;
-  }
-
-  function updateRootField<K extends keyof RootConfigEntry>(index: number, field: K, value: RootConfigEntry[K]) {
-    const next = [...rootsDraft];
-    if (!next[index]) return;
-    next[index] = {
-      ...next[index],
-      [field]: value,
-    };
-    rootsDraft = next;
-  }
-
-  function updateRootPath(index: number, value: string) {
-    const next = [...rootsDraft];
-    const current = next[index];
-    if (!current) return;
-    next[index] = {
-      ...current,
-      path: value,
-      provider: detectProviderFromPath(value),
-    };
-    rootsDraft = next;
-  }
-
-  function updateRootKind(index: number, kind: 'main' | 'backup') {
-    const next = [...rootsDraft];
-    const current = next[index];
-    if (!current) return;
-
-    next[index] = {
-      ...current,
-      kind,
-      strategy: kind === 'main' ? { name: 'all-keys' } : { name: 'allowlist', channelKeys: [] },
-    };
-    rootsDraft = next;
-  }
-
-  function addRoot(kind: 'main' | 'backup') {
-    rootsDraft = [...rootsDraft, createDraftRoot(kind)];
-  }
-
-  function removeRoot(index: number) {
-    if (!canRemoveRoot(index)) {
-      rootsError = 'At least one enabled main root is required.';
-      return;
-    }
-    rootsDraft = rootsDraft.filter((_, i) => i !== index);
-    if (consolidatingRootIndex === index) {
-      cancelConsolidation();
-    } else if (consolidatingRootIndex !== null && consolidatingRootIndex > index) {
-      consolidatingRootIndex -= 1;
+  function toggleVolumeStoragePanel() {
+    showVolumeStoragePanel = !showVolumeStoragePanel;
+    if (showVolumeStoragePanel) {
+      showSourcesPanel = false;
     }
   }
 
-  function canRemoveRoot(index: number): boolean {
-    const root = rootsDraft[index];
-    if (!root) return false;
-    const nextRoots = rootsDraft.filter((_, i) => i !== index);
-    return nextRoots.some((entry) => entry.kind === 'main' && entry.enabled);
-  }
-
-  async function openRootFolder(rootId: string) {
-    rootsError = '';
-    rootsSuccess = '';
-    try {
-      await openRootInFileManager(rootId);
-      rootsSuccess = 'Opened root in file manager.';
-    } catch (error) {
-      rootsError = error instanceof Error ? error.message : 'Failed to open root in file manager';
-    }
-  }
-
-  function cancelConsolidation() {
-    consolidatingRootIndex = null;
-    consolidateCandidates = [];
-    consolidateTargetId = '';
-    consolidateMessage = '';
-    consolidateLoading = false;
-    consolidateApplying = false;
-  }
-
-  async function beginConsolidation(sourceIndex: number) {
-    const source = rootsDraft[sourceIndex];
-    if (!source) return;
-    consolidatingRootIndex = sourceIndex;
-    consolidateCandidates = [];
-    consolidateTargetId = '';
-    consolidateMessage = '';
-    consolidateLoading = true;
-    rootsError = '';
-
-    try {
-      const response = await getRootConsolidationPlan(source.id);
-      const candidates = response.plan.candidates.filter((candidate) => candidate.eligible);
-      consolidateCandidates = candidates;
-      if (candidates.length > 0) {
-        consolidateTargetId = candidates[0].id;
-        consolidateMessage = `Move ${response.plan.source.fileCount} file(s) from this root into one destination.`;
-      } else {
-        const firstReason = response.plan.candidates.find((candidate) => candidate.reason)?.reason;
-        consolidateMessage = firstReason ?? 'No compatible destinations are available.';
-      }
-    } catch (error) {
-      consolidateMessage =
-        error instanceof Error ? error.message : 'Failed to load consolidation destinations';
-      consolidateCandidates = [];
-    } finally {
-      consolidateLoading = false;
-    }
-  }
-
-  async function applyConsolidation() {
-    if (consolidatingRootIndex === null) return;
-    const source = rootsDraft[consolidatingRootIndex];
-    if (!source) return;
-    if (consolidateTargetId.trim() === '') {
-      consolidateMessage = 'Choose a destination root first.';
-      return;
-    }
-
-    const destination = rootsDraft.find((root) => root.id === consolidateTargetId);
-    if (!destination) {
-      consolidateMessage = 'Destination root no longer exists.';
-      return;
-    }
-
-    const destinationLabel = `${formatProvider(destination.provider)} • ${destination.path}`;
-    const proceed = window.confirm(
-      `Consolidate "${source.path}" into:\n${destinationLabel}\n\nThis moves data and removes the source root from configuration.`
-    );
-    if (!proceed) {
-      return;
-    }
-
-    consolidateApplying = true;
-    rootsError = '';
-    rootsSuccess = '';
-    try {
-      const response = await consolidateRootApi(source.id, consolidateTargetId);
-      applyRootsState(response.config, response.runtime, response.configPath);
-      rootsSuccess = 'Consolidation complete. Source root removed.';
-      cancelConsolidation();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Consolidation failed';
-      consolidateMessage = message;
-      rootsError = message;
-    } finally {
-      consolidateApplying = false;
-    }
-  }
-
-  async function reloadRootsPanel() {
-    rootsLoading = true;
-    rootsError = '';
-    rootsSuccess = '';
-    try {
-      const response = await getRootsConfig();
-      applyRootsState(response.config, response.runtime, response.configPath);
-    } catch (error) {
-      rootsError = error instanceof Error ? error.message : 'Failed to load roots configuration';
-    } finally {
-      rootsLoading = false;
-    }
-  }
-
-  function buildRootsConfigPayload(): RootsConfig {
-    return {
-      version: 1,
-      roots: rootsDraft.map((root) => ({
-        ...root,
-        provider: root.provider,
-        strategy:
-          root.kind === 'main'
-            ? { name: 'all-keys' as const }
-            : {
-                name: 'allowlist' as const,
-                channelKeys:
-                  root.strategy.name === 'allowlist'
-                    ? [...root.strategy.channelKeys]
-                    : [],
-              },
-      })),
-    };
-  }
-
-  function formatProvider(provider: RootProvider): string {
-    if (provider === 'gdrive') return 'Google Drive';
-    if (provider === 'dropbox') return 'Dropbox';
-    if (provider === 'mega') return 'MEGA';
-    return 'Local';
-  }
-
-  function detectProviderFromPath(pathValue: string): RootProvider {
-    const lower = pathValue.toLowerCase();
-    if (lower.includes('dropbox')) return 'dropbox';
-    if (
-      lower.includes('google drive') ||
-      lower.includes('googledrive') ||
-      lower.includes('google-drive') ||
-      lower.includes('gdrive')
-    ) {
-      return 'gdrive';
-    }
-    if (lower.includes('mega')) return 'mega';
-    return 'local';
-  }
-
-  function normalizeComparablePath(value: string): string {
-    const normalized = value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
-    if (normalized === '') return '';
-    if (normalized.startsWith('/')) {
-      return normalized.toLowerCase();
-    }
-    return normalized.toLowerCase();
-  }
-
-  function normalizeChannelKey(value: string): string {
-    return value.trim().toLowerCase();
-  }
-
-  function ensureNearbytesPath(pathValue: string, provider: RootProvider): string {
-    if (provider === 'local') {
-      return pathValue;
-    }
-    const trimmed = pathValue.trim().replace(/[/\\]+$/, '');
-    if (trimmed === '') {
-      return pathValue;
-    }
-    const normalized = trimmed.replace(/\\/g, '/');
-    if (normalized.endsWith('/nearbytes') || normalized.toLowerCase().endsWith('/nearbytes')) {
-      return trimmed;
-    }
-    return `${trimmed}/nearbytes`;
-  }
-
-  function sourceTypeLabel(source: DiscoveredNearbytesSource): string {
-    return source.sourceType === 'marker' ? 'marker found' : 'default suggestion';
-  }
-
-  function rootIdFromSource(source: DiscoveredNearbytesSource, kind: 'main' | 'backup'): string {
-    const base = `${kind}-${source.provider}`;
-    let attempt = 1;
-    while (true) {
-      const candidate = `${base}-${attempt}`.toLowerCase();
-      if (!rootsDraft.some((root) => root.id === candidate)) {
-        return candidate;
-      }
-      attempt += 1;
-    }
-  }
-
-  function addSourceAsRoot(source: DiscoveredNearbytesSource, kind: 'main' | 'backup'): boolean {
-    const sourcePath = ensureNearbytesPath(source.path, source.provider);
-    const normalizedPath = normalizeComparablePath(sourcePath);
-    const exists = rootsDraft.some(
-      (root) => normalizeComparablePath(root.path) === normalizedPath
-    );
-    if (exists) {
-      rootsSuccess = `${sourcePath} is already configured.`;
-      return false;
-    }
-
-    const nextRoot: RootConfigEntry = {
-      id: rootIdFromSource(source, kind),
-      kind,
-      provider: source.provider,
-      path: sourcePath,
-      enabled: true,
-      writable: true,
-      strategy: kind === 'main' ? { name: 'all-keys' } : { name: 'allowlist', channelKeys: [] },
-    };
-    rootsDraft = [...rootsDraft, nextRoot];
-    rootsSuccess = `Added ${formatProvider(source.provider)} source as ${kind} root.`;
-    return true;
-  }
-
-  function addSourceAsReadOnlyRoot(source: DiscoveredNearbytesSource): boolean {
-    const sourcePath = ensureNearbytesPath(source.path, source.provider);
-    const normalizedPath = normalizeComparablePath(sourcePath);
-    const exists = rootsDraft.some((root) => normalizeComparablePath(root.path) === normalizedPath);
-    if (exists) {
-      return false;
-    }
-
-    const nextRoot: RootConfigEntry = {
-      id: rootIdFromSource(source, 'backup'),
-      kind: 'backup',
-      provider: source.provider,
-      path: sourcePath,
-      enabled: true,
-      writable: false,
-      strategy: { name: 'allowlist', channelKeys: [] },
-    };
-    rootsDraft = [...rootsDraft, nextRoot];
-    return true;
-  }
-
-  function materializeSuggestedRoot(source: DiscoveredNearbytesSource, kind: 'main' | 'backup') {
-    const pathLabel = ensureNearbytesPath(source.path, source.provider);
-    const roleLabel = kind === 'main' ? 'Main' : 'Backup';
-    const proceed = window.confirm(`Use ${pathLabel} as a ${roleLabel} root?`);
-    if (!proceed) {
-      return;
-    }
-
-    const added = addSourceAsRoot(source, kind);
-    if (!added) {
-      return;
-    }
-    const normalized = normalizeComparablePath(source.path);
-    const nextDismissed = dismissedRootSuggestions.filter((entry) => entry !== normalized);
-    if (nextDismissed.length !== dismissedRootSuggestions.length) {
-      dismissedRootSuggestions = nextDismissed;
-    }
-  }
-
-  function dismissSuggestedRoot(source: DiscoveredNearbytesSource) {
-    const normalized = normalizeComparablePath(source.path);
-    if (dismissedRootSuggestions.includes(normalized)) {
-      return;
-    }
-    dismissedRootSuggestions = [...dismissedRootSuggestions, normalized];
-    rootsSuccess = `Won't suggest ${source.path} again.`;
-  }
-
-  function restoreDismissedRootSuggestions() {
-    dismissedRootSuggestions = [];
-    rootsSuccess = 'Suggestion visibility restored.';
-  }
-
-  async function scanSources(options?: { silent?: boolean }) {
-    sourceDiscoveryLoading = true;
-    sourceDiscoveryError = '';
-    rootsError = '';
-    if (!options?.silent) {
-      rootsSuccess = '';
-    }
-    try {
-      const response = await discoverSources();
-      discoveredSources = response.sources;
-      const uniqueDiscovered = new Map<string, DiscoveredNearbytesSource>();
-      for (const source of response.sources) {
-        const key = normalizeComparablePath(source.path);
-        const existing = uniqueDiscovered.get(key);
-        if (!existing || source.sourceType === 'marker') {
-          uniqueDiscovered.set(key, source);
-        }
-      }
-      const dedupedCount = uniqueDiscovered.size;
-      const existingSources = Array.from(uniqueDiscovered.values()).filter(
-        (source) => source.sourceType === 'marker'
-      );
-
-      let autoAddedReadOnlyRoots = 0;
-      for (const source of existingSources) {
-        if (addSourceAsReadOnlyRoot(source)) {
-          autoAddedReadOnlyRoots += 1;
-        }
-      }
-
-      if (autoAddedReadOnlyRoots > 0) {
-        const saved = await updateRootsConfig(buildRootsConfigPayload());
-        applyRootsState(saved.config, saved.runtime, saved.configPath);
-      }
-
-      if (dedupedCount === 0) {
-        if (!options?.silent) {
-          rootsSuccess = 'No synced sources found.';
-        }
-      } else if (!options?.silent) {
-        if (autoAddedReadOnlyRoots > 0) {
-          rootsSuccess = `Connected ${autoAddedReadOnlyRoots} existing source${autoAddedReadOnlyRoots === 1 ? '' : 's'} as read-only roots.`;
-        } else if (existingSources.length > 0) {
-          rootsSuccess = `Found ${existingSources.length} existing source${existingSources.length === 1 ? '' : 's'}. Already connected.`;
-        } else {
-          rootsSuccess = 'No existing .nearbytes sources found. Suggestions stay hidden.';
-        }
-      }
-    } catch (error) {
-      sourceDiscoveryError = error instanceof Error ? error.message : 'Failed to discover sources';
-    } finally {
-      sourceDiscoveryLoading = false;
-    }
-  }
-
-  function routeRootForCurrentVolume(index: number) {
-    const key = currentVolumeKey;
-    if (!key) {
-      rootsError = 'Open a volume first to route roots.';
-      return;
-    }
-
-    const next = [...rootsDraft];
-    const root = next[index];
-    if (!root) return;
-
-    if (root.kind === 'main') {
-      next[index] = {
-        ...root,
-        enabled: true,
-        writable: true,
-      };
-      rootsDraft = next;
-      rootsSuccess = `Main root "${root.id}" is now active for all volumes. Save to apply.`;
-      return;
-    }
-
-    const existingKeys =
-      root.strategy.name === 'allowlist'
-        ? root.strategy.channelKeys.map((entry) => normalizeChannelKey(entry))
-        : [];
-    const hasKey = existingKeys.includes(key);
-    const shouldEnableRoute = !hasKey || !root.enabled || !root.writable;
-
-    if (shouldEnableRoute) {
-      const merged = Array.from(new Set([...existingKeys, key])).sort((a, b) => a.localeCompare(b));
-      next[index] = {
-        ...root,
-        enabled: true,
-        writable: true,
-        strategy: {
-          name: 'allowlist',
-          channelKeys: merged,
-        },
-      };
-      rootsDraft = next;
-      rootsSuccess = `Volume routed to backup root "${root.id}". Save to apply.`;
-      return;
-    }
-
-    next[index] = {
-      ...root,
-      strategy: {
-        name: 'allowlist',
-        channelKeys: existingKeys.filter((entry) => entry !== key),
-      },
-    };
-    rootsDraft = next;
-    rootsSuccess = `Volume removed from backup root "${root.id}". Save to apply.`;
-  }
-
-  function routeCardStatus(row: VolumeRouteRow): string {
-    if (row.kind === 'main') {
-      return row.routable ? 'Always used (main)' : 'Main root is disabled';
-    }
-    if (row.routable) {
-      return 'Used for this volume';
-    }
-    if (row.selected && (!row.enabled || !row.writable)) {
-      return 'Selected but unavailable';
-    }
-    return 'Not used for this volume';
-  }
-
-  function routeCardActionLabel(row: VolumeRouteRow): string {
-    if (row.kind === 'main') {
-      return row.routable ? 'Always On' : 'Enable';
-    }
-    if (row.routable) {
-      return 'Stop Using';
-    }
-    if (row.selected && (!row.enabled || !row.writable)) {
-      return 'Fix + Use';
-    }
-    return 'Use';
-  }
-
-  async function saveRootsPanel() {
-    rootsSaving = true;
-    rootsError = '';
-    rootsSuccess = '';
-    try {
-      const payload = buildRootsConfigPayload();
-      const response = await updateRootsConfig(payload);
-      applyRootsState(response.config, response.runtime, response.configPath);
-      rootsSuccess = 'Roots configuration saved.';
-    } catch (error) {
-      rootsError = error instanceof Error ? error.message : 'Failed to save roots configuration';
-    } finally {
-      rootsSaving = false;
-    }
-  }
-
-  async function toggleRootsPanel() {
-    showRootsPanel = !showRootsPanel;
-    if (showRootsPanel && rootsDraft.length === 0 && !rootsLoading) {
-      await reloadRootsPanel();
-    }
-    if (showRootsPanel && !sourceDiscoveryLoading && !hasAutoScannedRoots) {
-      hasAutoScannedRoots = true;
-      void scanSources({ silent: true });
+  function toggleSourcesPanel() {
+    showSourcesPanel = !showSourcesPanel;
+    if (showSourcesPanel) {
+      showVolumeStoragePanel = false;
     }
   }
 
@@ -2818,14 +2144,14 @@
                     <button
                       type="button"
                       class="workspace-toggle"
-                      class:active={showRootsPanel}
+                      class:active={showVolumeStoragePanel}
                       onclick={(event) => {
                         event.stopPropagation();
-                        toggleRootsPanel();
+                        toggleVolumeStoragePanel();
                       }}
                     >
                       <HardDrive class="button-icon" size={15} strokeWidth={2} />
-                      <span>Storage</span>
+                      <span>Keep</span>
                     </button>
                   </div>
                 </div>
@@ -2977,328 +2303,41 @@
     ondragleave={handleDragLeave}
     ondrop={handleDrop}
   >
-    {#if showRootsPanel}
-      <section class="roots-panel" aria-label="Storage roots configuration">
-        <div class="roots-panel-header">
-          <div class="roots-title-wrap">
-            <p class="roots-eyebrow">Storage Roots</p>
-            <h3 class="roots-title">Storage Locations</h3>
-            <p class="roots-subtitle">
-              Choose where data lives. Save applies changes.
-            </p>
-            {#if rootsAdvancedOpen}
-              <p class="roots-path" title={rootsConfigPath ?? ''}>
-                {rootsConfigPath ? `Config: ${rootsConfigPath}` : 'Config path unavailable'}
-              </p>
-            {/if}
-          </div>
-          <div class="roots-actions">
-            <button
-              type="button"
-              class="roots-action-btn"
-              onclick={() => scanSources()}
-              disabled={sourceDiscoveryLoading}
-            >
-              <Search class="button-icon" size={15} strokeWidth={2} />
-              {sourceDiscoveryLoading ? 'Finding…' : 'Find More Roots'}
-            </button>
-            <button
-              type="button"
-              class="roots-action-btn"
-              onclick={() => {
-                rootsAdvancedOpen = !rootsAdvancedOpen;
-              }}
-            >
-              {rootsAdvancedOpen ? 'Simple' : 'Advanced'}
-            </button>
-            <button
-              type="button"
-              class="roots-action-btn primary"
-              onclick={saveRootsPanel}
-              disabled={rootsSaving || rootsLoading}
-            >
-              {rootsSaving ? 'Saving…' : 'Save'}
-            </button>
-            {#if rootsAdvancedOpen}
-              <button type="button" class="roots-action-btn" onclick={() => addRoot('main')}>
-                <Plus class="button-icon" size={15} strokeWidth={2} />
-                New Main
-              </button>
-              <button type="button" class="roots-action-btn" onclick={() => addRoot('backup')}>
-                <Plus class="button-icon" size={15} strokeWidth={2} />
-                New Backup
-              </button>
-              <button type="button" class="roots-action-btn" onclick={reloadRootsPanel} disabled={rootsLoading}>
-                Reload
-              </button>
-            {/if}
-          </div>
+    <div class="file-area-top">
+      <div class="sources-launcher">
+        <button
+          type="button"
+          class="sources-launcher-btn"
+          class:active={showSourcesPanel}
+          aria-label="Sources"
+          title="Sources"
+          onclick={(event) => {
+            event.stopPropagation();
+            toggleSourcesPanel();
+          }}
+        >
+          <HardDrive class="button-icon" size={15} strokeWidth={2} />
+        </button>
+      </div>
+      {#if showSourcesPanel}
+        <div class="sources-flyout">
+          <StoragePanel
+            mode="global"
+            {volumeId}
+            currentVolumeHint={currentMountedVolumeHint}
+            currentVolumeHintIsFile={currentMountedVolumeUsesFile}
+          />
         </div>
+      {/if}
+    </div>
 
-        {#if rootsError}
-          <p class="roots-error">{rootsError}</p>
-        {/if}
-        {#if sourceDiscoveryError}
-          <p class="roots-error">{sourceDiscoveryError}</p>
-        {/if}
-        {#if rootsSuccess}
-          <p class="roots-success">{rootsSuccess}</p>
-        {/if}
-
-        <div class="roots-scroll">
-          {#if rootsLoading}
-            <p class="roots-info">Loading roots configuration…</p>
-          {:else}
-            <section class="source-discovery" aria-label="Discovered synced sources">
-              <div class="roots-section-head">
-                <p class="roots-section-title">Source Discovery</p>
-                <p class="roots-section-caption">Existing `.nearbytes` sources are auto-connected read-only.</p>
-              </div>
-              {#if discoveredSourceRows.length === 0}
-                <p class="roots-info">
-                  No sources discovered yet. Use “Find More Roots”.
-                </p>
-              {:else}
-                <p class="roots-info">
-                  Discovered {discoveredExistingSourceCount} existing source{discoveredExistingSourceCount === 1 ? '' : 's'}
-                  and {discoveredSuggestedSourceCount} suggestion{discoveredSuggestedSourceCount === 1 ? '' : 's'}.
-                </p>
-                <p class="roots-info muted">
-                  Suggestions are hidden. Existing sources are connected automatically as read-only roots.
-                </p>
-              {/if}
-              {#if alreadyRegisteredSourceCount > 0}
-                <p class="roots-info muted">
-                  {alreadyRegisteredSourceCount} discovered source{alreadyRegisteredSourceCount === 1 ? '' : 's'} already materialized.
-                </p>
-              {/if}
-              {#if rootsAdvancedOpen && dismissedSuggestionCount > 0}
-                <p class="roots-info muted">
-                  {dismissedSuggestionCount} suggestion{dismissedSuggestionCount === 1 ? '' : 's'} hidden.
-                </p>
-              {/if}
-            </section>
-
-            <section class="roots-active" aria-label="Materialized roots">
-              <div class="roots-section-head">
-                <p class="roots-section-title">Configured Roots</p>
-                {#if volumeId}
-                  <p class="roots-section-caption">
-                    This open volume currently uses {routedRootCount} root{routedRootCount === 1 ? '' : 's'}.
-                  </p>
-                {/if}
-              </div>
-              <div class="roots-list">
-              {#each rootsDraft as root, index (root.id + ':' + index)}
-                <article class="root-card">
-                  <div class="root-card-head">
-                    <div class="root-pill-row">
-                      <span class="root-provider-pill">{formatProvider(root.provider)}</span>
-                      <span class="root-kind-pill">{root.kind}</span>
-                      {#if rootsAdvancedOpen}
-                        <span class="root-id-pill">{root.id}</span>
-                      {/if}
-                    </div>
-                    {#if rootsAdvancedOpen}
-                      <div class="root-card-actions">
-                        <label class="root-check">
-                          <input
-                            type="checkbox"
-                            checked={root.enabled}
-                            onchange={(e) => updateRootField(index, 'enabled', (e.currentTarget as HTMLInputElement).checked)}
-                          />
-                          enabled
-                        </label>
-                        <label class="root-check">
-                          <input
-                            type="checkbox"
-                            checked={root.writable}
-                            onchange={(e) => updateRootField(index, 'writable', (e.currentTarget as HTMLInputElement).checked)}
-                          />
-                          writable
-                        </label>
-                      </div>
-                    {:else}
-                      <span class="root-active-pill" class:inactive={!root.enabled || !root.writable}>
-                        {!root.enabled ? 'Off' : root.writable ? 'On' : 'Read-only'}
-                      </span>
-                    {/if}
-                  </div>
-
-                  <div class="root-row">
-                    <label class="root-field">
-                      <span>Folder</span>
-                      <input
-                        type="text"
-                        class="root-input root-path-input"
-                        value={root.path}
-                        oninput={(e) => updateRootPath(index, (e.currentTarget as HTMLInputElement).value)}
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      class="root-open"
-                      onclick={() => openRootFolder(root.id)}
-                    >
-                      Open in File Manager
-                    </button>
-                    <button
-                      type="button"
-                      class="root-consolidate"
-                      onclick={() =>
-                        consolidatingRootIndex === index ? cancelConsolidation() : beginConsolidation(index)}
-                      disabled={rootsDraft.length < 2}
-                    >
-                      {consolidatingRootIndex === index ? 'Cancel' : 'Consolidate…'}
-                    </button>
-                    <button
-                      type="button"
-                      class="root-remove"
-                      onclick={() => removeRoot(index)}
-                      disabled={!canRemoveRoot(index)}
-                      title={!canRemoveRoot(index) ? 'At least one enabled main root is required' : ''}
-                    >
-                      Remove
-                    </button>
-                  </div>
-
-                  {#if consolidatingRootIndex === index}
-                    <div class="root-consolidation-row">
-                      {#if consolidateLoading}
-                        <span class="roots-info">Loading destinations…</span>
-                      {:else if consolidateCandidates.length === 0}
-                        <span class="roots-info">{consolidateMessage}</span>
-                      {:else}
-                        <select
-                          class="root-input root-consolidation-select"
-                          bind:value={consolidateTargetId}
-                          aria-label="Consolidation destination"
-                        >
-                          {#each consolidateCandidates as candidate (candidate.id)}
-                            <option value={candidate.id}>
-                              {formatProvider(candidate.provider)} • {candidate.path}
-                            </option>
-                          {/each}
-                        </select>
-                        <button
-                          type="button"
-                          class="root-route-btn"
-                          onclick={applyConsolidation}
-                          disabled={consolidateApplying || consolidateTargetId.trim() === ''}
-                        >
-                          {consolidateApplying ? 'Consolidating…' : 'Consolidate Here'}
-                        </button>
-                        {#if consolidateMessage}
-                          <span class="roots-info muted">{consolidateMessage}</span>
-                        {/if}
-                      {/if}
-                    </div>
-                  {/if}
-
-                  {#if root.kind === 'backup' && rootsAdvancedOpen}
-                    <label class="root-allowlist">
-                      <span>Allowed volume keys (comma-separated)</span>
-                      <input
-                        type="text"
-                        class="root-input"
-                        value={getAllowlistText(root)}
-                        oninput={(e) => setAllowlistText(index, (e.currentTarget as HTMLInputElement).value)}
-                      />
-                    </label>
-                  {/if}
-
-                  {#if volumeId}
-                    {@const routeRow = volumeRouteRows.find((entry) => entry.index === index)}
-                    {#if routeRow}
-                      <div class="root-volume-route">
-                        <span class="root-volume-label">Open volume</span>
-                        <span class="root-volume-state" class:active={routeRow.routable}>
-                          {routeCardStatus(routeRow)}
-                        </span>
-                        <button
-                          type="button"
-                          class="root-route-btn"
-                          class:active={routeRow.routable}
-                          disabled={routeRow.kind === 'main' && routeRow.routable}
-                          onclick={() => routeRootForCurrentVolume(index)}
-                        >
-                          {routeCardActionLabel(routeRow)}
-                        </button>
-                      </div>
-                    {/if}
-                  {/if}
-
-                  {#if rootsAdvancedOpen}
-                    <div class="root-advanced-grid">
-                      <label>
-                        <span>Root ID</span>
-                        <input
-                          type="text"
-                          class="root-input"
-                          value={root.id}
-                          oninput={(e) => updateRootField(index, 'id', (e.currentTarget as HTMLInputElement).value)}
-                        />
-                      </label>
-                      <label>
-                        <span>Kind</span>
-                        <select
-                          class="root-input"
-                          value={root.kind}
-                          onchange={(e) =>
-                            updateRootKind(index, (e.currentTarget as HTMLSelectElement).value as 'main' | 'backup')}
-                        >
-                          <option value="main">main</option>
-                          <option value="backup">backup</option>
-                        </select>
-                      </label>
-                      <label>
-                        <span>Provider (optional override)</span>
-                        <select
-                          class="root-input"
-                          value={root.provider}
-                          onchange={(e) =>
-                            updateRootField(index, 'provider', (e.currentTarget as HTMLSelectElement).value as RootProvider)}
-                        >
-                          <option value="local">local</option>
-                          <option value="dropbox">dropbox</option>
-                          <option value="mega">mega</option>
-                          <option value="gdrive">gdrive</option>
-                        </select>
-                      </label>
-                    </div>
-                    <p class="roots-info muted">
-                      Provider is auto-detected from path and used mainly for source labeling and watch hints.
-                    </p>
-                  {/if}
-
-                  {#if rootsRuntime && rootsAdvancedOpen}
-                    {@const runtime = rootsRuntime.roots.find((entry) => entry.id === root.id)}
-                    {#if runtime}
-                      <div class="root-runtime">
-                        <span>exists: {runtime.exists ? 'yes' : 'no'}</span>
-                        <span>canWrite: {runtime.canWrite ? 'yes' : 'no'}</span>
-                        <span>
-                          free:
-                          {runtime.availableBytes !== undefined ? formatSize(runtime.availableBytes) : 'n/a'}
-                        </span>
-                        {#if runtime.lastWriteFailure}
-                          <span class="root-runtime-error">
-                            last error: {runtime.lastWriteFailure.code}
-                          </span>
-                        {/if}
-                      </div>
-                    {/if}
-                  {/if}
-                </article>
-              {/each}
-              </div>
-            </section>
-            {#if rootsDraft.length === 0}
-              <p class="roots-info">No roots configured yet. Materialize a suggestion or create a root manually.</p>
-            {/if}
-          {/if}
-        </div>
-      </section>
+    {#if showVolumeStoragePanel}
+      <StoragePanel
+        mode="volume"
+        {volumeId}
+        currentVolumeHint={currentMountedVolumeHint}
+        currentVolumeHintIsFile={currentMountedVolumeUsesFile}
+      />
     {/if}
 
     {#if address.trim() === ''}
@@ -4367,6 +3406,59 @@
     padding: 2rem;
     overflow: visible;
     transition: background-color 0.3s ease;
+    position: relative;
+    display: grid;
+    gap: 1rem;
+    align-content: start;
+  }
+
+  .file-area-top {
+    display: grid;
+    gap: 0.85rem;
+    justify-items: start;
+  }
+
+  .sources-launcher {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+  }
+
+  .sources-launcher-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 11px;
+    border: 1px solid rgba(56, 189, 248, 0.18);
+    background: rgba(9, 18, 33, 0.7);
+    color: rgba(186, 230, 253, 0.82);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+    transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  }
+
+  .sources-launcher-btn:hover {
+    transform: translateY(-1px);
+    border-color: rgba(96, 165, 250, 0.3);
+    background: rgba(12, 24, 43, 0.9);
+    color: rgba(224, 242, 254, 0.96);
+  }
+
+  .sources-launcher-btn.active {
+    border-color: rgba(34, 211, 238, 0.42);
+    background: linear-gradient(180deg, rgba(16, 66, 91, 0.92), rgba(10, 44, 66, 0.94));
+    color: rgba(236, 254, 255, 0.98);
+  }
+
+  .sources-flyout {
+    width: min(880px, 100%);
+  }
+
+  .sources-flyout :global(.storage-panel.global-mode) {
+    width: 100%;
   }
 
   .volume-workspace {
@@ -4428,477 +3520,6 @@
   .volume-transition-subtitle {
     font-size: 0.88rem;
     color: rgba(186, 230, 253, 0.72);
-  }
-
-  .roots-panel {
-    max-width: none;
-    margin: 0 0 1rem;
-    border: 1px solid rgba(56, 189, 248, 0.22);
-    border-radius: 18px;
-    background:
-      radial-gradient(120% 110% at 0% 0%, rgba(34, 211, 238, 0.12), transparent 50%),
-      radial-gradient(100% 120% at 100% 0%, rgba(14, 165, 233, 0.1), transparent 56%),
-      linear-gradient(145deg, rgba(9, 20, 39, 0.96), rgba(8, 18, 35, 0.9));
-    padding: 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.85rem;
-    max-height: none;
-    min-height: 220px;
-  }
-
-  .roots-panel-header {
-    display: flex;
-    justify-content: space-between;
-    gap: 1.1rem;
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-
-  .roots-title-wrap {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    min-width: min(100%, 460px);
-  }
-
-  .roots-title {
-    margin: 0;
-    font-size: 1.1rem;
-    color: rgba(224, 242, 254, 0.98);
-    letter-spacing: 0.01em;
-  }
-
-  .roots-subtitle {
-    margin: 0;
-    color: rgba(191, 219, 254, 0.84);
-    font-size: 0.78rem;
-    max-width: 60ch;
-  }
-
-  .roots-eyebrow {
-    margin: 0;
-    color: rgba(94, 234, 212, 0.82);
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    font-size: 0.68rem;
-  }
-
-  .roots-path {
-    margin: 0.25rem 0 0;
-    font-size: 0.78rem;
-    color: rgba(191, 219, 254, 0.82);
-    max-width: 62ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .roots-actions {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    align-items: center;
-  }
-
-  .roots-action-btn {
-    border: 1px solid rgba(56, 189, 248, 0.22);
-    border-radius: 12px;
-    background: rgba(12, 24, 43, 0.82);
-    color: #dbeafe;
-    min-height: 34px;
-    padding: 0 0.82rem;
-    font-size: 0.76rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    cursor: pointer;
-    transition: all 0.18s ease;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.45rem;
-  }
-
-  .roots-action-btn:hover:not(:disabled) {
-    border-color: rgba(96, 165, 250, 0.34);
-    background: rgba(16, 32, 56, 0.96);
-  }
-
-  .roots-action-btn.primary {
-    border-color: rgba(34, 211, 238, 0.48);
-    color: #ecfeff;
-    background: linear-gradient(180deg, rgba(16, 66, 91, 0.96), rgba(10, 44, 66, 0.96));
-    box-shadow: 0 10px 24px rgba(6, 182, 212, 0.16);
-  }
-
-  .roots-action-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .roots-error,
-  .roots-success,
-  .roots-info {
-    margin: 0;
-    font-size: 0.8rem;
-  }
-
-  .roots-error {
-    color: #fecaca;
-  }
-
-  .roots-success {
-    color: #bbf7d0;
-  }
-
-  .roots-info {
-    color: rgba(191, 219, 254, 0.85);
-  }
-
-  .roots-info.muted {
-    color: rgba(148, 163, 184, 0.88);
-    font-size: 0.74rem;
-  }
-
-  .roots-scroll {
-    overflow: visible;
-    min-height: auto;
-    scrollbar-width: none;
-    padding-right: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.8rem;
-  }
-
-  .roots-scroll::-webkit-scrollbar {
-    display: none;
-  }
-
-  .roots-section-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-  }
-
-  .roots-section-title {
-    margin: 0;
-    color: rgba(224, 242, 254, 0.95);
-    font-size: 0.92rem;
-    font-weight: 700;
-    letter-spacing: 0.01em;
-  }
-
-  .roots-section-caption {
-    margin: 0;
-    color: rgba(148, 163, 184, 0.85);
-    font-size: 0.74rem;
-  }
-
-  .roots-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.72rem;
-  }
-
-  .source-discovery {
-    margin-bottom: 0.2rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-  }
-
-  .roots-active {
-    display: flex;
-    flex-direction: column;
-    gap: 0.62rem;
-  }
-
-  .root-card {
-    border: 1px solid rgba(148, 163, 184, 0.26);
-    border-radius: 14px;
-    padding: 0.72rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.58rem;
-    background: linear-gradient(145deg, rgba(15, 23, 42, 0.48), rgba(30, 41, 59, 0.34));
-  }
-
-  .root-card-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.55rem;
-    flex-wrap: wrap;
-  }
-
-  .root-pill-row {
-    display: flex;
-    align-items: center;
-    gap: 0.38rem;
-    flex-wrap: wrap;
-  }
-
-  .root-provider-pill,
-  .root-kind-pill,
-  .root-id-pill {
-    border-radius: 999px;
-    padding: 0.12rem 0.46rem;
-    font-size: 0.66rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .root-provider-pill {
-    background: rgba(8, 145, 178, 0.22);
-    border: 1px solid rgba(103, 232, 249, 0.45);
-    color: rgba(125, 211, 252, 0.96);
-  }
-
-  .root-kind-pill {
-    background: rgba(51, 65, 85, 0.4);
-    border: 1px solid rgba(148, 163, 184, 0.42);
-    color: rgba(226, 232, 240, 0.88);
-  }
-
-  .root-id-pill {
-    background: rgba(17, 24, 39, 0.5);
-    border: 1px solid rgba(71, 85, 105, 0.45);
-    color: rgba(148, 163, 184, 0.92);
-    text-transform: none;
-    letter-spacing: 0.01em;
-    font-family: 'Monaco', 'Menlo', monospace;
-  }
-
-  .root-card-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.42rem;
-    flex-wrap: wrap;
-  }
-
-  .root-active-pill {
-    border-radius: 999px;
-    border: 1px solid rgba(16, 185, 129, 0.5);
-    background: rgba(6, 78, 59, 0.3);
-    color: #bbf7d0;
-    padding: 0.18rem 0.5rem;
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-weight: 700;
-  }
-
-  .root-active-pill.inactive {
-    border-color: rgba(248, 113, 113, 0.45);
-    background: rgba(127, 29, 29, 0.22);
-    color: #fecaca;
-  }
-
-  .root-row {
-    display: flex;
-    align-items: flex-end;
-    gap: 0.55rem;
-    flex-wrap: wrap;
-  }
-
-  .root-row label,
-  .root-advanced-grid label,
-  .root-field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    min-width: 120px;
-    color: rgba(191, 219, 254, 0.85);
-    font-size: 0.72rem;
-  }
-
-  .root-field {
-    flex: 1;
-    min-width: 240px;
-  }
-
-  .root-input {
-    border: 1px solid rgba(125, 211, 252, 0.34);
-    border-radius: 10px;
-    background: rgba(15, 23, 42, 0.55);
-    color: #e2e8f0;
-    padding: 0.46rem 0.6rem;
-    font-size: 0.8rem;
-    min-width: 0;
-  }
-
-  .root-input:focus {
-    outline: none;
-    border-color: rgba(94, 234, 212, 0.62);
-    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.12);
-  }
-
-  .root-path-input {
-    width: 100%;
-  }
-
-  .root-check {
-    flex-direction: row;
-    align-items: center;
-    min-width: 0;
-    gap: 0.35rem;
-    font-size: 0.73rem;
-    color: rgba(191, 219, 254, 0.86);
-    border: 1px solid rgba(71, 85, 105, 0.42);
-    border-radius: 999px;
-    padding: 0.2rem 0.5rem;
-    background: rgba(15, 23, 42, 0.4);
-  }
-
-  .root-remove {
-    border: 1px solid rgba(248, 113, 113, 0.55);
-    background: rgba(127, 29, 29, 0.32);
-    color: #fecaca;
-    border-radius: 10px;
-    padding: 0.5rem 0.66rem;
-    cursor: pointer;
-    font-size: 0.72rem;
-    font-weight: 700;
-  }
-
-  .root-remove:hover {
-    background: rgba(185, 28, 28, 0.3);
-  }
-
-  .root-remove:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .root-open {
-    border: 1px solid rgba(125, 211, 252, 0.4);
-    background: rgba(15, 23, 42, 0.5);
-    color: rgba(191, 219, 254, 0.95);
-    border-radius: 10px;
-    padding: 0.5rem 0.66rem;
-    cursor: pointer;
-    font-size: 0.72rem;
-    font-weight: 700;
-  }
-
-  .root-open:hover:not(:disabled) {
-    border-color: rgba(94, 234, 212, 0.58);
-    background: rgba(17, 94, 89, 0.28);
-  }
-
-  .root-consolidate {
-    border: 1px solid rgba(125, 211, 252, 0.4);
-    background: rgba(15, 23, 42, 0.52);
-    color: rgba(191, 219, 254, 0.95);
-    border-radius: 10px;
-    padding: 0.5rem 0.66rem;
-    cursor: pointer;
-    font-size: 0.72rem;
-    font-weight: 700;
-  }
-
-  .root-consolidate:hover:not(:disabled) {
-    border-color: rgba(94, 234, 212, 0.58);
-    background: rgba(17, 94, 89, 0.3);
-  }
-
-  .root-consolidate:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .root-consolidation-row {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    flex-wrap: wrap;
-    border: 1px solid rgba(125, 211, 252, 0.2);
-    border-radius: 8px;
-    background: rgba(15, 23, 42, 0.4);
-    padding: 0.45rem 0.5rem;
-  }
-
-  .root-consolidation-select {
-    flex: 1;
-    min-width: 260px;
-  }
-
-  .root-allowlist {
-    min-width: 220px;
-  }
-
-  .root-advanced-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 0.45rem;
-  }
-
-  .root-advanced-grid label {
-    min-width: 0;
-  }
-
-  .root-volume-route {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    flex-wrap: wrap;
-    border: 1px solid rgba(125, 211, 252, 0.24);
-    border-radius: 8px;
-    padding: 0.4rem 0.5rem;
-    background: rgba(15, 23, 42, 0.42);
-  }
-
-  .root-volume-label {
-    font-size: 0.72rem;
-    color: rgba(191, 219, 254, 0.92);
-    font-weight: 600;
-  }
-
-  .root-volume-state {
-    font-size: 0.72rem;
-    color: rgba(191, 219, 254, 0.86);
-  }
-
-  .root-volume-state.active {
-    color: #86efac;
-  }
-
-  .root-route-btn {
-    margin-left: auto;
-    border: 1px solid rgba(125, 211, 252, 0.35);
-    border-radius: 999px;
-    background: rgba(15, 23, 42, 0.6);
-    color: #dbeafe;
-    font-size: 0.72rem;
-    padding: 0.34rem 0.64rem;
-    cursor: pointer;
-  }
-
-  .root-route-btn.active {
-    border-color: rgba(16, 185, 129, 0.55);
-    color: #bbf7d0;
-  }
-
-  .root-route-btn:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-
-  .root-runtime {
-    display: flex;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-    font-size: 0.7rem;
-    color: rgba(191, 219, 254, 0.82);
-    border-top: 1px solid rgba(71, 85, 105, 0.36);
-    padding-top: 0.45rem;
-  }
-
-  .root-runtime-error {
-    color: #fda4af;
   }
 
   .time-machine {

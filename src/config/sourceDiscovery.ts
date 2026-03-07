@@ -1,7 +1,7 @@
 import { promises as fs, type Dirent } from 'fs';
 import os from 'os';
 import path from 'path';
-import type { RootConfigEntry, RootProvider } from './roots.js';
+import type { RootProvider, SourceConfigEntry } from './roots.js';
 
 export interface DiscoveredNearbytesSource {
   readonly provider: RootProvider;
@@ -113,24 +113,24 @@ export async function discoverNearbytesSources(options?: {
  * Ensures `.nearbytes` marker files exist for all configured roots.
  * Best-effort: returns per-root status and never throws.
  */
-export async function ensureNearbytesMarkers(roots: readonly RootConfigEntry[]): Promise<MarkerEnsureResult[]> {
+export async function ensureNearbytesMarkers(sources: readonly SourceConfigEntry[]): Promise<MarkerEnsureResult[]> {
   const results: MarkerEnsureResult[] = [];
 
-  for (const root of roots) {
-    const markerFile = path.join(root.path, NEARBYTES_MARKER_FILE);
+  for (const source of sources) {
+    const markerFile = path.join(source.path, NEARBYTES_MARKER_FILE);
     try {
-      const created = await ensureNearbytesMarker(root.path);
+      const created = await ensureNearbytesMarker(source.path);
       results.push({
-        rootId: root.id,
-        path: root.path,
+        rootId: source.id,
+        path: source.path,
         markerFile,
         created,
         ok: true,
       });
     } catch (error) {
       results.push({
-        rootId: root.id,
-        path: root.path,
+        rootId: source.id,
+        path: source.path,
         markerFile,
         created: false,
         ok: false,

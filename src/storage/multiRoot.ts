@@ -1,12 +1,19 @@
 import { promises as fs, constants as fsConstants } from 'fs';
 import { dirname, join, relative } from 'path';
-import { rootAcceptsChannel, type RootConfigEntry, type RootsConfig } from '../config/roots.js';
+import {
+  isDurableDestination,
+  resolveVolumeDestinations,
+  type RootsConfig,
+  type SourceConfigEntry,
+  type VolumeDestinationConfig,
+} from '../config/roots.js';
 import { ensureNearbytesMarker } from '../config/sourceDiscovery.js';
 import { StorageError } from '../types/errors.js';
 import type { StorageBackend } from '../types/storage.js';
 import { FilesystemStorageBackend } from './filesystem.js';
 
 const CHANNEL_PATH_REGEX = /^channels\/([a-f0-9]{64,200})(?:\/|$)/i;
+const BLOCK_PATH_REGEX = /^blocks\/([a-f0-9]{64})(?:\.bin)?$/i;
 const RESOURCE_EXHAUSTED_CODES = new Set(['ENOSPC', 'EDQUOT']);
 const UNAVAILABLE_CODES = new Set(['EACCES', 'EPERM', 'EROFS', 'ENOTDIR', 'EIO']);
 
@@ -22,10 +29,13 @@ export interface RootWriteFailure {
 
 export interface RootRuntimeStatus {
   readonly id: string;
-  readonly kind: RootConfigEntry['kind'];
+  readonly kind: 'source';
   readonly path: string;
   readonly enabled: boolean;
   readonly writable: boolean;
+  readonly provider: SourceConfigEntry['provider'];
+  readonly reservePercent: number;
+  readonly opportunisticPolicy: SourceConfigEntry['opportunisticPolicy'];
   readonly exists: boolean;
   readonly isDirectory: boolean;
   readonly canWrite: boolean;
@@ -34,14 +44,14 @@ export interface RootRuntimeStatus {
 }
 
 export interface MultiRootRuntimeSnapshot {
-  readonly roots: RootRuntimeStatus[];
+  readonly sources: RootRuntimeStatus[];
   readonly writeFailures: RootWriteFailure[];
 }
 
 export interface RootConsolidationSource {
   readonly id: string;
-  readonly kind: RootConfigEntry['kind'];
-  readonly provider: RootConfigEntry['provider'];
+  readonly kind: 'source';
+  readonly provider: SourceConfigEntry['provider'];
   readonly path: string;
   readonly fileCount: number;
   readonly totalBytes: number;
@@ -49,8 +59,8 @@ export interface RootConsolidationSource {
 
 export interface RootConsolidationCandidate {
   readonly id: string;
-  readonly kind: RootConfigEntry['kind'];
-  readonly provider: RootConfigEntry['provider'];
+  readonly kind: 'source';
+  readonly provider: SourceConfigEntry['provider'];
   readonly path: string;
   readonly sameDevice: boolean;
   readonly filesToTransfer: number;
@@ -80,8 +90,13 @@ export interface RootConsolidationResult {
 }
 
 interface RootState {
-  readonly config: RootConfigEntry;
+  readonly config: SourceConfigEntry;
   readonly backend: FilesystemStorageBackend;
+}
+
+interface VolumeDestinationTarget {
+  readonly state: RootState;
+  readonly policy: VolumeDestinationConfig;
 }
 
 /**
@@ -115,11 +130,17 @@ export class MultiRootStorageBackend implements StorageBackend {
     }
   }
 
+  async reconcileConfiguredVolumes(): Promise<void> {
+    for (const volume of this.config.volumes) {
+      await this.reconcileVolumeBlocks(volume.volumeId);
+    }
+  }
+
   async getRuntimeSnapshot(): Promise<MultiRootRuntimeSnapshot> {
     const statuses = await Promise.all(this.rootStates.map((state) => this.getRootRuntimeStatus(state)));
     const writeFailures = Array.from(this.lastWriteFailures.values()).sort((left, right) => right.at - left.at);
     return {
-      roots: statuses,
+      sources: statuses,
       writeFailures,
     };
   }
@@ -133,7 +154,7 @@ export class MultiRootStorageBackend implements StorageBackend {
     const sourceFiles = await listRootFiles(source.config.path);
     const sourceSummary: RootConsolidationSource = {
       id: source.config.id,
-      kind: source.config.kind,
+      kind: 'source',
       provider: source.config.provider,
       path: source.config.path,
       fileCount: sourceFiles.length,
@@ -149,7 +170,7 @@ export class MultiRootStorageBackend implements StorageBackend {
           if (!compatibility.ok) {
             return {
               id: target.config.id,
-              kind: target.config.kind,
+              kind: 'source',
               provider: target.config.provider,
               path: target.config.path,
               sameDevice: false,
@@ -165,7 +186,7 @@ export class MultiRootStorageBackend implements StorageBackend {
           if (!targetStats || !targetStats.isDirectory()) {
             return {
               id: target.config.id,
-              kind: target.config.kind,
+              kind: 'source',
               provider: target.config.provider,
               path: target.config.path,
               sameDevice: false,
@@ -180,7 +201,7 @@ export class MultiRootStorageBackend implements StorageBackend {
           if (!target.config.writable || !target.config.enabled) {
             return {
               id: target.config.id,
-              kind: target.config.kind,
+              kind: 'source',
               provider: target.config.provider,
               path: target.config.path,
               sameDevice: sourceStats?.dev === targetStats.dev,
@@ -200,7 +221,7 @@ export class MultiRootStorageBackend implements StorageBackend {
 
           return {
             id: target.config.id,
-            kind: target.config.kind,
+            kind: 'source',
             provider: target.config.provider,
             path: target.config.path,
             sameDevice,
@@ -266,7 +287,12 @@ export class MultiRootStorageBackend implements StorageBackend {
 
     const nextConfig: RootsConfig = {
       version: this.config.version,
-      roots: this.config.roots.filter((root) => root.id !== source.config.id),
+      sources: this.config.sources.filter((entry) => entry.id !== source.config.id),
+      defaultVolume: this.config.defaultVolume,
+      volumes: this.config.volumes.map((volume) => ({
+        volumeId: volume.volumeId,
+        destinations: volume.destinations.filter((destination) => destination.sourceId !== source.config.id),
+      })),
     };
 
     this.updateRootsConfig(nextConfig);
@@ -335,7 +361,7 @@ export class MultiRootStorageBackend implements StorageBackend {
       return;
     }
 
-    await this.writeToMainRoots(relativePath, data);
+    await this.writeToAllWritableSources(relativePath, data);
   }
 
   async readFile(relativePath: string): Promise<Uint8Array> {
@@ -349,17 +375,17 @@ export class MultiRootStorageBackend implements StorageBackend {
   async createDirectory(relativePath: string): Promise<void> {
     const parsedChannel = this.parseChannelKeyFromPath(relativePath);
     if (parsedChannel) {
-      const targets = this.getWritableChannelTargets(parsedChannel);
-      if (targets.main.length === 0) {
-        throw new StorageError(`No writable main roots configured for channel ${parsedChannel}`);
+      const targets = this.getWritableVolumeDestinationTargets(parsedChannel, { requireBlocks: false });
+      if (targets.length === 0) {
+        throw new StorageError(`No writable destinations configured for volume ${parsedChannel}`);
       }
-      await this.createDirectoryInTargets(relativePath, [...targets.main, ...targets.backup]);
+      await this.createDirectoryInTargets(relativePath, targets.map((target) => target.state));
       return;
     }
 
     const writable = this.getWritableEnabledRootStates();
     if (writable.length === 0) {
-      throw new StorageError('No writable roots configured');
+      throw new StorageError('No writable sources configured');
     }
     await this.createDirectoryInTargets(relativePath, writable);
   }
@@ -434,38 +460,56 @@ export class MultiRootStorageBackend implements StorageBackend {
   }
 
   private async writeToChannelTargets(relativePath: string, data: Uint8Array, channelKeyHex: string): Promise<void> {
-    const targets = this.getWritableChannelTargets(channelKeyHex);
-    if (targets.main.length === 0) {
-      throw new StorageError(`No writable main roots configured for channel ${channelKeyHex}`);
+    const isBlockWrite = BLOCK_PATH_REGEX.test(normalizeRelativePath(relativePath));
+    const targets = this.getWritableVolumeDestinationTargets(channelKeyHex, {
+      requireBlocks: isBlockWrite,
+    });
+    if (targets.length === 0) {
+      throw new StorageError(
+        `No writable ${isBlockWrite ? 'block' : 'event'} destinations configured for volume ${channelKeyHex}`
+      );
     }
 
-    const mainSuccessCount = await this.writeToRoots(targets.main, relativePath, data, channelKeyHex);
-    await this.writeToRoots(targets.backup, relativePath, data, channelKeyHex);
+    const successCount = await this.writeToDestinations(targets, relativePath, data, channelKeyHex);
+    const durableTargets = targets.filter((target) =>
+      isBlockWrite ? isDurableDestination(target.policy) : target.policy.enabled && target.policy.storeEvents
+    );
+    const durableSuccessCount = durableTargets.filter(
+      (target) => !this.lastWriteFailures.has(target.state.config.id)
+    ).length;
 
-    if (mainSuccessCount === 0) {
-      const latestMainFailure = targets.main
-        .map((state) => this.lastWriteFailures.get(state.config.id))
+    if (durableTargets.length > 0 && durableSuccessCount === 0) {
+      const latestFailure = durableTargets
+        .map((target) => this.lastWriteFailures.get(target.state.config.id))
         .find((failure): failure is RootWriteFailure => failure !== undefined);
-
       throw new StorageError(
-        `Failed to write ${relativePath} to any main root${latestMainFailure ? `: ${latestMainFailure.message}` : ''}`
+        `Failed to write ${relativePath} to any durable destination${latestFailure ? `: ${latestFailure.message}` : ''}`
+      );
+    }
+
+    if (successCount === 0) {
+      const latestFailure = targets
+        .map((target) => this.lastWriteFailures.get(target.state.config.id))
+        .find((failure): failure is RootWriteFailure => failure !== undefined);
+      throw new StorageError(
+        `Failed to write ${relativePath} to any destination${latestFailure ? `: ${latestFailure.message}` : ''}`
       );
     }
   }
 
-  private async writeToMainRoots(relativePath: string, data: Uint8Array): Promise<void> {
-    const mainTargets = this.getWritableEnabledRootStates().filter((state) => state.config.kind === 'main');
-    if (mainTargets.length === 0) {
-      throw new StorageError('No writable main roots configured');
+  private async writeToAllWritableSources(relativePath: string, data: Uint8Array): Promise<void> {
+    const writableSources = this.getWritableEnabledRootStates();
+    if (writableSources.length === 0) {
+      throw new StorageError('No writable sources configured');
     }
 
-    const successCount = await this.writeToRoots(mainTargets, relativePath, data);
+    const successCount = await this.writeToRoots(writableSources, relativePath, data);
     if (successCount === 0) {
-      const latestFailure = mainTargets
+      const latestFailure = writableSources
         .map((state) => this.lastWriteFailures.get(state.config.id))
         .find((failure): failure is RootWriteFailure => failure !== undefined);
       throw new StorageError(
-        `Failed to write ${relativePath} to any main root${latestFailure ? `: ${latestFailure.message}` : ''}`
+        `Failed to write ${relativePath} to any source${latestFailure ? `: ${latestFailure.message}` : ''}`
       );
     }
   }
@@ -495,23 +539,41 @@ export class MultiRootStorageBackend implements StorageBackend {
     return successCount;
   }
 
-  private getWritableChannelTargets(channelKeyHex: string): { main: RootState[]; backup: RootState[] } {
-    const writableEligible = this.rootStates.filter(
-      (state) => state.config.enabled && state.config.writable && rootAcceptsChannel(state.config, channelKeyHex)
+  private async writeToDestinations(
+    targets: VolumeDestinationTarget[],
+    relativePath: string,
+    data: Uint8Array,
+    channelKeyHex: string
+  ): Promise<number> {
+    let successCount = 0;
+
+    await Promise.all(
+      targets.map(async (target) => {
+        try {
+          await this.prepareDestinationWrite(target, data.byteLength, channelKeyHex);
+          await ensureNearbytesMarker(target.state.config.path);
+          await target.state.backend.writeFile(relativePath, data);
+          this.lastWriteFailures.delete(target.state.config.id);
+          successCount += 1;
+        } catch (error) {
+          const failure = this.toWriteFailure(target.state.config.id, relativePath, error, channelKeyHex);
+          this.lastWriteFailures.set(target.state.config.id, failure);
+        }
+      })
     );
 
-    return {
-      main: writableEligible.filter((state) => state.config.kind === 'main'),
-      backup: writableEligible.filter((state) => state.config.kind === 'backup'),
-    };
+    return successCount;
   }
 
   private prioritizeRootsForChannel(channelKeyHex: string): RootState[] {
     const prioritized: RootState[] = [];
     const fallback: RootState[] = [];
+    const prioritizedSourceIds = new Set(
+      this.getVolumeDestinationTargets(channelKeyHex, { requireBlocks: false }).map((target) => target.state.config.id)
+    );
 
     for (const state of this.getEnabledRootStates()) {
-      if (rootAcceptsChannel(state.config, channelKeyHex)) {
+      if (prioritizedSourceIds.has(state.config.id)) {
         prioritized.push(state);
       } else {
         fallback.push(state);
@@ -529,48 +591,262 @@ export class MultiRootStorageBackend implements StorageBackend {
     return this.rootStates.filter((state) => state.config.enabled && state.config.writable);
   }
 
+  private getVolumeDestinationTargets(
+    channelKeyHex: string,
+    options: { requireBlocks: boolean }
+  ): VolumeDestinationTarget[] {
+    const destinations = resolveVolumeDestinations(this.config, channelKeyHex);
+    const targets: VolumeDestinationTarget[] = [];
+    for (const destination of destinations) {
+      const state = this.getRootStateById(destination.sourceId);
+      if (!state) {
+        continue;
+      }
+      if (!state.config.enabled || !state.config.writable || !destination.enabled) {
+        continue;
+      }
+      if (!destination.storeEvents) {
+        continue;
+      }
+      if (options.requireBlocks && (!destination.storeBlocks || !destination.copySourceBlocks)) {
+        continue;
+      }
+      targets.push({ state, policy: destination });
+    }
+    return targets;
+  }
+
+  private getWritableVolumeDestinationTargets(
+    channelKeyHex: string,
+    options: { requireBlocks: boolean }
+  ): VolumeDestinationTarget[] {
+    return this.getVolumeDestinationTargets(channelKeyHex, options);
+  }
+
+  private async prepareDestinationWrite(
+    target: VolumeDestinationTarget,
+    bytesToWrite: number,
+    channelKeyHex: string
+  ): Promise<void> {
+    const availableBytes = await getAvailableBytes(target.state.config.path);
+    const totalBytes = await getTotalBytes(target.state.config.path);
+    if (availableBytes === undefined || totalBytes === undefined) {
+      return;
+    }
+
+    const reservePercent = Math.max(target.state.config.reservePercent, target.policy.reservePercent);
+    const reservedBytes = Math.floor((totalBytes * reservePercent) / 100);
+    if (availableBytes - bytesToWrite >= reservedBytes) {
+      return;
+    }
+
+    if (target.policy.fullPolicy === 'drop-older-blocks') {
+      await this.pruneSourceBlocks(target.state.config.id, reservedBytes + bytesToWrite, channelKeyHex);
+      const nextAvailableBytes = await getAvailableBytes(target.state.config.path);
+      if (nextAvailableBytes !== undefined && nextAvailableBytes - bytesToWrite >= reservedBytes) {
+        return;
+      }
+    }
+
+    throw new StorageError(
+      `Destination ${target.state.config.id} does not have enough free space for volume ${channelKeyHex}`
+    );
+  }
+
+  private async reconcileVolumeBlocks(volumeId: string): Promise<void> {
+    const referencedHashes = await this.collectReferencedBlockHashes(volumeId);
+    if (referencedHashes.size === 0) {
+      return;
+    }
+
+    const blockTargets = this.getWritableVolumeDestinationTargets(volumeId, { requireBlocks: true });
+    for (const target of blockTargets) {
+      for (const hash of referencedHashes) {
+        const relativePath = `blocks/${hash}.bin`;
+        try {
+          if (await target.state.backend.exists(relativePath)) {
+            continue;
+          }
+        } catch {
+          // Continue into read/write path and let it record a concrete failure if needed.
+        }
+
+        let data: Uint8Array;
+        try {
+          data = await this.readFileFromRoots(relativePath, this.prioritizeRootsForChannel(volumeId));
+        } catch {
+          continue;
+        }
+
+        try {
+          await this.prepareDestinationWrite(target, data.byteLength, volumeId);
+          await target.state.backend.writeFile(relativePath, data);
+          this.lastWriteFailures.delete(target.state.config.id);
+        } catch (error) {
+          this.lastWriteFailures.set(
+            target.state.config.id,
+            this.toWriteFailure(target.state.config.id, relativePath, error, volumeId)
+          );
+          break;
+        }
+      }
+    }
+  }
+
+  private async pruneSourceBlocks(
+    sourceId: string,
+    requiredFreeBytes: number,
+    currentVolumeId?: string
+  ): Promise<void> {
+    const state = this.getRootStateById(sourceId);
+    if (!state) {
+      return;
+    }
+
+    const durableBlocks = await this.collectProtectedBlockHashes(sourceId, 'durable', currentVolumeId);
+    const replicaBlocks = await this.collectProtectedBlockHashes(sourceId, 'replica', currentVolumeId);
+    const blocksDir = join(state.config.path, 'blocks');
+    const entries = await safeReadDirEntries(blocksDir);
+    const candidates: Array<{ path: string; hash: string; mtimeMs: number; priority: number }> = [];
+
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.bin')) {
+        continue;
+      }
+      const hash = entry.name.slice(0, -4).toLowerCase();
+      if (!/^[a-f0-9]{64}$/i.test(hash) || durableBlocks.has(hash)) {
+        continue;
+      }
+
+      const absolutePath = join(blocksDir, entry.name);
+      const stats = await safeStat(absolutePath);
+      if (!stats) {
+        continue;
+      }
+      candidates.push({
+        path: absolutePath,
+        hash,
+        mtimeMs: Number(stats.mtimeMs),
+        priority: replicaBlocks.has(hash) ? 1 : 0,
+      });
+    }
+
+    candidates.sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+      return left.mtimeMs - right.mtimeMs;
+    });
+
+    for (const candidate of candidates) {
+      const available = await getAvailableBytes(state.config.path);
+      if (available !== undefined && available >= requiredFreeBytes) {
+        return;
+      }
+      await safeUnlink(candidate.path);
+    }
+  }
+
+  private async collectProtectedBlockHashes(
+    sourceId: string,
+    mode: 'durable' | 'replica',
+    currentVolumeId?: string
+  ): Promise<Set<string>> {
+    const hashes = new Set<string>();
+    const volumeIds = await this.listTrackedVolumeIds();
+    if (currentVolumeId) {
+      volumeIds.add(currentVolumeId.toLowerCase());
+    }
+
+    for (const volumeId of volumeIds) {
+      const destinations = resolveVolumeDestinations(this.config, volumeId).filter(
+        (destination) =>
+          destination.sourceId === sourceId &&
+          destination.enabled &&
+          destination.storeEvents &&
+          destination.storeBlocks
+      );
+      if (destinations.length === 0) {
+        continue;
+      }
+      const isDurable = destinations.some((destination) => isDurableDestination(destination));
+      if ((mode === 'durable') !== isDurable) {
+        continue;
+      }
+      const referenced = await this.collectReferencedBlockHashes(volumeId);
+      for (const hash of referenced) {
+        hashes.add(hash);
+      }
+    }
+
+    return hashes;
+  }
+
+  private async listTrackedVolumeIds(): Promise<Set<string>> {
+    const volumeIds = new Set<string>(this.config.volumes.map((volume) => volume.volumeId));
+    for (const state of this.getEnabledRootStates()) {
+      const channelsDir = join(state.config.path, 'channels');
+      const entries = await safeReadDirEntries(channelsDir);
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        const volumeId = entry.name.trim().toLowerCase();
+        if (/^[a-f0-9]{64,200}$/i.test(volumeId)) {
+          volumeIds.add(volumeId);
+        }
+      }
+    }
+    return volumeIds;
+  }
+
+  private async collectReferencedBlockHashes(volumeId: string): Promise<Set<string>> {
+    const hashes = new Set<string>();
+    const directory = `channels/${volumeId}`;
+    const eventFiles = await this.listFilesAcrossRoots(directory);
+
+    for (const eventFile of eventFiles) {
+      if (!eventFile.endsWith('.bin')) {
+        continue;
+      }
+      const relativePath = `${directory}/${eventFile}`;
+      let bytes: Uint8Array;
+      try {
+        bytes = await this.readFileFromRoots(relativePath, this.prioritizeRootsForChannel(volumeId));
+      } catch {
+        continue;
+      }
+
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(bytes)) as {
+          payload?: { type?: string; hash?: string };
+        };
+        const hash = parsed.payload?.hash?.trim().toLowerCase();
+        if (parsed.payload?.type === 'CREATE_FILE' && hash && /^[a-f0-9]{64}$/i.test(hash)) {
+          hashes.add(hash);
+        }
+      } catch {
+        // Ignore unreadable event payloads at the meta layer.
+      }
+    }
+
+    return hashes;
+  }
+
   private getRootStateById(rootId: string): RootState | undefined {
     return this.rootStates.find((state) => state.config.id === rootId);
   }
 
   private getConsolidationCompatibility(
-    source: RootConfigEntry,
-    target: RootConfigEntry
+    source: SourceConfigEntry,
+    target: SourceConfigEntry
   ): { ok: true } | { ok: false; reason: string } {
-    if (source.kind === 'main' || target.kind === 'main') {
-      if (source.kind === 'main' && target.kind === 'main') {
-        return { ok: true };
-      }
+    if (!source.enabled || !target.enabled) {
       return {
         ok: false,
-        reason: 'Main roots can only consolidate into another main root',
+        reason: 'Both sources must be enabled',
       };
     }
-
-    if (source.strategy.name !== 'allowlist' || target.strategy.name !== 'allowlist') {
-      return {
-        ok: false,
-        reason: 'Backup roots require allowlist strategies to consolidate',
-      };
-    }
-
-    const sourceKeys = normalizeKeySet(source.strategy.channelKeys);
-    const targetKeys = normalizeKeySet(target.strategy.channelKeys);
-    if (sourceKeys.length !== targetKeys.length) {
-      return {
-        ok: false,
-        reason: 'Backup roots must have the same allowed volume keys',
-      };
-    }
-    for (let index = 0; index < sourceKeys.length; index += 1) {
-      if (sourceKeys[index] !== targetKeys[index]) {
-        return {
-          ok: false,
-          reason: 'Backup roots must have the same allowed volume keys',
-        };
-      }
-    }
-
     return { ok: true };
   }
 
@@ -644,10 +920,13 @@ export class MultiRootStorageBackend implements StorageBackend {
 
     return {
       id: state.config.id,
-      kind: state.config.kind,
+      kind: 'source',
       path: state.config.path,
+      provider: state.config.provider,
       enabled: state.config.enabled,
       writable: state.config.writable,
+      reservePercent: state.config.reservePercent,
+      opportunisticPolicy: state.config.opportunisticPolicy,
       exists,
       isDirectory,
       canWrite,
@@ -657,9 +936,9 @@ export class MultiRootStorageBackend implements StorageBackend {
   }
 
   private buildRootStates(config: RootsConfig): RootState[] {
-    return config.roots.map((root) => ({
-      config: root,
-      backend: new FilesystemStorageBackend(root.path),
+    return config.sources.map((source) => ({
+      config: source,
+      backend: new FilesystemStorageBackend(source.path),
     }));
   }
 }
@@ -859,12 +1138,6 @@ async function removeEmptyDirectories(rootPath: string): Promise<void> {
   }
 }
 
-function normalizeKeySet(values: readonly string[]): string[] {
-  return Array.from(new Set(values.map((value) => value.trim().toLowerCase())))
-    .filter((value) => value.length > 0)
-    .sort((left, right) => left.localeCompare(right));
-}
-
 export function isMultiRootStorageBackend(storage: StorageBackend): storage is MultiRootStorageBackend {
   return storage instanceof MultiRootStorageBackend;
 }
@@ -958,6 +1231,27 @@ async function getAvailableBytes(path: string): Promise<number | undefined> {
     return free;
   } catch {
     return undefined;
+  }
+}
+
+async function getTotalBytes(path: string): Promise<number | undefined> {
+  try {
+    const stats = await fs.statfs(path);
+    const total = Number(stats.blocks) * Number(stats.bsize);
+    if (!Number.isFinite(total) || total < 0) {
+      return undefined;
+    }
+    return total;
+  } catch {
+    return undefined;
+  }
+}
+
+async function safeReadDirEntries(pathValue: string): Promise<import('fs').Dirent[]> {
+  try {
+    return await fs.readdir(pathValue, { withFileTypes: true });
+  } catch {
+    return [];
   }
 }
 

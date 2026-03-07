@@ -66,22 +66,26 @@ export async function startApiRuntime(options: ApiRuntimeOptions = {}): Promise<
     logger.log(`Created default roots config at: ${loaded.configPath}`);
   }
 
-  const markerResults = await ensureNearbytesMarkers(loaded.config.roots);
+  const markerResults = await ensureNearbytesMarkers(loaded.config.sources);
   const markerFailures = markerResults.filter((entry) => !entry.ok);
   if (markerFailures.length > 0) {
     for (const failure of markerFailures) {
       logger.warn(
-        `Warning: failed to ensure .nearbytes marker for root ${failure.rootId} (${failure.path}): ${failure.error}`
+        `Warning: failed to ensure .nearbytes marker for source ${failure.rootId} (${failure.path}): ${failure.error}`
       );
     }
   }
 
   const storage = new MultiRootStorageBackend(loaded.config);
   const fileService = createFileService({ crypto, storage });
-  const primaryMainRoot = loaded.config.roots.find((root) => root.kind === 'main')?.path ?? defaultStorageDir;
+  const primaryMainRoot =
+    loaded.config.defaultVolume.destinations
+      .map((destination) => loaded.config.sources.find((source) => source.id === destination.sourceId))
+      .find((source) => source?.enabled)?.path ?? defaultStorageDir;
 
   await storage.createDirectory('channels');
   await storage.createDirectory('blocks');
+  await storage.reconcileConfiguredVolumes();
 
   const app = createApp({
     fileService,

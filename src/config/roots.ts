@@ -3,60 +3,109 @@ import os from 'os';
 import path from 'path';
 import { z } from 'zod';
 
-export type RootKind = 'main' | 'backup';
 export type RootProvider = 'local' | 'dropbox' | 'mega' | 'gdrive';
+export type StorageFullPolicy = 'block-writes' | 'drop-older-blocks';
 
-export interface AllKeysStrategy {
-  readonly name: 'all-keys';
-}
-
-export interface AllowlistStrategy {
-  readonly name: 'allowlist';
-  readonly channelKeys: string[];
-}
-
-export type RootStrategy = AllKeysStrategy | AllowlistStrategy;
-
-export interface RootConfigEntry {
+export interface SourceConfigEntry {
   readonly id: string;
-  readonly kind: RootKind;
   readonly provider: RootProvider;
   readonly path: string;
   readonly enabled: boolean;
   readonly writable: boolean;
-  readonly strategy: RootStrategy;
+  readonly reservePercent: number;
+  readonly opportunisticPolicy: StorageFullPolicy;
+}
+
+export interface VolumeDestinationConfig {
+  readonly sourceId: string;
+  readonly enabled: boolean;
+  readonly storeEvents: boolean;
+  readonly storeBlocks: boolean;
+  readonly copySourceBlocks: boolean;
+  readonly reservePercent: number;
+  readonly fullPolicy: StorageFullPolicy;
+}
+
+export interface DefaultVolumePolicy {
+  readonly destinations: VolumeDestinationConfig[];
+}
+
+export interface VolumePolicyEntry {
+  readonly volumeId: string;
+  readonly destinations: VolumeDestinationConfig[];
 }
 
 export interface RootsConfig {
-  readonly version: 1;
-  readonly roots: RootConfigEntry[];
+  readonly version: 2;
+  readonly sources: SourceConfigEntry[];
+  readonly defaultVolume: DefaultVolumePolicy;
+  readonly volumes: VolumePolicyEntry[];
 }
 
-const ROOTS_CONFIG_VERSION = 1 as const;
+const ROOTS_CONFIG_VERSION = 2 as const;
+const LEGACY_ROOTS_CONFIG_VERSION = 1 as const;
 const CHANNEL_KEY_REGEX = /^[a-f0-9]{64,200}$/;
 
-const allKeysStrategySchema = z.object({
+const fullPolicySchema = z.enum(['block-writes', 'drop-older-blocks']);
+
+const sourceConfigEntrySchema = z.object({
+  id: z.string().trim().min(1, 'Source id is required'),
+  provider: z.enum(['local', 'dropbox', 'mega', 'gdrive']).default('local'),
+  path: z.string().trim().min(1, 'Source path is required'),
+  enabled: z.boolean().default(true),
+  writable: z.boolean().default(true),
+  reservePercent: z.number().int().min(0).max(95).default(10),
+  opportunisticPolicy: fullPolicySchema.default('drop-older-blocks'),
+});
+
+const volumeDestinationSchema = z.object({
+  sourceId: z.string().trim().min(1, 'Destination sourceId is required'),
+  enabled: z.boolean().default(true),
+  storeEvents: z.boolean().default(true),
+  storeBlocks: z.boolean().default(true),
+  copySourceBlocks: z.boolean().default(true),
+  reservePercent: z.number().int().min(0).max(95).default(10),
+  fullPolicy: fullPolicySchema.default('block-writes'),
+});
+
+const defaultVolumePolicySchema = z.object({
+  destinations: z.array(volumeDestinationSchema).default([]),
+});
+
+const volumePolicyEntrySchema = z.object({
+  volumeId: z.string().trim().toLowerCase(),
+  destinations: z.array(volumeDestinationSchema).default([]),
+});
+
+const rootsConfigSchema = z.object({
+  version: z.literal(ROOTS_CONFIG_VERSION),
+  sources: z.array(sourceConfigEntrySchema).min(1, 'At least one source is required'),
+  defaultVolume: defaultVolumePolicySchema.default({ destinations: [] }),
+  volumes: z.array(volumePolicyEntrySchema).default([]),
+});
+
+const legacyAllKeysStrategySchema = z.object({
   name: z.literal('all-keys'),
 });
 
-const allowlistStrategySchema = z.object({
+const legacyAllowlistStrategySchema = z.object({
   name: z.literal('allowlist'),
   channelKeys: z.array(z.string().trim().toLowerCase()).default([]),
 });
 
-const rootConfigEntrySchema = z.object({
+const legacyRootConfigEntrySchema = z.object({
   id: z.string().trim().min(1, 'Root id is required'),
   kind: z.enum(['main', 'backup']),
   provider: z.enum(['local', 'dropbox', 'mega', 'gdrive']).default('local'),
   path: z.string().trim().min(1, 'Root path is required'),
   enabled: z.boolean().default(true),
   writable: z.boolean().default(true),
-  strategy: z.union([allKeysStrategySchema, allowlistStrategySchema]),
+  strategy: z.union([legacyAllKeysStrategySchema, legacyAllowlistStrategySchema]),
 });
 
-const rootsConfigSchema = z.object({
-  version: z.literal(ROOTS_CONFIG_VERSION),
-  roots: z.array(rootConfigEntrySchema).min(1, 'At least one root is required'),
+const legacyRootsConfigSchema = z.object({
+  version: z.literal(LEGACY_ROOTS_CONFIG_VERSION),
+  roots: z.array(legacyRootConfigEntrySchema).min(1, 'At least one root is required'),
 });
 
 export function resolveDefaultRootsConfigPath(): string {
@@ -68,87 +117,105 @@ export function resolveDefaultRootsConfigPath(): string {
 }
 
 export function createDefaultRootsConfig(defaultRootPath: string): RootsConfig {
+  const sourceId = 'src-default';
   return {
     version: ROOTS_CONFIG_VERSION,
-    roots: [
+    sources: [
       {
-        id: 'main-default',
-        kind: 'main',
+        id: sourceId,
         provider: 'local',
         path: path.resolve(defaultRootPath),
         enabled: true,
         writable: true,
-        strategy: {
-          name: 'all-keys',
-        },
+        reservePercent: 10,
+        opportunisticPolicy: 'drop-older-blocks',
       },
     ],
+    defaultVolume: {
+      destinations: [
+        {
+          sourceId,
+          enabled: true,
+          storeEvents: true,
+          storeBlocks: true,
+          copySourceBlocks: true,
+          reservePercent: 10,
+          fullPolicy: 'block-writes',
+        },
+      ],
+    },
+    volumes: [],
   };
 }
 
 export function parseRootsConfig(value: unknown): RootsConfig {
-  const parsed = rootsConfigSchema.parse(value);
-  const seenIds = new Set<string>();
+  const candidate = migrateLegacyRootsConfig(value);
+  const parsed = rootsConfigSchema.parse(candidate);
+  const seenSourceIds = new Set<string>();
+  const sourceIds = new Set<string>();
 
-  const normalizedRoots = parsed.roots.map((root) => {
-    const id = root.id.trim();
-    if (seenIds.has(id)) {
-      throw new Error(`Duplicate root id: ${id}`);
+  const normalizedSources = parsed.sources.map((source) => {
+    const id = source.id.trim();
+    if (seenSourceIds.has(id)) {
+      throw new Error(`Duplicate source id: ${id}`);
     }
-    seenIds.add(id);
-
-    const normalizedPath = path.resolve(root.path);
-    if (root.kind === 'main') {
-      if (root.strategy.name !== 'all-keys') {
-        throw new Error(`Main root ${id} must use strategy.name = all-keys`);
-      }
-      return {
-        id,
-        kind: root.kind,
-        provider: root.provider,
-        path: normalizedPath,
-        enabled: root.enabled,
-        writable: root.writable,
-        strategy: {
-          name: 'all-keys',
-        },
-      } as RootConfigEntry;
-    }
-
-    if (root.strategy.name !== 'allowlist') {
-      throw new Error(`Backup root ${id} must use strategy.name = allowlist`);
-    }
-
-    const dedupedKeys = Array.from(new Set(root.strategy.channelKeys.map((key) => key.trim().toLowerCase())))
-      .filter((key) => key.length > 0);
-
-    for (const channelKey of dedupedKeys) {
-      if (!CHANNEL_KEY_REGEX.test(channelKey)) {
-        throw new Error(`Invalid backup allowlist channel key in ${id}: ${channelKey}`);
-      }
-    }
-
+    seenSourceIds.add(id);
+    sourceIds.add(id);
     return {
       id,
-      kind: root.kind,
-      provider: root.provider,
-      path: normalizedPath,
-      enabled: root.enabled,
-      writable: root.writable,
-      strategy: {
-        name: 'allowlist',
-        channelKeys: dedupedKeys,
-      },
-    } as RootConfigEntry;
+      provider: source.provider,
+      path: path.resolve(source.path),
+      enabled: source.enabled,
+      writable: source.writable,
+      reservePercent: source.reservePercent,
+      opportunisticPolicy: source.opportunisticPolicy,
+    } satisfies SourceConfigEntry;
   });
 
-  if (!normalizedRoots.some((root) => root.kind === 'main' && root.enabled)) {
-    throw new Error('At least one enabled main root is required');
+  const normalizedDefault: DefaultVolumePolicy = {
+    destinations: normalizeDestinationList(parsed.defaultVolume.destinations, sourceIds),
+  };
+  const seenVolumeIds = new Set<string>();
+  const normalizedVolumes = parsed.volumes.map((volume) => {
+    const volumeId = volume.volumeId.trim().toLowerCase();
+    if (!CHANNEL_KEY_REGEX.test(volumeId)) {
+      throw new Error(`Invalid volume id: ${volume.volumeId}`);
+    }
+    if (seenVolumeIds.has(volumeId)) {
+      throw new Error(`Duplicate volume id: ${volumeId}`);
+    }
+    seenVolumeIds.add(volumeId);
+    return {
+      volumeId,
+      destinations: normalizeDestinationList(volume.destinations, sourceIds),
+    } satisfies VolumePolicyEntry;
+  });
+
+  for (const volume of normalizedVolumes) {
+    const resolved = resolveVolumeDestinations(
+      {
+        version: ROOTS_CONFIG_VERSION,
+        sources: normalizedSources,
+        defaultVolume: normalizedDefault,
+        volumes: normalizedVolumes,
+      },
+      volume.volumeId
+    );
+    if (
+      !resolved.some((destination) => {
+        const source = normalizedSources.find((entry) => entry.id === destination.sourceId);
+        return Boolean(source?.enabled && source.writable && isDurableDestination(destination));
+      })
+    ) {
+      throw new Error(`Volume ${volume.volumeId} must have at least one durable destination`);
+    }
   }
 
   return {
     version: ROOTS_CONFIG_VERSION,
-    roots: normalizedRoots,
+    sources: normalizedSources,
+    defaultVolume: normalizedDefault,
+    volumes: normalizedVolumes,
   };
 }
 
@@ -196,18 +263,145 @@ export async function saveRootsConfig(configPath: string, config: RootsConfig): 
   await fs.rename(tempPath, resolvedPath);
 }
 
-export function rootAcceptsChannel(root: RootConfigEntry, channelKeyHex: string): boolean {
-  if (!root.enabled) {
-    return false;
+export function resolveVolumeDestinations(config: RootsConfig, volumeId: string): VolumeDestinationConfig[] {
+  const normalizedVolumeId = volumeId.trim().toLowerCase();
+  const merged = new Map<string, VolumeDestinationConfig>();
+
+  for (const destination of config.defaultVolume.destinations) {
+    merged.set(destination.sourceId, { ...destination });
   }
-  if (root.kind === 'main') {
-    return root.strategy.name === 'all-keys';
+
+  const explicit = config.volumes.find((entry) => entry.volumeId === normalizedVolumeId);
+  if (!explicit) {
+    return Array.from(merged.values());
   }
-  if (root.strategy.name !== 'allowlist') {
-    return false;
+
+  for (const destination of explicit.destinations) {
+    merged.set(destination.sourceId, { ...destination });
   }
-  const normalizedKey = channelKeyHex.toLowerCase();
-  return root.strategy.channelKeys.includes(normalizedKey);
+
+  return Array.from(merged.values());
+}
+
+export function getExplicitVolumePolicy(config: RootsConfig, volumeId: string): VolumePolicyEntry | undefined {
+  const normalizedVolumeId = volumeId.trim().toLowerCase();
+  return config.volumes.find((entry) => entry.volumeId === normalizedVolumeId);
+}
+
+export function getSourceById(config: RootsConfig, sourceId: string): SourceConfigEntry | undefined {
+  return config.sources.find((source) => source.id === sourceId);
+}
+
+export function isDurableDestination(destination: VolumeDestinationConfig): boolean {
+  return (
+    destination.enabled &&
+    destination.storeEvents &&
+    destination.storeBlocks &&
+    destination.copySourceBlocks &&
+    destination.fullPolicy === 'block-writes'
+  );
+}
+
+function normalizeDestinationList(
+  destinations: readonly VolumeDestinationConfig[],
+  sourceIds: ReadonlySet<string>
+): VolumeDestinationConfig[] {
+  const deduped = new Map<string, VolumeDestinationConfig>();
+  for (const destination of destinations) {
+    const sourceId = destination.sourceId.trim();
+    if (!sourceIds.has(sourceId)) {
+      throw new Error(`Unknown destination sourceId: ${sourceId}`);
+    }
+    deduped.set(sourceId, {
+      sourceId,
+      enabled: destination.enabled,
+      storeEvents: destination.storeEvents,
+      storeBlocks: destination.storeBlocks,
+      copySourceBlocks: destination.copySourceBlocks,
+      reservePercent: destination.reservePercent,
+      fullPolicy: destination.fullPolicy,
+    });
+  }
+  return Array.from(deduped.values());
+}
+
+function migrateLegacyRootsConfig(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return value;
+  }
+
+  const rawVersion = (value as { version?: unknown }).version;
+  if (rawVersion !== LEGACY_ROOTS_CONFIG_VERSION) {
+    return value;
+  }
+
+  const legacy = legacyRootsConfigSchema.parse(value);
+  for (const root of legacy.roots) {
+    if (root.kind === 'main' && root.strategy.name !== 'all-keys') {
+      throw new Error(`Legacy main root ${root.id} must use all-keys strategy`);
+    }
+    if (root.kind === 'backup' && root.strategy.name !== 'allowlist') {
+      throw new Error(`Legacy backup root ${root.id} must use allowlist strategy`);
+    }
+  }
+
+  const sources: SourceConfigEntry[] = legacy.roots.map((root) => ({
+    id: root.id,
+    provider: root.provider,
+    path: path.resolve(root.path),
+    enabled: root.enabled,
+    writable: root.writable,
+    reservePercent: 10,
+    opportunisticPolicy: 'drop-older-blocks',
+  }));
+
+  const defaultDestinations: VolumeDestinationConfig[] = legacy.roots
+    .filter((root) => root.kind === 'main' && root.enabled)
+    .map((root) => ({
+      sourceId: root.id,
+      enabled: root.enabled,
+      storeEvents: true,
+      storeBlocks: true,
+      copySourceBlocks: true,
+      reservePercent: 10,
+      fullPolicy: 'block-writes',
+    }));
+
+  const volumeMap = new Map<string, VolumeDestinationConfig[]>();
+  for (const root of legacy.roots) {
+    if (root.kind !== 'backup' || root.strategy.name !== 'allowlist') {
+      continue;
+    }
+    for (const channelKey of root.strategy.channelKeys) {
+      const normalizedKey = channelKey.trim().toLowerCase();
+      if (!CHANNEL_KEY_REGEX.test(normalizedKey)) {
+        throw new Error(`Invalid backup allowlist channel key in ${root.id}: ${channelKey}`);
+      }
+      const destinations = volumeMap.get(normalizedKey) ?? [];
+      destinations.push({
+        sourceId: root.id,
+        enabled: root.enabled,
+        storeEvents: true,
+        storeBlocks: true,
+        copySourceBlocks: true,
+        reservePercent: 10,
+        fullPolicy: 'block-writes',
+      });
+      volumeMap.set(normalizedKey, destinations);
+    }
+  }
+
+  return {
+    version: ROOTS_CONFIG_VERSION,
+    sources,
+    defaultVolume: {
+      destinations: defaultDestinations,
+    },
+    volumes: Array.from(volumeMap.entries()).map(([volumeId, destinations]) => ({
+      volumeId,
+      destinations,
+    })),
+  } satisfies RootsConfig;
 }
 
 function isFileNotFoundError(error: unknown): error is NodeJS.ErrnoException {

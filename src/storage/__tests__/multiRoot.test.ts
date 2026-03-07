@@ -9,8 +9,44 @@ function bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
+function createConfig(args: {
+  mainPath: string;
+  sources?: RootsConfig['sources'];
+  volumes?: RootsConfig['volumes'];
+}): RootsConfig {
+  const mainSource =
+    args.sources?.find((source) => source.id === 'src-main') ?? {
+      id: 'src-main',
+      provider: 'local' as const,
+      path: args.mainPath,
+      enabled: true,
+      writable: true,
+      reservePercent: 10,
+      opportunisticPolicy: 'drop-older-blocks' as const,
+    };
+
+  return {
+    version: 2,
+    sources: args.sources ?? [mainSource],
+    defaultVolume: {
+      destinations: [
+        {
+          sourceId: mainSource.id,
+          enabled: true,
+          storeEvents: true,
+          storeBlocks: true,
+          copySourceBlocks: true,
+          reservePercent: 10,
+          fullPolicy: 'block-writes',
+        },
+      ],
+    },
+    volumes: args.volumes ?? [],
+  };
+}
+
 describe('MultiRootStorageBackend', () => {
-  it('writes channel files to main and allowlisted backup roots', async () => {
+  it('writes channel files to the default durable source and explicit volume destinations', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nearbytes-mr-'));
     const mainRoot = join(dir, 'main');
     const backupRoot = join(dir, 'backup');
@@ -18,29 +54,45 @@ describe('MultiRootStorageBackend', () => {
     await mkdir(backupRoot, { recursive: true });
 
     const keyHex = 'a'.repeat(130);
-    const config: RootsConfig = {
-      version: 1,
-      roots: [
+    const config = createConfig({
+      mainPath: mainRoot,
+      sources: [
         {
-          id: 'main-1',
-          kind: 'main',
+          id: 'src-main',
           provider: 'local',
           path: mainRoot,
           enabled: true,
           writable: true,
-          strategy: { name: 'all-keys' },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
         {
-          id: 'backup-1',
-          kind: 'backup',
+          id: 'src-backup',
           provider: 'dropbox',
           path: backupRoot,
           enabled: true,
           writable: true,
-          strategy: { name: 'allowlist', channelKeys: [keyHex] },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
       ],
-    };
+      volumes: [
+        {
+          volumeId: keyHex,
+          destinations: [
+            {
+              sourceId: 'src-backup',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 10,
+              fullPolicy: 'block-writes',
+            },
+          ],
+        },
+      ],
+    });
 
     const storage = new MultiRootStorageBackend(config);
     const relativePath = `channels/${keyHex}/event.bin`;
@@ -54,45 +106,36 @@ describe('MultiRootStorageBackend', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('requires at least one writable main root', async () => {
+  it('requires at least one writable destination for the volume', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nearbytes-mr-'));
-    const backupRoot = join(dir, 'backup');
-    await mkdir(backupRoot, { recursive: true });
+    const mainRoot = join(dir, 'main');
+    await mkdir(mainRoot, { recursive: true });
 
     const keyHex = 'b'.repeat(130);
-    const config: RootsConfig = {
-      version: 1,
-      roots: [
+    const config = createConfig({
+      mainPath: mainRoot,
+      sources: [
         {
-          id: 'main-1',
-          kind: 'main',
+          id: 'src-main',
           provider: 'local',
-          path: join(dir, 'main-missing'),
+          path: mainRoot,
           enabled: true,
           writable: false,
-          strategy: { name: 'all-keys' },
-        },
-        {
-          id: 'backup-1',
-          kind: 'backup',
-          provider: 'mega',
-          path: backupRoot,
-          enabled: true,
-          writable: true,
-          strategy: { name: 'allowlist', channelKeys: [keyHex] },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
       ],
-    };
+    });
 
     const storage = new MultiRootStorageBackend(config);
     await expect(
       storage.writeFileForChannel(`channels/${keyHex}/event.bin`, bytes('value'), keyHex)
-    ).rejects.toThrow(/main roots/i);
+    ).rejects.toThrow(/No writable event destinations configured/i);
 
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('keeps backup failures best effort and records failure status', async () => {
+  it('keeps secondary destination failures best effort and records failure status', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nearbytes-mr-'));
     const mainRoot = join(dir, 'main');
     const brokenBackupPath = join(dir, 'backup-file');
@@ -100,29 +143,45 @@ describe('MultiRootStorageBackend', () => {
     await writeFile(brokenBackupPath, 'not-a-directory', 'utf8');
 
     const keyHex = 'c'.repeat(130);
-    const config: RootsConfig = {
-      version: 1,
-      roots: [
+    const config = createConfig({
+      mainPath: mainRoot,
+      sources: [
         {
-          id: 'main-1',
-          kind: 'main',
+          id: 'src-main',
           provider: 'local',
           path: mainRoot,
           enabled: true,
           writable: true,
-          strategy: { name: 'all-keys' },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
         {
-          id: 'backup-1',
-          kind: 'backup',
+          id: 'src-secondary',
           provider: 'gdrive',
           path: brokenBackupPath,
           enabled: true,
           writable: true,
-          strategy: { name: 'allowlist', channelKeys: [keyHex] },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
       ],
-    };
+      volumes: [
+        {
+          volumeId: keyHex,
+          destinations: [
+            {
+              sourceId: 'src-secondary',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 10,
+              fullPolicy: 'block-writes',
+            },
+          ],
+        },
+      ],
+    });
 
     const storage = new MultiRootStorageBackend(config);
     const relativePath = `channels/${keyHex}/event.bin`;
@@ -134,131 +193,157 @@ describe('MultiRootStorageBackend', () => {
 
     const snapshot = await storage.getRuntimeSnapshot();
     expect(snapshot.writeFailures.length).toBeGreaterThanOrEqual(1);
-    const backupFailure = snapshot.writeFailures.find((failure) => failure.rootId === 'backup-1');
+    const backupFailure = snapshot.writeFailures.find((failure) => failure.rootId === 'src-secondary');
     expect(backupFailure).toBeDefined();
 
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('consolidates one backup root into another and removes source root from config', async () => {
+  it('consolidates one source into another and removes the source from config', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nearbytes-mr-'));
     const mainRoot = join(dir, 'main');
-    const backupSource = join(dir, 'backup-source');
-    const backupTarget = join(dir, 'backup-target');
+    const sourcePath = join(dir, 'source-a');
+    const targetPath = join(dir, 'source-b');
     await mkdir(mainRoot, { recursive: true });
-    await mkdir(backupSource, { recursive: true });
-    await mkdir(backupTarget, { recursive: true });
+    await mkdir(sourcePath, { recursive: true });
+    await mkdir(targetPath, { recursive: true });
 
     const keyHex = 'd'.repeat(130);
-    const config: RootsConfig = {
-      version: 1,
-      roots: [
+    const config = createConfig({
+      mainPath: mainRoot,
+      sources: [
         {
-          id: 'main-1',
-          kind: 'main',
+          id: 'src-main',
           provider: 'local',
           path: mainRoot,
           enabled: true,
           writable: true,
-          strategy: { name: 'all-keys' },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
         {
-          id: 'backup-source',
-          kind: 'backup',
+          id: 'src-source',
           provider: 'mega',
-          path: backupSource,
+          path: sourcePath,
           enabled: true,
           writable: true,
-          strategy: { name: 'allowlist', channelKeys: [keyHex] },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
         {
-          id: 'backup-target',
-          kind: 'backup',
+          id: 'src-target',
           provider: 'dropbox',
-          path: backupTarget,
+          path: targetPath,
           enabled: true,
           writable: true,
-          strategy: { name: 'allowlist', channelKeys: [keyHex] },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
       ],
-    };
+      volumes: [
+        {
+          volumeId: keyHex,
+          destinations: [
+            {
+              sourceId: 'src-source',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 10,
+              fullPolicy: 'block-writes',
+            },
+            {
+              sourceId: 'src-target',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 10,
+              fullPolicy: 'block-writes',
+            },
+          ],
+        },
+      ],
+    });
 
-    await mkdir(join(backupSource, 'blocks'), { recursive: true });
-    await writeFile(join(backupSource, 'blocks', 'x.bin'), 'block-data', 'utf8');
-    await mkdir(join(backupSource, 'channels', keyHex), { recursive: true });
-    await writeFile(join(backupSource, 'channels', keyHex, 'event.bin'), 'event-data', 'utf8');
+    await mkdir(join(sourcePath, 'blocks'), { recursive: true });
+    await writeFile(join(sourcePath, 'blocks', 'x.bin'), 'block-data', 'utf8');
+    await mkdir(join(sourcePath, 'channels', keyHex), { recursive: true });
+    await writeFile(join(sourcePath, 'channels', keyHex, 'event.bin'), 'event-data', 'utf8');
 
     const storage = new MultiRootStorageBackend(config);
-    const plan = await storage.getConsolidationPlan('backup-source');
-    const candidate = plan.candidates.find((entry) => entry.id === 'backup-target');
+    const plan = await storage.getConsolidationPlan('src-source');
+    const candidate = plan.candidates.find((entry) => entry.id === 'src-target');
     expect(candidate?.eligible).toBe(true);
 
-    const consolidated = await storage.consolidateRoot('backup-source', 'backup-target');
+    const consolidated = await storage.consolidateRoot('src-source', 'src-target');
     expect(consolidated.result.movedFiles).toBeGreaterThanOrEqual(2);
-    expect(consolidated.config.roots.some((root) => root.id === 'backup-source')).toBe(false);
+    expect(consolidated.config.sources.some((source) => source.id === 'src-source')).toBe(false);
+    expect(consolidated.config.volumes[0].destinations.some((destination) => destination.sourceId === 'src-source')).toBe(
+      false
+    );
 
-    const movedBlock = await readFile(join(backupTarget, 'blocks', 'x.bin'), 'utf8');
-    const movedEvent = await readFile(join(backupTarget, 'channels', keyHex, 'event.bin'), 'utf8');
+    const movedBlock = await readFile(join(targetPath, 'blocks', 'x.bin'), 'utf8');
+    const movedEvent = await readFile(join(targetPath, 'channels', keyHex, 'event.bin'), 'utf8');
     expect(movedBlock).toBe('block-data');
     expect(movedEvent).toBe('event-data');
 
-    await expect(readFile(join(backupSource, 'blocks', 'x.bin'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(sourcePath, 'blocks', 'x.bin'), 'utf8')).rejects.toThrow();
 
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('rejects consolidation candidates with mismatched backup allowlists', async () => {
+  it('rejects consolidation candidates when one source is disabled', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nearbytes-mr-'));
     const mainRoot = join(dir, 'main');
-    const backupSource = join(dir, 'backup-source');
-    const backupTarget = join(dir, 'backup-target');
+    const sourcePath = join(dir, 'source-a');
+    const targetPath = join(dir, 'source-b');
     await mkdir(mainRoot, { recursive: true });
-    await mkdir(backupSource, { recursive: true });
-    await mkdir(backupTarget, { recursive: true });
+    await mkdir(sourcePath, { recursive: true });
+    await mkdir(targetPath, { recursive: true });
 
-    const sourceKey = 'e'.repeat(130);
-    const targetKey = 'f'.repeat(130);
-    const config: RootsConfig = {
-      version: 1,
-      roots: [
+    const config = createConfig({
+      mainPath: mainRoot,
+      sources: [
         {
-          id: 'main-1',
-          kind: 'main',
+          id: 'src-main',
           provider: 'local',
           path: mainRoot,
           enabled: true,
           writable: true,
-          strategy: { name: 'all-keys' },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
         {
-          id: 'backup-source',
-          kind: 'backup',
+          id: 'src-source',
           provider: 'mega',
-          path: backupSource,
+          path: sourcePath,
           enabled: true,
           writable: true,
-          strategy: { name: 'allowlist', channelKeys: [sourceKey] },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
         {
-          id: 'backup-target',
-          kind: 'backup',
+          id: 'src-target',
           provider: 'dropbox',
-          path: backupTarget,
-          enabled: true,
+          path: targetPath,
+          enabled: false,
           writable: true,
-          strategy: { name: 'allowlist', channelKeys: [targetKey] },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
       ],
-    };
+    });
 
     const storage = new MultiRootStorageBackend(config);
-    const plan = await storage.getConsolidationPlan('backup-source');
-    const candidate = plan.candidates.find((entry) => entry.id === 'backup-target');
+    const plan = await storage.getConsolidationPlan('src-source');
+    const candidate = plan.candidates.find((entry) => entry.id === 'src-target');
     expect(candidate?.eligible).toBe(false);
-    expect(candidate?.reason).toMatch(/same allowed volume keys/i);
+    expect(candidate?.reason).toMatch(/Both sources must be enabled/i);
 
-    await expect(storage.consolidateRoot('backup-source', 'backup-target')).rejects.toThrow(
-      /same allowed volume keys/i
+    await expect(storage.consolidateRoot('src-source', 'src-target')).rejects.toThrow(
+      /Both sources must be enabled/i
     );
 
     await rm(dir, { recursive: true, force: true });

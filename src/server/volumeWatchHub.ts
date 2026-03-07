@@ -160,13 +160,13 @@ export class VolumeWatchHub {
     }
 
     if (isMultiRootStorageBackend(this.storage)) {
-      const activeRoots = this.storage
+      const activeSources = this.storage
         .getRootsConfig()
-        .roots.filter((root) => root.enabled);
-      const providers = uniqueProviders(activeRoots.map((root) => root.provider));
-      const targets = uniquePaths(activeRoots.map((root) => root.path));
-      const includePrefixes = activeRoots.map((root) =>
-        normalizePath(path.join(root.path, 'channels', normalizedVolumeId)) + '/'
+        .sources.filter((source) => source.enabled);
+      const providers = uniqueProviders(activeSources.map((source) => source.provider));
+      const targets = uniquePaths(activeSources.map((source) => source.path));
+      const includePrefixes = activeSources.map((source) =>
+        normalizePath(path.join(source.path, 'channels', normalizedVolumeId)) + '/'
       );
 
       return {

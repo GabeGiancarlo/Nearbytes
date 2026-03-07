@@ -96,40 +96,72 @@ describe('Nearbytes API (multi-root)', () => {
     const volumeId = bytesToHex(keyPair.publicKey);
 
     const rootsConfig: RootsConfig = {
-      version: 1,
-      roots: [
+      version: 2,
+      sources: [
         {
-          id: 'main-1',
-          kind: 'main',
+          id: 'src-main',
           provider: 'local',
           path: mainRoot,
           enabled: true,
           writable: true,
-          strategy: { name: 'all-keys' },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
         {
-          id: 'backup-1',
-          kind: 'backup',
+          id: 'src-backup-1',
           provider: 'mega',
           path: backupRoot,
           enabled: true,
           writable: true,
-          strategy: {
-            name: 'allowlist',
-            channelKeys: [volumeId],
-          },
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
         },
         {
-          id: 'backup-2',
-          kind: 'backup',
+          id: 'src-backup-2',
           provider: 'dropbox',
           path: backupRoot2,
           enabled: true,
           writable: true,
-          strategy: {
-            name: 'allowlist',
-            channelKeys: [volumeId],
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
+        },
+      ],
+      defaultVolume: {
+        destinations: [
+          {
+            sourceId: 'src-main',
+            enabled: true,
+            storeEvents: true,
+            storeBlocks: true,
+            copySourceBlocks: true,
+            reservePercent: 10,
+            fullPolicy: 'block-writes',
           },
+        ],
+      },
+      volumes: [
+        {
+          volumeId,
+          destinations: [
+            {
+              sourceId: 'src-backup-1',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 10,
+              fullPolicy: 'block-writes',
+            },
+            {
+              sourceId: 'src-backup-2',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 10,
+              fullPolicy: 'block-writes',
+            },
+          ],
         },
       ],
     };
@@ -159,7 +191,7 @@ describe('Nearbytes API (multi-root)', () => {
     const localRes = await request(app).get('/config/roots').expect(200);
     const localBody = typedBody<ConfigRootsResponseBody>(localRes);
     expect(localBody.config).toBeDefined();
-    expect(localBody.config.roots).toHaveLength(3);
+    expect(localBody.config.sources).toHaveLength(3);
 
     await request(app)
       .get('/config/roots')
@@ -167,13 +199,13 @@ describe('Nearbytes API (multi-root)', () => {
       .expect(403);
   });
 
-  it('updates root config and persists to disk', async () => {
+  it('updates source config and persists to disk', async () => {
     const current = await request(app).get('/config/roots').expect(200);
     const currentBody = typedBody<ConfigRootsResponseBody>(current);
     const nextConfig = {
       ...currentBody.config,
-      roots: currentBody.config.roots.map((root) =>
-        root.id === 'backup-1' ? { ...root, writable: false } : root
+      sources: currentBody.config.sources.map((source) =>
+        source.id === 'src-backup-1' ? { ...source, writable: false } : source
       ),
     };
 
@@ -183,22 +215,22 @@ describe('Nearbytes API (multi-root)', () => {
       .expect(200);
     const updateBody = typedBody<ConfigRootsResponseBody>(updateRes);
 
-    const backupRootEntry = updateBody.config.roots.find((root) => root.id === 'backup-1');
-    expect(backupRootEntry?.writable).toBe(false);
+    const backupSource = updateBody.config.sources.find((source) => source.id === 'src-backup-1');
+    expect(backupSource?.writable).toBe(false);
 
     const diskConfigRaw = await fs.readFile(rootsConfigPath, 'utf8');
-    const diskConfig = JSON.parse(diskConfigRaw) as { roots: Array<{ id: string; writable: boolean }> };
-    const persistedBackup = diskConfig.roots.find((root) => root.id === 'backup-1');
+    const diskConfig = JSON.parse(diskConfigRaw) as { sources: Array<{ id: string; writable: boolean }> };
+    const persistedBackup = diskConfig.sources.find((source) => source.id === 'src-backup-1');
     expect(persistedBackup?.writable).toBe(false);
   });
 
-  it('reads event logs across roots and retrieves blocks when key data is split', async () => {
+  it('reads event logs across sources and retrieves blocks when key data is split', async () => {
     const configRes = await request(app).get('/config/roots').expect(200);
     const configBody = typedBody<ConfigRootsResponseBody>(configRes);
     const writableConfig = {
       ...configBody.config,
-      roots: configBody.config.roots.map((root) =>
-        root.id === 'backup-1' ? { ...root, writable: true } : root
+      sources: configBody.config.sources.map((source) =>
+        source.id === 'src-backup-1' ? { ...source, writable: true } : source
       ),
     };
     await request(app).put('/config/roots').send({ config: writableConfig }).expect(200);
@@ -222,7 +254,6 @@ describe('Nearbytes API (multi-root)', () => {
     const eventFileName = eventFilesMain.find((name) => name.endsWith('.bin'));
     expect(eventFileName).toBeDefined();
 
-    // Keep event only in backup and blob only in main to verify cross-root reads.
     await fs.rm(path.join(mainRoot, 'channels', volumeId, eventFileName!), { force: true });
     await fs.rm(path.join(backupRoot, 'blocks', `${blobHash}.bin`), { force: true });
 
@@ -267,7 +298,7 @@ describe('Nearbytes API (multi-root)', () => {
     }
   });
 
-  it('recreates .nearbytes marker after deletion for configured roots', async () => {
+  it('recreates .nearbytes marker after deletion for configured sources', async () => {
     const openRes = await request(app).post('/open').send({ secret: SECRET }).expect(200);
     const token = typedBody<OpenResponseBody>(openRes).token as string;
 
@@ -290,7 +321,7 @@ describe('Nearbytes API (multi-root)', () => {
     await fs.stat(markerPath);
   });
 
-  it('provides consolidation candidates and consolidates one backup root into another', async () => {
+  it('provides consolidation candidates and consolidates one source into another', async () => {
     const openRes = await request(app).post('/open').send({ secret: SECRET }).expect(200);
     const token = typedBody<OpenResponseBody>(openRes).token as string;
 
@@ -301,20 +332,20 @@ describe('Nearbytes API (multi-root)', () => {
       .expect(200);
 
     const planRes = await request(app)
-      .get('/config/roots/consolidate/backup-1/plan')
+      .get('/config/roots/consolidate/src-backup-1/plan')
       .expect(200);
     const planBody = typedBody<ConsolidationPlanResponseBody>(planRes);
-    const destination = planBody.plan.candidates.find((candidate) => candidate.id === 'backup-2');
+    const destination = planBody.plan.candidates.find((candidate) => candidate.id === 'src-backup-2');
     expect(destination?.eligible).toBe(true);
 
     const consolidateRes = await request(app)
       .post('/config/roots/consolidate')
-      .send({ sourceId: 'backup-1', targetId: 'backup-2' })
+      .send({ sourceId: 'src-backup-1', targetId: 'src-backup-2' })
       .expect(200);
     const consolidateBody = typedBody<ConsolidationResponseBody>(consolidateRes);
-    expect(consolidateBody.result.sourceId).toBe('backup-1');
-    expect(consolidateBody.result.targetId).toBe('backup-2');
-    expect(consolidateBody.config.roots.some((root) => root.id === 'backup-1')).toBe(false);
-    expect(consolidateBody.config.roots.some((root) => root.id === 'backup-2')).toBe(true);
+    expect(consolidateBody.result.sourceId).toBe('src-backup-1');
+    expect(consolidateBody.result.targetId).toBe('src-backup-2');
+    expect(consolidateBody.config.sources.some((source) => source.id === 'src-backup-1')).toBe(false);
+    expect(consolidateBody.config.sources.some((source) => source.id === 'src-backup-2')).toBe(true);
   });
 });

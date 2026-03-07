@@ -11,7 +11,7 @@ import {
 } from '../roots.js';
 
 describe('roots config', () => {
-  it('parses and normalizes main/backup roots', () => {
+  it('migrates legacy main/backup roots into v2 sources and volume policies', () => {
     const parsed = parseRootsConfig({
       version: 1,
       roots: [
@@ -39,16 +39,30 @@ describe('roots config', () => {
       ],
     });
 
-    expect(parsed.version).toBe(1);
-    expect(parsed.roots[0].path).not.toBe('./storage-a');
-    expect(parsed.roots[1].kind).toBe('backup');
-    expect(parsed.roots[1].strategy.name).toBe('allowlist');
-    if (parsed.roots[1].strategy.name === 'allowlist') {
-      expect(parsed.roots[1].strategy.channelKeys).toEqual(['abcd'.repeat(16)]);
-    }
+    expect(parsed.version).toBe(2);
+    expect(parsed.sources).toHaveLength(2);
+    expect(parsed.sources[0].path).not.toBe('./storage-a');
+    expect(parsed.defaultVolume.destinations).toEqual([
+      expect.objectContaining({
+        sourceId: 'main-a',
+        storeEvents: true,
+        storeBlocks: true,
+        fullPolicy: 'block-writes',
+      }),
+    ]);
+    expect(parsed.volumes).toEqual([
+      expect.objectContaining({
+        volumeId: 'abcd'.repeat(16),
+        destinations: [
+          expect.objectContaining({
+            sourceId: 'backup-a',
+          }),
+        ],
+      }),
+    ]);
   });
 
-  it('rejects invalid strategy combinations', () => {
+  it('rejects invalid legacy strategy combinations', () => {
     expect(() =>
       parseRootsConfig({
         version: 1,
@@ -77,24 +91,38 @@ describe('roots config', () => {
     });
 
     expect(loaded.created).toBe(true);
-    expect(loaded.config.roots).toHaveLength(1);
-    expect(loaded.config.roots[0].kind).toBe('main');
+    expect(loaded.config.sources).toHaveLength(1);
+    expect(loaded.config.defaultVolume.destinations).toHaveLength(1);
 
     const updated: RootsConfig = {
-      version: 1,
-      roots: [
-        ...loaded.config.roots,
+      version: 2,
+      sources: [
+        ...loaded.config.sources,
         {
-          id: 'backup-a',
-          kind: 'backup',
+          id: 'src-backup',
           provider: 'mega',
           path: join(dir, 'backup-root'),
           enabled: true,
           writable: true,
-          strategy: {
-            name: 'allowlist',
-            channelKeys: ['a'.repeat(130)],
-          },
+          reservePercent: 5,
+          opportunisticPolicy: 'drop-older-blocks',
+        },
+      ],
+      defaultVolume: loaded.config.defaultVolume,
+      volumes: [
+        {
+          volumeId: 'a'.repeat(130),
+          destinations: [
+            {
+              sourceId: 'src-backup',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 5,
+              fullPolicy: 'block-writes',
+            },
+          ],
         },
       ],
     };
@@ -102,17 +130,23 @@ describe('roots config', () => {
     await saveRootsConfig(configPath, updated);
     const raw = await readFile(configPath, 'utf8');
     const parsed = parseRootsConfig(JSON.parse(raw));
-    expect(parsed.roots).toHaveLength(2);
+    expect(parsed.sources).toHaveLength(2);
+    expect(parsed.volumes).toHaveLength(1);
 
     await rm(dir, { recursive: true, force: true });
   });
 
   it('builds a valid default config', () => {
     const config = createDefaultRootsConfig('/tmp/nearbytes-default-root');
-    expect(config.version).toBe(1);
-    expect(config.roots).toHaveLength(1);
-    expect(config.roots[0].provider).toBe('local');
-    expect(config.roots[0].strategy.name).toBe('all-keys');
+    expect(config.version).toBe(2);
+    expect(config.sources).toHaveLength(1);
+    expect(config.sources[0].provider).toBe('local');
+    expect(config.defaultVolume.destinations).toEqual([
+      expect.objectContaining({
+        sourceId: config.sources[0].id,
+        fullPolicy: 'block-writes',
+      }),
+    ]);
   });
 
   it('defaults provider to local when omitted for backward compatibility', () => {
@@ -129,6 +163,6 @@ describe('roots config', () => {
         },
       ],
     });
-    expect(parsed.roots[0].provider).toBe('local');
+    expect(parsed.sources[0].provider).toBe('local');
   });
 });
