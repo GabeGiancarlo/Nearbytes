@@ -149,6 +149,10 @@
   let showPinMenu = $state(false);
   let pinClock = $state(Date.now());
   let timelinePlayTimer: ReturnType<typeof setInterval> | null = null;
+  let showStatusPanel = $state(false);
+  let showTimeMachinePanel = $state(false);
+  let topbarHovered = $state(false);
+  let topbarFocused = $state(false);
   let showRootsPanel = $state(false);
   let rootsConfigPath = $state<string | null>(null);
   let rootsRuntime = $state<RootsRuntimeSnapshot | null>(null);
@@ -304,6 +308,16 @@
   });
 
   const isHistoryMode = $derived.by(() => timelinePosition < timelineEvents.length);
+  const showUtilityChrome = $derived.by(
+    () => address.trim() === '' || topbarHovered || topbarFocused || showPinMenu
+  );
+  const activeVolumeLabel = $derived.by(() => {
+    const current = unlockedAddress.trim();
+    if (current !== '') return current;
+    const pending = address.trim();
+    if (pending !== '') return pending;
+    return 'No volume selected';
+  });
 
   const timelineMarker = $derived.by(() => {
     if (timelineEvents.length === 0) return 'No history yet';
@@ -1665,18 +1679,40 @@
 }} />
 
 <div class="app">
-  <!-- Header with branding and secret input -->
   <header class="header">
-    <div class="header-content">
-      <div class="brand">
-        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <h1 class="brand-title">Nearbytes</h1>
+    <div
+      class="header-shell"
+      role="group"
+      aria-label="Volume quick controls"
+      onmouseenter={() => {
+        topbarHovered = true;
+      }}
+      onmouseleave={() => {
+        topbarHovered = false;
+        showPinMenu = false;
+      }}
+      onfocusin={() => {
+        topbarFocused = true;
+      }}
+      onfocusout={(event) => {
+        if (!(event.currentTarget instanceof HTMLElement)) return;
+        const next = event.relatedTarget;
+        if (next instanceof Node && event.currentTarget.contains(next)) return;
+        topbarFocused = false;
+      }}
+    >
+      <div class="header-dock">
+        <div class="header-dock-main">
+          <p class="header-dock-name" title={activeVolumeLabel}>{activeVolumeLabel}</p>
+        </div>
+        {#if !showUtilityChrome && address.trim() !== ''}
+          <span class="topbar-hint">Hover to edit</span>
+        {/if}
       </div>
-      <div class="secret-input-wrapper">
+
+      <div class="header-controls utility-surface" class:surface-hidden={!showUtilityChrome}>
+        <div class="header-content">
+          <div class="secret-input-wrapper">
         <input
           type="text"
           placeholder="Enter address..."
@@ -1704,15 +1740,6 @@
           ariaExpanded={matchedPinned ? undefined : showPinMenu}
           onPress={handlePinButtonAction}
         />
-        <button
-          type="button"
-          class="roots-btn"
-          onclick={toggleRootsPanel}
-          aria-expanded={showRootsPanel}
-          aria-label="Manage storage roots"
-        >
-          {showRootsPanel ? 'Hide Roots' : 'Roots'}
-        </button>
         {#if isLoading}
           <span class="loading-spinner"></span>
         {/if}
@@ -1729,33 +1756,64 @@
             </button>
           </div>
         {/if}
+          </div>
+        </div>
+        <div class="header-dock-actions">
+        <button
+          type="button"
+          class="workspace-toggle"
+          class:active={showStatusPanel}
+          onclick={() => {
+            showStatusPanel = !showStatusPanel;
+          }}
+        >
+          Status
+        </button>
+        <button
+          type="button"
+          class="workspace-toggle"
+          class:active={showTimeMachinePanel}
+          onclick={() => {
+            showTimeMachinePanel = !showTimeMachinePanel;
+          }}
+        >
+          Time Machine
+        </button>
+        <button
+          type="button"
+          class="workspace-toggle"
+          class:active={showRootsPanel}
+          onclick={toggleRootsPanel}
+        >
+          Roots
+        </button>
+        </div>
+        {#if activePins.length > 0}
+          <div class="pins-bar">
+            <div class="pins-content">
+              {#each activePins as pin (pin.id)}
+                <div class="pin-chip-wrap">
+                  <button
+                    type="button"
+                    class="pin-chip"
+                    class:active={matchedPinned?.id === pin.id}
+                    onclick={() => usePinnedVolume(pin)}
+                    title={"Open pinned volume " + pin.name}
+                  >
+                    {pin.name}
+                  </button>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
   </header>
 
-  {#if activePins.length > 0}
-    <div class="pins-bar">
-      <div class="pins-content">
-        {#each activePins as pin (pin.id)}
-          <div class="pin-chip-wrap">
-            <button
-              type="button"
-              class="pin-chip"
-              class:active={matchedPinned?.id === pin.id}
-              onclick={() => usePinnedVolume(pin)}
-              title={"Open pinned volume " + pin.name}
-            >
-              {pin.name}
-            </button>
-          </div>
-        {/each}
-      </div>
-    </div>
-  {/if}
-
   <!-- Status bar -->
-  {#if volumeId || errorMessage || isOffline}
-    <div class="status-bar">
+  {#if showStatusPanel && (volumeId || errorMessage || isOffline)}
+    <div class="status-bar panel-surface">
       {#if volumeId}
         <div class="status-item">
           <span class="status-label">Volume:</span>
@@ -2158,7 +2216,8 @@
       </div>
     {:else}
       <div class="volume-workspace">
-      <section class="time-machine" aria-label="Volume timeline">
+      {#if showTimeMachinePanel}
+      <section class="time-machine panel-surface" aria-label="Volume timeline">
         <div class="time-machine-head">
           <div>
             <p class="time-machine-eyebrow">Time Machine</p>
@@ -2226,6 +2285,7 @@
           <p class="tm-empty">Timeline is empty. Add files to create history.</p>
         {/if}
       </section>
+      {/if}
 
       {#if viewFiles.length === 0 && !isLoading}
         <div class="empty-state">
@@ -2397,53 +2457,143 @@
     overflow: visible;
   }
 
-  /* Header */
   .header {
-    background: rgba(26, 26, 46, 0.8);
-    backdrop-filter: blur(10px);
+    background: rgba(10, 18, 34, 0.88);
+    backdrop-filter: blur(14px);
     border-bottom: 1px solid rgba(102, 126, 234, 0.2);
-    padding: 1.5rem 2rem;
+    padding: 0.75rem 2rem 0.9rem;
     position: sticky;
     top: 0;
-    z-index: 100;
+    z-index: 120;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+
+  .header-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+
+  .header-dock {
+    border: 1px solid rgba(96, 165, 250, 0.28);
+    border-radius: 14px;
+    background: rgba(6, 12, 24, 0.74);
+    padding: 0.55rem 0.8rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.85rem;
+  }
+
+  .header-dock-main {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .header-dock-name {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: rgba(239, 246, 255, 0.95);
+    max-width: min(52vw, 620px);
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .topbar-hint {
+    font-size: 0.72rem;
+    color: rgba(186, 230, 253, 0.62);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .header-dock-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .workspace-toggle {
+    border: 1px solid rgba(96, 165, 250, 0.34);
+    background: rgba(15, 23, 42, 0.54);
+    color: rgba(219, 234, 254, 0.9);
+    border-radius: 999px;
+    padding: 0.34rem 0.72rem;
+    font-size: 0.76rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+  }
+
+  .workspace-toggle:hover {
+    background: rgba(30, 64, 175, 0.28);
+  }
+
+  .workspace-toggle.active {
+    border-color: rgba(45, 212, 191, 0.62);
+    background: rgba(13, 148, 136, 0.23);
+    color: #ccfbf1;
+  }
+
+  .utility-surface {
+    transition: opacity 0.28s ease, transform 0.28s ease, max-height 0.32s ease, margin 0.32s ease, padding 0.32s ease;
+    opacity: 1;
+    transform: translateY(0);
+    max-height: 320px;
+    overflow: hidden;
+  }
+
+  .utility-surface.surface-hidden {
+    opacity: 0;
+    transform: translateY(-10px);
+    pointer-events: none;
+    max-height: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-width: 0;
+  }
+
+  .panel-surface {
+    animation: panel-fade-in 240ms ease;
+  }
+
+  @keyframes panel-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(-6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .header-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
   }
 
   .header-content {
     max-width: none;
     margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 2rem;
+    display: block;
     width: 100%;
-  }
-
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-
-  .brand-icon {
-    width: 32px;
-    height: 32px;
-    color: #667eea;
-  }
-
-  .brand-title {
-    margin: 0;
-    font-size: 1.5rem;
-    font-weight: 600;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
   }
 
   .secret-input-wrapper {
     flex: 1;
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto auto;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto;
     gap: 0.75rem;
     align-items: center;
     position: relative;
@@ -2520,20 +2670,6 @@
     cursor: not-allowed;
   }
 
-  .roots-btn {
-    border: 1px solid rgba(125, 211, 252, 0.35);
-    background: rgba(15, 23, 42, 0.45);
-    color: #dbeafe;
-    border-radius: 10px;
-    padding: 0.75rem 0.95rem;
-    font-size: 0.875rem;
-    cursor: pointer;
-  }
-
-  .roots-btn:hover {
-    background: rgba(14, 116, 144, 0.25);
-  }
-
   .pin-menu {
     position: absolute;
     right: 0;
@@ -2567,6 +2703,7 @@
 
   .pins-bar {
     padding: 0.6rem 2rem 0;
+    margin-top: 0.15rem;
   }
 
   .pins-content {
@@ -2619,6 +2756,7 @@
     max-width: none;
     margin: 0;
     width: 100%;
+    border-top: 1px solid rgba(125, 211, 252, 0.12);
   }
 
   .status-item {
@@ -3191,6 +3329,7 @@
     flex-direction: column;
     gap: 0.75rem;
     min-height: auto;
+    overflow: hidden;
   }
 
   .time-machine-head {
@@ -3264,8 +3403,9 @@
     gap: 0.5rem;
     overflow-x: auto;
     overflow-y: hidden;
-    padding-bottom: 0.1rem;
+    padding: 0.15rem 0.35rem 0.2rem 0;
     scrollbar-width: none;
+    box-sizing: border-box;
   }
 
   .tm-events::-webkit-scrollbar {
@@ -3283,6 +3423,15 @@
     text-align: left;
     cursor: pointer;
     transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    outline: none;
+  }
+
+  .tm-event:focus-visible {
+    box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.7);
   }
 
   .tm-event.applied {
@@ -3312,6 +3461,7 @@
 
   .tm-event-name {
     font-size: 0.8125rem;
+    display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3616,17 +3766,26 @@
 
   @media (max-width: 900px) {
     .header {
-      padding: 1rem;
+      padding: 0.7rem 1rem 0.9rem;
+    }
+
+    .header-dock {
+      padding: 0.5rem 0.65rem;
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .header-dock-actions {
+      width: 100%;
+      justify-content: flex-start;
     }
 
     .header-content {
-      gap: 1rem;
-      flex-direction: column;
-      align-items: stretch;
+      width: 100%;
     }
 
     .secret-input-wrapper {
-      grid-template-columns: 1fr 1fr auto auto auto;
+      grid-template-columns: 1fr 1fr auto auto;
     }
 
     .pins-bar {
@@ -3673,12 +3832,20 @@
   }
 
   @media (max-width: 640px) {
+    .header-dock-name {
+      max-width: 92vw;
+    }
+
+    .workspace-toggle {
+      font-size: 0.72rem;
+    }
+
     .secret-input-wrapper {
       grid-template-columns: 1fr 1fr 1fr;
       grid-template-areas:
         'address address address'
         'password password password'
-        'pin roots spinner';
+        'pin pin spinner';
     }
 
     .secret-input-wrapper > input:first-child {
@@ -3692,12 +3859,6 @@
     :global(.pin-btn) {
       grid-area: pin;
       width: fit-content;
-    }
-
-    .roots-btn {
-      grid-area: roots;
-      width: fit-content;
-      justify-self: start;
     }
 
     .loading-spinner {

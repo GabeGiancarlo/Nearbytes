@@ -78,11 +78,23 @@
   "build": {
     "appId": "org.nearbytes.desktop",
     "productName": "Nearbytes",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
     "asarUnpack": [
       "dist/**"
     ],
     "files": [
       "dist/**",
+      "!dist/*.dmg",
+      "!dist/*.zip",
+      "!dist/*.blockmap",
+      "!dist/latest*.yml",
+      "!dist/builder-*.yml",
+      "!dist/mac*/**",
+      "!dist/win*/**",
+      "!dist/linux*/**",
       "dist-electron/**",
       "electron/preload.cjs",
       "ui/dist/**",
@@ -97,12 +109,14 @@
         "dmg",
         "zip"
       ],
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "icon": "build/icons/icon.icns"
     },
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "build/icons/icon.ico"
     },
     "linux": {
       "target": [
@@ -110,7 +124,8 @@
         "deb"
       ],
       "category": "Utility",
-      "maintainer": "Vincenzo Ciancia <vincenzoml@gmail.com>"
+      "maintainer": "Vincenzo Ciancia <vincenzoml@gmail.com>",
+      "icon": "build/icons"
     },
     "publish": [
       {
@@ -120,6 +135,11 @@
         "releaseType": "release",
         "vPrefixedTagName": true
       }
-    ]
+    ],
+    "icon": "build/icons/icon.png",
+    "nsis": {
+      "installerIcon": "build/icons/icon.ico",
+      "uninstallerIcon": "build/icons/icon.ico"
+    }
   }
 }
