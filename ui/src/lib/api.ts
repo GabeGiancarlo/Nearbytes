@@ -121,6 +121,23 @@ export interface RootWriteFailure {
   category: 'resource_exhausted' | 'unavailable' | 'unknown';
 }
 
+export interface SourceVolumeUsage {
+  volumeId: string;
+  historyBytes: number;
+  historyFileCount: number;
+  fileBytes: number;
+  fileCount: number;
+}
+
+export interface SourceUsageSummary {
+  totalBytes: number;
+  channelBytes: number;
+  blockBytes: number;
+  otherBytes: number;
+  blockCount: number;
+  volumeUsages: SourceVolumeUsage[];
+}
+
 export interface RootRuntimeStatus {
   id: string;
   kind: 'source';
@@ -134,6 +151,7 @@ export interface RootRuntimeStatus {
   isDirectory: boolean;
   canWrite: boolean;
   availableBytes?: number;
+  usage: SourceUsageSummary;
   lastWriteFailure?: RootWriteFailure;
 }
 

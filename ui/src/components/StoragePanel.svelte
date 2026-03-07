@@ -28,7 +28,6 @@
     Save,
     Search,
     Shield,
-    Sparkles,
     Trash2,
   } from 'lucide-svelte';
 
@@ -572,16 +571,23 @@
   }
 
   function selectedPolicyTitle(): string {
-    if (selectedPolicyVolumeId === null) return 'Next volume';
+    if (selectedPolicyVolumeId === null) return 'Volume storage';
     return policyVolumeLabel(selectedPolicyVolumeId);
   }
 
   function selectedPolicyMeta(): string {
-    if (selectedPolicyVolumeId === null) return 'Default rule for volumes that do not have their own saved policy yet';
+    if (selectedPolicyVolumeId === null) return 'Open or save a volume policy to edit it here';
     if (volumeId === selectedPolicyVolumeId && currentVolumeHint && currentVolumeHint.trim() !== '') {
       return volumeShortLabel(selectedPolicyVolumeId);
     }
     return 'Saved by public key';
+  }
+
+  function usageVolumeLabel(targetVolumeId: string): string {
+    if (volumeId === targetVolumeId && currentVolumeHint && currentVolumeHint.trim() !== '') {
+      return currentVolumeHint.trim();
+    }
+    return volumeShortLabel(targetVolumeId);
   }
 
   function policyCards(): Array<{
@@ -604,16 +610,6 @@
       isDefault: false,
       safe: hasDurableDestination(targetVolumeId),
     }));
-    cards.push({
-      key: '__default__',
-      volumeId: null,
-      title: 'Next volume',
-      meta: 'default rule',
-      usesFile: false,
-      isCurrent: false,
-      isDefault: true,
-      safe: hasDurableDestination(null),
-    });
     return cards;
   }
 
@@ -898,15 +894,15 @@
                   </select>
                 </label>
                 <label class="field-block compact-field">
-                  <span>When full</span>
+                  <span>If space is still tight</span>
                   <select
                     class="panel-input"
                     value={source.opportunisticPolicy}
                     onchange={(event) =>
                       updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
                   >
-                    <option value="drop-older-blocks">Trim spare data</option>
-                    <option value="block-writes">Pause new data</option>
+                    <option value="block-writes">Stop new data</option>
+                    <option value="drop-older-blocks">Reuse non-guaranteed copies</option>
                   </select>
                 </label>
               </div>
@@ -920,6 +916,33 @@
                 <span>{status?.exists ? 'Ready' : 'Missing'}</span>
                 <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
               </div>
+
+              <div class="usage-strip">
+                <span>Nearbytes {formatSize(status?.usage.totalBytes ?? 0)}</span>
+                <span>Files {formatSize(status?.usage.blockBytes ?? 0)}</span>
+                <span>History {formatSize(status?.usage.channelBytes ?? 0)}</span>
+              </div>
+
+              {#if (status?.usage.volumeUsages.length ?? 0) > 0}
+                <div class="usage-volume-list">
+                  {#each status?.usage.volumeUsages ?? [] as usage (usage.volumeId)}
+                    <div class="usage-volume-row">
+                      <div class="usage-volume-copy">
+                        <p class="usage-volume-name" title={usageVolumeLabel(usage.volumeId)}>{usageVolumeLabel(usage.volumeId)}</p>
+                        <p class="usage-volume-meta">{volumeShortLabel(usage.volumeId)}</p>
+                      </div>
+                      <div class="usage-volume-stats">
+                        {#if usage.fileBytes > 0}
+                          <span>{formatSize(usage.fileBytes)} files</span>
+                        {/if}
+                        {#if usage.historyBytes > 0}
+                          <span>{formatSize(usage.historyBytes)} history</span>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
 
               <div class="source-actions">
                 <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
@@ -966,6 +989,74 @@
           {/each}
         </div>
       </section>
+
+      <section class="panel-cluster">
+        <div class="cluster-head">
+          <div>
+            <p class="cluster-title">Default for newly opened volumes</p>
+            <p class="cluster-caption">Used only when a volume does not have its own saved keep rule yet.</p>
+          </div>
+          <span class="summary-badge" class:warning={!hasDurableDestination(null)}>
+            {volumeBadgeText(null)}
+          </span>
+        </div>
+
+        <div class="destination-grid">
+          {#each configDraft.sources as source (source.id)}
+            {@const destination = destinationFor(null, source.id)}
+            {@const status = sourceStatus(source.id)}
+            {@const modeValue = destinationMode(destination)}
+            <article class="destination-card" class:safe={protectionTone(destination, source.id) === 'durable'}>
+              <div class="destination-head">
+                <div>
+                  <p class="source-provider">{formatProvider(source.provider)}</p>
+                  <h3>{compactPath(source.path)}</h3>
+                  <p class="source-path">{source.path || 'Choose a folder'}</p>
+                </div>
+                <span class={`mini-badge tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
+              </div>
+
+              <div class="mode-grid" role="group" aria-label={`Default storage mode for ${compactPath(source.path)}`}>
+                {#each DESTINATION_MODES as option (option.value)}
+                  <button
+                    type="button"
+                    class="mode-btn"
+                    class:selected={modeValue === option.value}
+                    onclick={() => setDestinationMode(null, source.id, option.value)}
+                  >
+                    <span class="mode-label">{option.label}</span>
+                    <span class="mode-caption">{option.caption}</span>
+                  </button>
+                {/each}
+              </div>
+
+              <div class="field-grid two-up compact-fields">
+                <label class="field-block compact-field">
+                  <span>Keep free</span>
+                  <select class="panel-input" value={String(destination?.reservePercent ?? 10)} onchange={(event) => updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
+                    {#each RESERVE_OPTIONS as option}
+                      <option value={option}>{formatPercent(option)}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label class="field-block compact-field">
+                  <span>If space still runs out</span>
+                  <select class="panel-input" value={destination?.fullPolicy ?? 'block-writes'} onchange={(event) => updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}>
+                    <option value="block-writes">Stop here</option>
+                    <option value="drop-older-blocks">Reuse non-guaranteed copies</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="source-facts">
+                <span>{source.enabled ? 'Source on' : 'Source off'}</span>
+                <span>{source.writable ? 'Can write' : 'Read only'}</span>
+                <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
+              </div>
+            </article>
+          {/each}
+        </div>
+      </section>
     {:else}
       <div class="panel-head">
         <div>
@@ -998,15 +1089,12 @@
             type="button"
             class="volume-card"
             class:active={selectedPolicyVolumeId === card.volumeId}
-            class:default-card={card.isDefault}
             onclick={() => {
               selectedPolicyVolumeId = card.volumeId;
             }}
           >
             <div class="volume-card-mark" class:safe={card.safe}>
-              {#if card.isDefault}
-                <Sparkles size={18} strokeWidth={2} />
-              {:else if card.isCurrent && card.usesFile}
+              {#if card.isCurrent && card.usesFile}
                 <FileImage size={18} strokeWidth={2} />
               {:else}
                 <Shield size={18} strokeWidth={2} />
@@ -1027,87 +1115,89 @@
         <p class="storage-message">Open a volume once and its public key will stay here, even after you close it.</p>
       {/if}
 
-      <section class="detail-shell">
-        <div class="detail-head">
-          <div>
-            <p class="cluster-title">{selectedPolicyTitle()}</p>
-            <p class="cluster-caption">{selectedPolicyMeta()}</p>
+      {#if selectedPolicyVolumeId !== null}
+        <section class="detail-shell">
+          <div class="detail-head">
+            <div>
+              <p class="cluster-title">{selectedPolicyTitle()}</p>
+              <p class="cluster-caption">{selectedPolicyMeta()}</p>
+            </div>
+            <div class="detail-head-actions">
+              <span class="summary-badge" class:warning={!hasDurableDestination(selectedPolicyVolumeId)}>
+                {volumeBadgeText(selectedPolicyVolumeId)}
+              </span>
+              {#if explicitVolumePolicy(selectedPolicyVolumeId)}
+                <ArmedActionButton
+                  class="panel-btn subtle compact danger"
+                  icon={Trash2}
+                  text="Forget"
+                  armed={true}
+                  autoDisarmMs={3000}
+                  onPress={() => removeVolumePolicy(selectedPolicyVolumeId)}
+                />
+              {/if}
+            </div>
           </div>
-          <div class="detail-head-actions">
-            <span class="summary-badge" class:warning={!hasDurableDestination(selectedPolicyVolumeId)}>
-              {volumeBadgeText(selectedPolicyVolumeId)}
-            </span>
-            {#if selectedPolicyVolumeId !== null && explicitVolumePolicy(selectedPolicyVolumeId)}
-              <ArmedActionButton
-                class="panel-btn subtle compact danger"
-                icon={Trash2}
-                text="Forget"
-                armed={true}
-                autoDisarmMs={3000}
-                onPress={() => removeVolumePolicy(selectedPolicyVolumeId)}
-              />
-            {/if}
-          </div>
-        </div>
 
-        <p class="detail-note">Pick at least one location marked <strong>Guaranteed</strong> if this volume must never be discarded.</p>
+          <p class="detail-note">Pick at least one location marked <strong>Guaranteed</strong> if this volume must never be discarded.</p>
 
-        <div class="destination-grid">
-          {#each configDraft.sources as source (source.id)}
-            {@const destination = destinationFor(selectedPolicyVolumeId, source.id)}
-            {@const status = sourceStatus(source.id)}
-            {@const modeValue = destinationMode(destination)}
-            <article class="destination-card" class:safe={protectionTone(destination, source.id) === 'durable'}>
-              <div class="destination-head">
-                <div>
-                  <p class="source-provider">{formatProvider(source.provider)}</p>
-                  <h3>{compactPath(source.path)}</h3>
-                  <p class="source-path">{source.path || 'Choose a folder'}</p>
+          <div class="destination-grid">
+            {#each configDraft.sources as source (source.id)}
+              {@const destination = destinationFor(selectedPolicyVolumeId, source.id)}
+              {@const status = sourceStatus(source.id)}
+              {@const modeValue = destinationMode(destination)}
+              <article class="destination-card" class:safe={protectionTone(destination, source.id) === 'durable'}>
+                <div class="destination-head">
+                  <div>
+                    <p class="source-provider">{formatProvider(source.provider)}</p>
+                    <h3>{compactPath(source.path)}</h3>
+                    <p class="source-path">{source.path || 'Choose a folder'}</p>
+                  </div>
+                  <span class={`mini-badge tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
                 </div>
-                <span class={`mini-badge tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
-              </div>
 
-              <div class="mode-grid" role="group" aria-label={`Storage mode for ${compactPath(source.path)}`}>
-                {#each DESTINATION_MODES as option (option.value)}
-                  <button
-                    type="button"
-                    class="mode-btn"
-                    class:selected={modeValue === option.value}
-                    onclick={() => setDestinationMode(selectedPolicyVolumeId, source.id, option.value)}
-                  >
-                    <span class="mode-label">{option.label}</span>
-                    <span class="mode-caption">{option.caption}</span>
-                  </button>
-                {/each}
-              </div>
+                <div class="mode-grid" role="group" aria-label={`Storage mode for ${compactPath(source.path)}`}>
+                  {#each DESTINATION_MODES as option (option.value)}
+                    <button
+                      type="button"
+                      class="mode-btn"
+                      class:selected={modeValue === option.value}
+                      onclick={() => setDestinationMode(selectedPolicyVolumeId, source.id, option.value)}
+                    >
+                      <span class="mode-label">{option.label}</span>
+                      <span class="mode-caption">{option.caption}</span>
+                    </button>
+                  {/each}
+                </div>
 
-              <div class="field-grid two-up compact-fields">
-                <label class="field-block compact-field">
-                  <span>Keep free</span>
-                  <select class="panel-input" value={String(destination?.reservePercent ?? 10)} onchange={(event) => updateDestinationField(selectedPolicyVolumeId, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
-                    {#each RESERVE_OPTIONS as option}
-                      <option value={option}>{formatPercent(option)}</option>
-                    {/each}
-                  </select>
-                </label>
-                <label class="field-block compact-field">
-                  <span>When full</span>
-                  <select class="panel-input" value={destination?.fullPolicy ?? 'block-writes'} onchange={(event) => updateDestinationField(selectedPolicyVolumeId, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}>
-                    <option value="block-writes">Pause new files</option>
-                    <option value="drop-older-blocks">Trim spare data</option>
-                  </select>
-                </label>
-              </div>
+                <div class="field-grid two-up compact-fields">
+                  <label class="field-block compact-field">
+                    <span>Keep free</span>
+                    <select class="panel-input" value={String(destination?.reservePercent ?? 10)} onchange={(event) => updateDestinationField(selectedPolicyVolumeId, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
+                      {#each RESERVE_OPTIONS as option}
+                        <option value={option}>{formatPercent(option)}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label class="field-block compact-field">
+                    <span>If space still runs out</span>
+                    <select class="panel-input" value={destination?.fullPolicy ?? 'block-writes'} onchange={(event) => updateDestinationField(selectedPolicyVolumeId, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}>
+                      <option value="block-writes">Stop here</option>
+                      <option value="drop-older-blocks">Reuse non-guaranteed copies</option>
+                    </select>
+                  </label>
+                </div>
 
-              <div class="source-facts">
-                <span>{source.enabled ? 'Source on' : 'Source off'}</span>
-                <span>{source.writable ? 'Can write' : 'Read only'}</span>
-                <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
-              </div>
-            </article>
-          {/each}
-        </div>
-      </section>
+                <div class="source-facts">
+                  <span>{source.enabled ? 'Source on' : 'Source off'}</span>
+                  <span>{source.writable ? 'Can write' : 'Read only'}</span>
+                  <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
+                </div>
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/if}
     {/if}
   </section>
 {/if}
@@ -1504,6 +1594,62 @@
     font-size: 0.76rem;
     color: rgba(186, 230, 253, 0.72);
     justify-content: space-between;
+  }
+
+  .usage-strip,
+  .usage-volume-stats {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+  }
+
+  .usage-strip {
+    font-size: 0.74rem;
+    color: rgba(191, 219, 254, 0.78);
+  }
+
+  .usage-volume-list {
+    display: grid;
+    gap: 0.4rem;
+    padding-top: 0.1rem;
+  }
+
+  .usage-volume-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.7rem;
+    padding: 0.56rem 0.68rem;
+    border-radius: 12px;
+    border: 1px solid rgba(56, 189, 248, 0.1);
+    background: rgba(9, 18, 33, 0.48);
+  }
+
+  .usage-volume-copy {
+    min-width: 0;
+    display: grid;
+    gap: 0.1rem;
+  }
+
+  .usage-volume-name,
+  .usage-volume-meta {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .usage-volume-name {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: rgba(240, 249, 255, 0.94);
+  }
+
+  .usage-volume-meta,
+  .usage-volume-stats {
+    font-size: 0.72rem;
+    color: rgba(186, 230, 253, 0.68);
   }
 
   .merge-box {

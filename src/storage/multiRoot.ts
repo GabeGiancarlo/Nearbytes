@@ -40,7 +40,25 @@ export interface RootRuntimeStatus {
   readonly isDirectory: boolean;
   readonly canWrite: boolean;
   readonly availableBytes?: number;
+  readonly usage: SourceUsageSummary;
   readonly lastWriteFailure?: RootWriteFailure;
+}
+
+export interface SourceVolumeUsage {
+  readonly volumeId: string;
+  readonly historyBytes: number;
+  readonly historyFileCount: number;
+  readonly fileBytes: number;
+  readonly fileCount: number;
+}
+
+export interface SourceUsageSummary {
+  readonly totalBytes: number;
+  readonly channelBytes: number;
+  readonly blockBytes: number;
+  readonly otherBytes: number;
+  readonly blockCount: number;
+  readonly volumeUsages: SourceVolumeUsage[];
 }
 
 export interface MultiRootRuntimeSnapshot {
@@ -137,7 +155,10 @@ export class MultiRootStorageBackend implements StorageBackend {
   }
 
   async getRuntimeSnapshot(): Promise<MultiRootRuntimeSnapshot> {
-    const statuses = await Promise.all(this.rootStates.map((state) => this.getRootRuntimeStatus(state)));
+    const referencedByVolume = await this.getReferencedBlockHashIndex();
+    const statuses = await Promise.all(
+      this.rootStates.map((state) => this.getRootRuntimeStatus(state, referencedByVolume))
+    );
     const writeFailures = Array.from(this.lastWriteFailures.values()).sort((left, right) => right.at - left.at);
     return {
       sources: statuses,
@@ -640,8 +661,18 @@ export class MultiRootStorageBackend implements StorageBackend {
       return;
     }
 
+    await this.pruneSourceBlocks(target.state.config.id, reservedBytes + bytesToWrite, channelKeyHex, {
+      preserveReplicaBlocks: true,
+    });
+    const afterSpareCleanupBytes = await getAvailableBytes(target.state.config.path);
+    if (afterSpareCleanupBytes !== undefined && afterSpareCleanupBytes - bytesToWrite >= reservedBytes) {
+      return;
+    }
+
     if (target.policy.fullPolicy === 'drop-older-blocks') {
-      await this.pruneSourceBlocks(target.state.config.id, reservedBytes + bytesToWrite, channelKeyHex);
+      await this.pruneSourceBlocks(target.state.config.id, reservedBytes + bytesToWrite, channelKeyHex, {
+        preserveReplicaBlocks: false,
+      });
       const nextAvailableBytes = await getAvailableBytes(target.state.config.path);
       if (nextAvailableBytes !== undefined && nextAvailableBytes - bytesToWrite >= reservedBytes) {
         return;
@@ -696,7 +727,8 @@ export class MultiRootStorageBackend implements StorageBackend {
   private async pruneSourceBlocks(
     sourceId: string,
     requiredFreeBytes: number,
-    currentVolumeId?: string
+    currentVolumeId?: string,
+    options: { preserveReplicaBlocks: boolean } = { preserveReplicaBlocks: false }
   ): Promise<void> {
     const state = this.getRootStateById(sourceId);
     if (!state) {
@@ -714,7 +746,11 @@ export class MultiRootStorageBackend implements StorageBackend {
         continue;
       }
       const hash = entry.name.slice(0, -4).toLowerCase();
-      if (!/^[a-f0-9]{64}$/i.test(hash) || durableBlocks.has(hash)) {
+      if (
+        !/^[a-f0-9]{64}$/i.test(hash) ||
+        durableBlocks.has(hash) ||
+        (options.preserveReplicaBlocks && replicaBlocks.has(hash))
+      ) {
         continue;
       }
 
@@ -833,6 +869,100 @@ export class MultiRootStorageBackend implements StorageBackend {
     return hashes;
   }
 
+  private async getReferencedBlockHashIndex(): Promise<Map<string, Set<string>>> {
+    const index = new Map<string, Set<string>>();
+    const volumeIds = await this.listTrackedVolumeIds();
+    for (const volumeId of volumeIds) {
+      index.set(volumeId, await this.collectReferencedBlockHashes(volumeId));
+    }
+    return index;
+  }
+
+  private async collectSourceUsageSummary(
+    state: RootState,
+    referencedByVolume: ReadonlyMap<string, Set<string>>
+  ): Promise<SourceUsageSummary> {
+    const files = await listRootFiles(state.config.path);
+    let totalBytes = 0;
+    let channelBytes = 0;
+    let blockBytes = 0;
+    let otherBytes = 0;
+    let blockCount = 0;
+    const blockSizes = new Map<string, number>();
+    const historyByVolume = new Map<string, { bytes: number; files: number }>();
+
+    for (const file of files) {
+      if (file.relativePath === '.nearbytes') {
+        continue;
+      }
+      totalBytes += file.size;
+
+      const normalized = normalizeRelativePath(file.relativePath);
+      const blockMatch = BLOCK_PATH_REGEX.exec(normalized);
+      if (blockMatch) {
+        const hash = blockMatch[1].toLowerCase();
+        blockBytes += file.size;
+        blockCount += 1;
+        blockSizes.set(hash, file.size);
+        continue;
+      }
+
+      if (normalized.startsWith('channels/')) {
+        channelBytes += file.size;
+        const parts = normalized.split('/');
+        const volumeId = parts[1]?.trim().toLowerCase();
+        if (volumeId && /^[a-f0-9]{64,200}$/i.test(volumeId)) {
+          const current = historyByVolume.get(volumeId) ?? { bytes: 0, files: 0 };
+          current.bytes += file.size;
+          current.files += 1;
+          historyByVolume.set(volumeId, current);
+        }
+        continue;
+      }
+
+      otherBytes += file.size;
+    }
+
+    const volumeIds = new Set<string>([...historyByVolume.keys(), ...referencedByVolume.keys()]);
+    const volumeUsages: SourceVolumeUsage[] = [];
+
+    for (const volumeId of Array.from(volumeIds).sort()) {
+      const history = historyByVolume.get(volumeId) ?? { bytes: 0, files: 0 };
+      let fileBytes = 0;
+      let fileCount = 0;
+
+      for (const hash of referencedByVolume.get(volumeId) ?? []) {
+        const size = blockSizes.get(hash);
+        if (size === undefined) {
+          continue;
+        }
+        fileBytes += size;
+        fileCount += 1;
+      }
+
+      if (history.bytes === 0 && fileBytes === 0) {
+        continue;
+      }
+
+      volumeUsages.push({
+        volumeId,
+        historyBytes: history.bytes,
+        historyFileCount: history.files,
+        fileBytes,
+        fileCount,
+      });
+    }
+
+    return {
+      totalBytes,
+      channelBytes,
+      blockBytes,
+      otherBytes,
+      blockCount,
+      volumeUsages,
+    };
+  }
+
   private getRootStateById(rootId: string): RootState | undefined {
     return this.rootStates.find((state) => state.config.id === rootId);
   }
@@ -883,13 +1013,24 @@ export class MultiRootStorageBackend implements StorageBackend {
     };
   }
 
-  private async getRootRuntimeStatus(state: RootState): Promise<RootRuntimeStatus> {
+  private async getRootRuntimeStatus(
+    state: RootState,
+    referencedByVolume: ReadonlyMap<string, Set<string>>
+  ): Promise<RootRuntimeStatus> {
     const lastWriteFailure = this.lastWriteFailures.get(state.config.id);
 
     let exists = false;
     let isDirectory = false;
     let canWrite = false;
     let availableBytes: number | undefined;
+    let usage: SourceUsageSummary = {
+      totalBytes: 0,
+      channelBytes: 0,
+      blockBytes: 0,
+      otherBytes: 0,
+      blockCount: 0,
+      volumeUsages: [],
+    };
 
     try {
       const stats = await fs.stat(state.config.path);
@@ -916,6 +1057,8 @@ export class MultiRootStorageBackend implements StorageBackend {
       } catch {
         // Leave undefined when statfs is unavailable.
       }
+
+      usage = await this.collectSourceUsageSummary(state, referencedByVolume);
     }
 
     return {
@@ -931,6 +1074,7 @@ export class MultiRootStorageBackend implements StorageBackend {
       isDirectory,
       canWrite,
       availableBytes,
+      usage,
       lastWriteFailure,
     };
   }
