@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import {
     openVolume,
     listFiles,
@@ -56,10 +56,17 @@
     bytesBase64: string;
   };
 
+  type PersistedUiState = {
+    volumeMounts?: unknown;
+    dismissedRootSuggestions?: unknown;
+  };
+
   type NearbytesDesktopBridge = {
     fetchRemoteFile?: (url: string) => Promise<DesktopRemoteFile>;
     getClipboardImageStatus?: () => Promise<{ hasImage: boolean }>;
     readClipboardImage?: () => Promise<DesktopRemoteFile | null>;
+    loadUiState?: () => Promise<PersistedUiState>;
+    saveUiState?: (state: PersistedUiState) => Promise<unknown>;
   };
 
   type SecretFileHashEntry = {
@@ -594,8 +601,12 @@
   }
 
   function loadDismissedRootSuggestions(): string[] {
+    return normalizeDismissedRootSuggestions(localStorage.getItem(ROOT_SUGGESTIONS_DISMISSED_KEY));
+  }
+
+  function normalizeDismissedRootSuggestions(input: unknown): string[] {
     try {
-      const raw = localStorage.getItem(ROOT_SUGGESTIONS_DISMISSED_KEY);
+      const raw = typeof input === 'string' ? input : JSON.stringify(input);
       if (!raw) return [];
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
@@ -654,6 +665,7 @@
   let secretFileHashes = $state<Record<string, SecretFileHashEntry>>({});
   let clipboardImageAvailable = $state(false);
   let clipboardImageLoading = $state(false);
+  let persistedUiStateReady = $state(false);
   let isHeaderHovering = $state(false);
   let isSecretDropTarget = $state(false);
   let timelinePlayTimer: ReturnType<typeof setInterval> | null = null;
@@ -702,9 +714,44 @@
     writable: boolean;
   };
 
+  function preferredActiveMountId(nextMounts: VolumeMount[]): string {
+    return nextMounts.find((mount) => !mount.collapsed)?.id ?? nextMounts[0]?.id ?? '';
+  }
+
   const dismissedRootSuggestionSet = $derived.by(
     () => new Set(dismissedRootSuggestions.map((value) => normalizeComparablePath(value)))
   );
+
+  onMount(() => {
+    const bridge = getDesktopBridge();
+    if (!bridge || typeof bridge.loadUiState !== 'function') {
+      persistedUiStateReady = true;
+      return;
+    }
+
+    void (async () => {
+      try {
+        const nextState = await bridge.loadUiState();
+        const hasPersistedMounts = Object.prototype.hasOwnProperty.call(nextState ?? {}, 'volumeMounts');
+        const hasPersistedDismissedSuggestions = Object.prototype.hasOwnProperty.call(
+          nextState ?? {},
+          'dismissedRootSuggestions'
+        );
+        const nextMounts = normalizeMounts(nextState?.volumeMounts);
+        if (hasPersistedMounts) {
+          mounts = nextMounts.length > 0 ? nextMounts : [createMount()];
+          activeMountId = preferredActiveMountId(mounts);
+        }
+        if (hasPersistedDismissedSuggestions) {
+          dismissedRootSuggestions = normalizeDismissedRootSuggestions(nextState?.dismissedRootSuggestions);
+        }
+      } catch (error) {
+        console.warn('Failed to hydrate desktop UI state:', error);
+      } finally {
+        persistedUiStateReady = true;
+      }
+    })();
+  });
 
   $effect(() => {
     const expandedMount = mounts.find((mount) => mount.id === activeMountId && !mount.collapsed);
@@ -872,11 +919,29 @@
   });
 
   $effect(() => {
-    persistVolumeMounts(mounts);
-  });
+    if (!persistedUiStateReady) {
+      return;
+    }
 
-  $effect(() => {
-    persistDismissedRootSuggestions(dismissedRootSuggestions);
+    const payload: PersistedUiState = {
+      volumeMounts: mounts,
+      dismissedRootSuggestions,
+    };
+    const bridge = getDesktopBridge();
+    const persistTimer = setTimeout(() => {
+      if (bridge && typeof bridge.saveUiState === 'function') {
+        void bridge.saveUiState(payload).catch((error) => {
+          console.warn('Failed to persist desktop UI state:', error);
+        });
+        return;
+      }
+      persistVolumeMounts(mounts);
+      persistDismissedRootSuggestions(dismissedRootSuggestions);
+    }, 120);
+
+    return () => {
+      clearTimeout(persistTimer);
+    };
   });
 
   const isHistoryMode = $derived.by(() => timelinePosition < timelineEvents.length);

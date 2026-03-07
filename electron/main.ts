@@ -4,6 +4,7 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 import { clearPublishedDesktopSession, publishDesktopSession } from './session.js';
 import { generateDesktopApiToken } from './security.js';
+import { readDesktopUiState, writeDesktopUiState } from './uiState.js';
 import { setupAutoUpdater } from './updater.js';
 
 interface RuntimeHandle {
@@ -152,6 +153,16 @@ function registerIpc(): void {
       mimeType: 'image/png',
       bytesBase64: bytes.toString('base64'),
     };
+  });
+  ipcMain.handle('nearbytes-desktop:load-ui-state', async () => {
+    return readDesktopUiState();
+  });
+  ipcMain.handle('nearbytes-desktop:save-ui-state', async (_event, rawState: unknown) => {
+    if (!rawState || typeof rawState !== 'object' || Array.isArray(rawState)) {
+      throw new Error('Desktop UI state must be an object.');
+    }
+    await writeDesktopUiState(rawState as { volumeMounts?: unknown; dismissedRootSuggestions?: unknown });
+    return true;
   });
 }
 

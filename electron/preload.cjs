@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('nearbytesDesktop', {
   fetchRemoteFile: (url) => ipcRenderer.invoke('nearbytes-desktop:fetch-remote-file', url),
   getClipboardImageStatus: () => ipcRenderer.invoke('nearbytes-desktop:get-clipboard-image-status'),
   readClipboardImage: () => ipcRenderer.invoke('nearbytes-desktop:read-clipboard-image'),
+  loadUiState: () => ipcRenderer.invoke('nearbytes-desktop:load-ui-state'),
+  saveUiState: (state) => ipcRenderer.invoke('nearbytes-desktop:save-ui-state', state),
   getApiBaseUrl: async () => {
     const config = await ipcRenderer.invoke('nearbytes-desktop:get-runtime-config');
     return config.apiBaseUrl ?? '';
