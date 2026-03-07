@@ -711,14 +711,6 @@
     showPinMenu = false;
   }
 
-  function handlePinButtonAction() {
-    if (matchedPinned) {
-      removePinnedVolume(matchedPinned.id);
-      return;
-    }
-    togglePinMenu();
-  }
-
   function usePinnedVolume(pin: PinnedVolume) {
     const sameSelection = address.trim() === pin.address && addressPassword.trim() === pin.password;
     address = pin.address;
@@ -1674,7 +1666,13 @@
 }} onpointerdown={(e) => {
   if (!(e.target instanceof Element)) return;
   if (!showPinMenu) return;
-  if (e.target.closest('.pin-menu') || e.target.closest('.pin-btn')) return;
+  if (
+    e.target.closest('.pin-menu') ||
+    e.target.closest('.top-pin-btn') ||
+    e.target.closest('.top-unpin-btn')
+  ) {
+    return;
+  }
   showPinMenu = false;
 }} />
 
@@ -1701,112 +1699,128 @@
         topbarFocused = false;
       }}
     >
-      <div class="header-dock">
-        <div class="header-dock-main">
-          <p class="header-dock-name" title={activeVolumeLabel}>{activeVolumeLabel}</p>
+      <div class="volume-chip" class:expanded={showUtilityChrome}>
+        <div class="header-dock">
+          <div class="header-dock-main" class:editing={showUtilityChrome}>
+            {#if showUtilityChrome}
+              <div class="secret-input-wrapper in-dock">
+                <input
+                  type="text"
+                  placeholder="Enter address..."
+                  bind:value={address}
+                  class="secret-input"
+                  aria-label="Volume address"
+                />
+                <input
+                  type="password"
+                  placeholder="Password (optional)"
+                  bind:value={addressPassword}
+                  class="secret-input password-input"
+                  aria-label="Optional volume password"
+                  autocomplete="current-password"
+                />
+                {#if isLoading}
+                  <span class="loading-spinner"></span>
+                {/if}
+              </div>
+            {:else}
+              <p class="header-dock-name" title={activeVolumeLabel}>{activeVolumeLabel}</p>
+            {/if}
+          </div>
+          <div class="top-pin-cap" aria-label="Pin controls">
+            {#if matchedPinned}
+              {#if showUtilityChrome}
+                <ArmedActionButton
+                  class="top-unpin-btn"
+                  text="×"
+                  armed={true}
+                  armDelayMs={900}
+                  autoDisarmMs={3000}
+                  resetKey={matchedPinned.id}
+                  onPress={() => removePinnedVolume(matchedPinned.id)}
+                  ariaLabel="Forget pinned volume"
+                />
+              {/if}
+            {:else}
+              <button
+                type="button"
+                class="top-pin-btn"
+                aria-label="Pin volume"
+                aria-haspopup="menu"
+                aria-expanded={showPinMenu}
+                disabled={address.trim() === ''}
+                onclick={togglePinMenu}
+              >
+                ⌁
+              </button>
+            {/if}
+            {#if showPinMenu}
+              <div class="pin-menu pin-menu-dock" role="menu" aria-label="Pin volume duration">
+                <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('day')}>
+                  Pin for 1 day
+                </button>
+                <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('week')}>
+                  Pin for 1 week
+                </button>
+                <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('month')}>
+                  Pin for 1 month
+                </button>
+              </div>
+            {/if}
+          </div>
         </div>
-        {#if !showUtilityChrome && address.trim() !== ''}
-          <span class="topbar-hint">Hover to edit</span>
-        {/if}
-      </div>
 
-      <div class="header-controls utility-surface" class:surface-hidden={!showUtilityChrome}>
-        <div class="header-content">
-          <div class="secret-input-wrapper">
-        <input
-          type="text"
-          placeholder="Enter address..."
-          bind:value={address}
-          class="secret-input"
-          aria-label="Volume address"
-        />
-        <input
-          type="password"
-          placeholder="Password (optional)"
-          bind:value={addressPassword}
-          class="secret-input password-input"
-          aria-label="Optional volume password"
-          autocomplete="current-password"
-        />
-        <ArmedActionButton
-          class="pin-btn"
-          text={matchedPinned ? 'Forget' : 'Pin'}
-          armed={matchedPinned !== null}
-          armDelayMs={1000}
-          autoDisarmMs={3000}
-          resetKey={matchedPinned?.id ?? address.trim()}
-          disabled={address.trim() === ''}
-          ariaHasPopup={matchedPinned ? undefined : 'menu'}
-          ariaExpanded={matchedPinned ? undefined : showPinMenu}
-          onPress={handlePinButtonAction}
-        />
-        {#if isLoading}
-          <span class="loading-spinner"></span>
-        {/if}
-        {#if showPinMenu}
-          <div class="pin-menu" role="menu" aria-label="Pin volume duration">
-            <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('day')}>
-              Pin for 1 day
+        <div class="volume-chip-expanded" class:expanded={showUtilityChrome}>
+          <div class="header-dock-actions">
+            <button
+              type="button"
+              class="workspace-toggle"
+              class:active={showStatusPanel}
+              onclick={() => {
+                showStatusPanel = !showStatusPanel;
+              }}
+            >
+              Status
             </button>
-            <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('week')}>
-              Pin for 1 week
+            <button
+              type="button"
+              class="workspace-toggle"
+              class:active={showTimeMachinePanel}
+              onclick={() => {
+                showTimeMachinePanel = !showTimeMachinePanel;
+              }}
+            >
+              Time Machine
             </button>
-            <button type="button" class="pin-menu-item" role="menuitem" onclick={() => pinCurrentCombo('month')}>
-              Pin for 1 month
+            <button
+              type="button"
+              class="workspace-toggle"
+              class:active={showRootsPanel}
+              onclick={toggleRootsPanel}
+            >
+              Roots
             </button>
           </div>
-        {/if}
-          </div>
-        </div>
-        <div class="header-dock-actions">
-        <button
-          type="button"
-          class="workspace-toggle"
-          class:active={showStatusPanel}
-          onclick={() => {
-            showStatusPanel = !showStatusPanel;
-          }}
-        >
-          Status
-        </button>
-        <button
-          type="button"
-          class="workspace-toggle"
-          class:active={showTimeMachinePanel}
-          onclick={() => {
-            showTimeMachinePanel = !showTimeMachinePanel;
-          }}
-        >
-          Time Machine
-        </button>
-        <button
-          type="button"
-          class="workspace-toggle"
-          class:active={showRootsPanel}
-          onclick={toggleRootsPanel}
-        >
-          Roots
-        </button>
-        </div>
-        {#if activePins.length > 0}
-          <div class="pins-bar">
-            <div class="pins-content">
-              {#each activePins as pin (pin.id)}
-                <div class="pin-chip-wrap">
-                  <button
-                    type="button"
-                    class="pin-chip"
-                    class:active={matchedPinned?.id === pin.id}
-                    onclick={() => usePinnedVolume(pin)}
-                    title={"Open pinned volume " + pin.name}
-                  >
-                    {pin.name}
-                  </button>
-                </div>
-              {/each}
+          {#if activePins.length > 0}
+            <div class="pins-bar">
+              <div class="pins-content">
+                {#each activePins as pin (pin.id)}
+                  <div class="pin-chip-wrap">
+                    <button
+                      type="button"
+                      class="pin-chip"
+                      class:active={matchedPinned?.id === pin.id}
+                      onclick={() => usePinnedVolume(pin)}
+                      title={"Open pinned volume " + pin.name}
+                    >
+                      {pin.name}
+                    </button>
+                  </div>
+                {/each}
+              </div>
             </div>
-          </div>
-        {/if}
+          {/if}
+        </div>
       </div>
     </div>
   </header>
@@ -2474,28 +2488,71 @@
     display: flex;
     flex-direction: column;
     gap: 0.7rem;
+    align-items: flex-start;
+  }
+
+  .volume-chip {
+    border: 1px solid rgba(102, 126, 234, 0.35);
+    border-radius: 10px;
+    background: rgba(10, 10, 15, 0.35);
+    width: fit-content;
+    min-width: 132px;
+    max-width: min(72vw, 360px);
+    padding: 0.1rem;
+    transition: max-width 0.28s ease, border-radius 0.28s ease, background-color 0.28s ease, border-color 0.28s ease;
+    overflow: hidden;
+  }
+
+  .volume-chip.expanded {
+    max-width: min(96vw, 1600px);
+    border-radius: 12px;
+    background: rgba(12, 18, 32, 0.62);
+    border-color: rgba(125, 211, 252, 0.35);
   }
 
   .header-dock {
-    border: 1px solid rgba(96, 165, 250, 0.28);
-    border-radius: 14px;
-    background: rgba(6, 12, 24, 0.74);
-    padding: 0.55rem 0.8rem;
+    border: 0;
+    background: transparent;
+    padding: 0.3rem 0.35rem 0.3rem 0.62rem;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.85rem;
+    gap: 0.45rem;
+    min-height: 38px;
+    transition: padding 0.24s ease;
   }
 
   .header-dock-main {
     min-width: 0;
     display: flex;
     align-items: center;
+    flex: 1;
+  }
+
+  .header-dock-main.editing {
+    align-items: stretch;
+  }
+
+  .volume-chip-expanded {
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-6px);
+    pointer-events: none;
+    transition: max-height 0.28s ease, opacity 0.24s ease, transform 0.24s ease, padding 0.24s ease;
+    padding: 0 0.35rem;
+  }
+
+  .volume-chip-expanded.expanded {
+    max-height: 260px;
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+    padding: 0.5rem 0.35rem 0.35rem;
   }
 
   .header-dock-name {
     margin: 0;
-    font-size: 1rem;
+    font-size: 0.86rem;
     font-weight: 600;
     color: rgba(239, 246, 255, 0.95);
     max-width: min(52vw, 620px);
@@ -2504,11 +2561,39 @@
     white-space: nowrap;
   }
 
-  .topbar-hint {
-    font-size: 0.72rem;
-    color: rgba(186, 230, 253, 0.62);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+  .top-pin-cap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-left: 1px solid rgba(148, 163, 184, 0.35);
+    min-width: 28px;
+    min-height: 26px;
+    padding-left: 0.42rem;
+    margin-left: 0.22rem;
+  }
+
+  .top-pin-btn {
+    border: 0;
+    background: transparent;
+    color: rgba(219, 234, 254, 0.9);
+    font-size: 0.88rem;
+    line-height: 1;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  .top-pin-btn:hover:not(:disabled) {
+    background: rgba(59, 130, 246, 0.2);
+    color: #dbeafe;
+  }
+
+  .top-pin-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
 
   .header-dock-actions {
@@ -2541,26 +2626,6 @@
     color: #ccfbf1;
   }
 
-  .utility-surface {
-    transition: opacity 0.28s ease, transform 0.28s ease, max-height 0.32s ease, margin 0.32s ease, padding 0.32s ease;
-    opacity: 1;
-    transform: translateY(0);
-    max-height: 320px;
-    overflow: hidden;
-  }
-
-  .utility-surface.surface-hidden {
-    opacity: 0;
-    transform: translateY(-10px);
-    pointer-events: none;
-    max-height: 0;
-    margin-top: 0;
-    margin-bottom: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-    border-width: 0;
-  }
-
   .panel-surface {
     animation: panel-fade-in 240ms ease;
   }
@@ -2576,36 +2641,27 @@
     }
   }
 
-  .header-controls {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-
-  .header-content {
-    max-width: none;
-    margin: 0;
-    display: block;
-    width: 100%;
-  }
-
   .secret-input-wrapper {
     flex: 1;
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
     gap: 0.75rem;
     align-items: center;
     position: relative;
   }
 
+  .secret-input-wrapper.in-dock {
+    width: 100%;
+  }
+
   .secret-input {
     width: 100%;
-    padding: 0.875rem 1.25rem;
-    font-size: 1rem;
+    padding: 0.65rem 0.9rem;
+    font-size: 0.96rem;
     background: rgba(255, 255, 255, 0.05);
-    border: 2px solid rgba(102, 126, 234, 0.3);
-    border-radius: 12px;
+    border: 1px solid rgba(102, 126, 234, 0.34);
+    border-radius: 10px;
     color: #e0e0e0;
     outline: none;
     transition: all 0.2s ease;
@@ -2614,7 +2670,7 @@
   .secret-input:focus {
     border-color: #667eea;
     background: rgba(255, 255, 255, 0.08);
-    box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
   }
 
   .secret-input:disabled {
@@ -2640,34 +2696,22 @@
     to { transform: rotate(360deg); }
   }
 
-  :global(.pin-btn) {
-    border: 1px solid rgba(102, 126, 234, 0.35);
-    background: rgba(10, 10, 15, 0.35);
-    color: #d9e2ff;
-    border-radius: 10px;
-    padding: 0.75rem 0.95rem;
-    font-size: 0.875rem;
-    cursor: pointer;
-    transition: background-color 0.2s ease;
-  }
-
-  :global(.pin-btn:hover:not(:disabled)) {
-    background: rgba(102, 126, 234, 0.2);
-  }
-
-  :global(.pin-btn.armed) {
-    border-color: rgba(248, 113, 113, 0.65);
-    background: rgba(248, 113, 113, 0.18);
+  :global(.top-unpin-btn) {
+    border: 1px solid rgba(248, 113, 113, 0.55);
+    background: rgba(127, 29, 29, 0.28);
     color: #fecaca;
+    border-radius: 6px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    cursor: pointer;
+    font-size: 0.84rem;
+    line-height: 1;
   }
 
-  :global(.pin-btn.armed:hover:not(:disabled)) {
-    background: rgba(248, 113, 113, 0.28);
-  }
-
-  :global(.pin-btn:disabled) {
-    opacity: 0.45;
-    cursor: not-allowed;
+  :global(.top-unpin-btn.armed) {
+    border-color: rgba(239, 68, 68, 0.8);
+    background: rgba(220, 38, 38, 0.45);
   }
 
   .pin-menu {
@@ -2684,6 +2728,11 @@
     gap: 0.25rem;
     z-index: 150;
     backdrop-filter: blur(8px);
+  }
+
+  .pin-menu-dock {
+    right: -0.25rem;
+    top: calc(100% + 0.35rem);
   }
 
   .pin-menu-item {
@@ -3770,9 +3819,7 @@
     }
 
     .header-dock {
-      padding: 0.5rem 0.65rem;
-      align-items: flex-start;
-      flex-direction: column;
+      padding: 0.3rem 0.32rem 0.3rem 0.55rem;
     }
 
     .header-dock-actions {
@@ -3780,12 +3827,8 @@
       justify-content: flex-start;
     }
 
-    .header-content {
-      width: 100%;
-    }
-
     .secret-input-wrapper {
-      grid-template-columns: 1fr 1fr auto auto;
+      grid-template-columns: 1fr 1fr auto;
     }
 
     .pins-bar {
@@ -3845,7 +3888,7 @@
       grid-template-areas:
         'address address address'
         'password password password'
-        'pin pin spinner';
+        'spinner spinner spinner';
     }
 
     .secret-input-wrapper > input:first-child {
@@ -3854,11 +3897,6 @@
 
     .secret-input-wrapper > input:nth-child(2) {
       grid-area: password;
-    }
-
-    :global(.pin-btn) {
-      grid-area: pin;
-      width: fit-content;
     }
 
     .loading-spinner {
