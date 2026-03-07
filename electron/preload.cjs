@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('nearbytesDesktop', {
   getRuntimeConfig: () => ipcRenderer.invoke('nearbytes-desktop:get-runtime-config'),
+  fetchRemoteFile: (url) => ipcRenderer.invoke('nearbytes-desktop:fetch-remote-file', url),
   getApiBaseUrl: async () => {
     const config = await ipcRenderer.invoke('nearbytes-desktop:get-runtime-config');
     return config.apiBaseUrl ?? '';

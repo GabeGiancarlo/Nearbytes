@@ -114,6 +114,27 @@ function registerIpc(): void {
     }
     return state.config;
   });
+  ipcMain.handle('nearbytes-desktop:fetch-remote-file', async (_event, rawUrl: unknown) => {
+    if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
+      throw new Error('Remote URL is required.');
+    }
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error('Only http(s) remote URLs are supported.');
+    }
+
+    const response = await fetch(url, { redirect: 'follow' });
+    if (!response.ok) {
+      throw new Error(`Remote download failed (${response.status})`);
+    }
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    return {
+      filename: filenameFromRemoteResponse(url, response.headers.get('content-disposition')),
+      mimeType: response.headers.get('content-type') ?? 'application/octet-stream',
+      bytesBase64: bytes.toString('base64'),
+    };
+  });
 }
 
 async function createWindow(apiBaseUrl: string): Promise<void> {
@@ -221,6 +242,26 @@ function resolvePreloadPath(): string | undefined {
     path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'preload.cjs'),
     path.join(process.cwd(), 'electron', 'preload.cjs'),
   ]);
+}
+
+function filenameFromRemoteResponse(url: URL, contentDisposition: string | null): string {
+  const headerMatch = contentDisposition
+    ? /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(contentDisposition)
+    : null;
+  const rawFilename = headerMatch?.[1] ?? headerMatch?.[2] ?? '';
+  if (rawFilename.trim().length > 0) {
+    return decodeURIComponentSafe(rawFilename.trim());
+  }
+  const pathname = url.pathname.split('/').filter(Boolean).at(-1) ?? 'dropped-file';
+  return decodeURIComponentSafe(pathname);
+}
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     openVolume,
     listFiles,
@@ -48,6 +49,22 @@
   const FILE_SECRET_PREFIX = 'nb-file-secret:v1:';
 
   type PreviewKind = 'none' | 'image' | 'text' | 'pdf' | 'video' | 'audio' | 'unsupported';
+  type DesktopRemoteFile = {
+    filename: string;
+    mimeType: string;
+    bytesBase64: string;
+  };
+
+  type NearbytesDesktopBridge = {
+    fetchRemoteFile?: (url: string) => Promise<DesktopRemoteFile>;
+  };
+
+  type SecretFileHashEntry = {
+    payload: string;
+    hash: string;
+    pending: boolean;
+  };
+
   type VolumeMount = {
     id: string;
     address: string;
@@ -180,8 +197,345 @@
     return `data:${mimeType};base64,${base64UrlToBase64(encoded)}`;
   }
 
+  function secretFileBytesFromPayload(payload: string): Uint8Array | null {
+    const trimmed = trimSecretPart(payload);
+    if (!trimmed.startsWith(FILE_SECRET_PREFIX)) return null;
+    const encoded = trimmed.slice(FILE_SECRET_PREFIX.length);
+    if (encoded === '') return null;
+    return base64ToBytes(base64UrlToBase64(encoded));
+  }
+
+  function secretFileBytes(mount: VolumeMount): Uint8Array | null {
+    return secretFileBytesFromPayload(mount.secretFilePayload);
+  }
+
+  function secretFileHashForMount(mount: VolumeMount): SecretFileHashEntry | null {
+    const payload = trimSecretPart(mount.secretFilePayload);
+    const entry = secretFileHashes[mount.id];
+    if (!entry || entry.payload !== payload) {
+      return null;
+    }
+    return entry;
+  }
+
+  async function computeSecretFileHash(mountId: string, payload: string): Promise<void> {
+    const bytes = secretFileBytesFromPayload(payload);
+    if (!bytes) return;
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const hash = Array.from(new Uint8Array(digest))
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
+
+    const currentMount = mounts.find((mount) => mount.id === mountId);
+    if (!currentMount || trimSecretPart(currentMount.secretFilePayload) !== payload) {
+      return;
+    }
+
+    secretFileHashes = {
+      ...secretFileHashes,
+      [mountId]: {
+        payload,
+        hash,
+        pending: false,
+      },
+    };
+  }
+
+  function downloadSecretFile(mount: VolumeMount) {
+    const bytes = secretFileBytes(mount);
+    if (!bytes) return;
+    const blob = new Blob([bytes], {
+      type: trimSecretPart(mount.secretFileMimeType) || 'application/octet-stream',
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = mount.secretFileName || mount.address || 'secret-file';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  }
+
   function hasImageSecretPreview(mount: VolumeMount): boolean {
     return hasFileSecret(mount) && trimSecretPart(mount.secretFileMimeType).startsWith('image/');
+  }
+
+  $effect(() => {
+    for (const mount of mounts) {
+      if (!hasFileSecret(mount)) continue;
+      const payload = trimSecretPart(mount.secretFilePayload);
+      const current = secretFileHashes[mount.id];
+      if (current && current.payload === payload) continue;
+      secretFileHashes = {
+        ...secretFileHashes,
+        [mount.id]: {
+          payload,
+          hash: '',
+          pending: true,
+        },
+      };
+      void computeSecretFileHash(mount.id, payload);
+    }
+  });
+
+  function transferTypes(dataTransfer: DataTransfer | null | undefined): string[] {
+    if (!dataTransfer) return [];
+    return Array.from(dataTransfer.types ?? []);
+  }
+
+  function canHandleDropPayload(dataTransfer: DataTransfer | null | undefined): boolean {
+    const types = transferTypes(dataTransfer);
+    if (types.includes('Files') || types.includes('DownloadURL')) {
+      return true;
+    }
+    return types.some((type) =>
+      type === 'text/uri-list' ||
+      type === 'text/html' ||
+      type === 'text/plain' ||
+      type === 'public.url' ||
+      type === 'public.url-name' ||
+      type === 'UniformResourceLocator'
+    );
+  }
+
+  function decodeUriComponentSafe(value: string): string {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+
+  function extensionFromMimeType(mimeType: string): string {
+    const normalized = trimSecretPart(mimeType).toLowerCase();
+    if (normalized === 'image/jpeg') return '.jpg';
+    if (normalized === 'image/png') return '.png';
+    if (normalized === 'image/webp') return '.webp';
+    if (normalized === 'image/gif') return '.gif';
+    if (normalized === 'image/svg+xml') return '.svg';
+    if (normalized === 'image/bmp') return '.bmp';
+    if (normalized === 'image/heic') return '.heic';
+    if (normalized === 'application/pdf') return '.pdf';
+    if (normalized === 'text/plain') return '.txt';
+    return '';
+  }
+
+  function sanitizeDroppedFilename(value: string, fallback = 'dropped-file'): string {
+    const trimmed = trimSecretPart(value);
+    const normalized = trimmed.replace(/[\\]/g, '/');
+    const lastSegment = normalized.split('/').filter(Boolean).at(-1) ?? normalized;
+    const clean = decodeUriComponentSafe(lastSegment.split('?')[0]?.split('#')[0] ?? '').trim();
+    const safe = clean.replace(/[:*?"<>|]/g, '_');
+    return safe === '' ? fallback : safe;
+  }
+
+  function filenameFromUrl(url: string, fallback = 'dropped-file'): string {
+    try {
+      const parsed = new URL(url);
+      return sanitizeDroppedFilename(parsed.pathname, fallback);
+    } catch {
+      return sanitizeDroppedFilename(url, fallback);
+    }
+  }
+
+  function isHttpUrl(value: string): boolean {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  function extractUrlFromHtml(html: string): string | null {
+    const trimmed = html.trim();
+    if (trimmed === '') return null;
+    try {
+      const doc = new DOMParser().parseFromString(trimmed, 'text/html');
+      const media = doc.querySelector('img[src], source[src], video[src], audio[src]');
+      if (media instanceof HTMLElement) {
+        const src = media.getAttribute('src');
+        if (src && isHttpUrl(src)) {
+          return src;
+        }
+      }
+      const anchor = doc.querySelector('a[href]');
+      if (anchor instanceof HTMLAnchorElement && isHttpUrl(anchor.href)) {
+        return anchor.href;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  type RemoteDropDescriptor = {
+    url: string;
+    filename?: string;
+    mimeType?: string;
+  };
+
+  function parseDownloadUrl(raw: string): RemoteDropDescriptor | null {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const firstColon = trimmed.indexOf(':');
+    const secondColon = firstColon >= 0 ? trimmed.indexOf(':', firstColon + 1) : -1;
+    if (firstColon <= 0 || secondColon <= firstColon) {
+      return null;
+    }
+    const mimeType = trimmed.slice(0, firstColon);
+    const filename = trimmed.slice(firstColon + 1, secondColon);
+    const url = trimmed.slice(secondColon + 1);
+    if (!isHttpUrl(url)) {
+      return null;
+    }
+    return {
+      url,
+      filename: sanitizeDroppedFilename(filename),
+      mimeType: trimSecretPart(mimeType),
+    };
+  }
+
+  function extractRemoteDropDescriptor(dataTransfer: DataTransfer): RemoteDropDescriptor | null {
+    const downloadUrl = parseDownloadUrl(dataTransfer.getData('DownloadURL'));
+    if (downloadUrl) {
+      return downloadUrl;
+    }
+
+    const uriList = dataTransfer
+      .getData('text/uri-list')
+      .split('\n')
+      .map((entry) => entry.trim())
+      .find((entry) => entry !== '' && !entry.startsWith('#') && isHttpUrl(entry));
+    if (uriList) {
+      return { url: uriList };
+    }
+
+    const publicUrl = trimSecretPart(dataTransfer.getData('public.url'));
+    if (isHttpUrl(publicUrl)) {
+      return { url: publicUrl };
+    }
+
+    const uniformResourceLocator = trimSecretPart(dataTransfer.getData('UniformResourceLocator'));
+    if (isHttpUrl(uniformResourceLocator)) {
+      return { url: uniformResourceLocator };
+    }
+
+    const htmlUrl = extractUrlFromHtml(dataTransfer.getData('text/html'));
+    if (htmlUrl) {
+      return { url: htmlUrl };
+    }
+
+    const plainText = trimSecretPart(dataTransfer.getData('text/plain'));
+    if (isHttpUrl(plainText)) {
+      return { url: plainText };
+    }
+
+    return null;
+  }
+
+  function getDesktopBridge(): NearbytesDesktopBridge | null {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    const globalWindow = window as Window & { nearbytesDesktop?: NearbytesDesktopBridge };
+    return globalWindow.nearbytesDesktop ?? null;
+  }
+
+  function base64ToBytes(value: string): Uint8Array {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  }
+
+  async function fileFromDesktopRemoteDrop(descriptor: RemoteDropDescriptor): Promise<File | null> {
+    const bridge = getDesktopBridge();
+    if (!bridge || typeof bridge.fetchRemoteFile !== 'function') {
+      return null;
+    }
+
+    const fetched = await bridge.fetchRemoteFile(descriptor.url);
+    const bytes = base64ToBytes(fetched.bytesBase64);
+    const mimeType = trimSecretPart(fetched.mimeType) || descriptor.mimeType || 'application/octet-stream';
+    let filename = trimSecretPart(fetched.filename) || trimSecretPart(descriptor.filename ?? '');
+    if (filename === '') {
+      filename = filenameFromUrl(descriptor.url);
+    }
+    if (!/\.[a-z0-9]+$/i.test(filename)) {
+      filename = `${filename}${extensionFromMimeType(mimeType)}`;
+    }
+
+    return new File([bytes], sanitizeDroppedFilename(filename), {
+      type: mimeType,
+      lastModified: Date.now(),
+    });
+  }
+
+  async function fileFromRemoteDrop(dataTransfer: DataTransfer): Promise<File | null> {
+    const descriptor = extractRemoteDropDescriptor(dataTransfer);
+    if (!descriptor) {
+      return null;
+    }
+
+    const desktopFile = await fileFromDesktopRemoteDrop(descriptor);
+    if (desktopFile) {
+      return desktopFile;
+    }
+
+    const response = await fetch(descriptor.url);
+    if (!response.ok) {
+      throw new Error(`Remote download failed (${response.status})`);
+    }
+
+    const blob = await response.blob();
+    const responseType = trimSecretPart(response.headers.get('content-type') ?? '');
+    const mimeType = responseType || trimSecretPart(blob.type) || descriptor.mimeType || 'application/octet-stream';
+    let filename = trimSecretPart(descriptor.filename ?? '');
+    if (filename === '') {
+      filename = filenameFromUrl(descriptor.url);
+    }
+    if (!/\.[a-z0-9]+$/i.test(filename)) {
+      filename = `${filename}${extensionFromMimeType(mimeType)}`;
+    }
+
+    return new File([blob], sanitizeDroppedFilename(filename), {
+      type: mimeType,
+      lastModified: Date.now(),
+    });
+  }
+
+  function localFilesFromTransfer(dataTransfer: DataTransfer | null | undefined): File[] {
+    if (!dataTransfer) return [];
+    const directFiles = Array.from(dataTransfer.files ?? []);
+    const itemFiles = Array.from(dataTransfer.items ?? [])
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((value): value is File => value instanceof File);
+    return directFiles.length > 0 ? directFiles : itemFiles;
+  }
+
+  async function filesFromTransfer(dataTransfer: DataTransfer | null | undefined): Promise<File[]> {
+    if (!dataTransfer) return [];
+    const localFiles = localFilesFromTransfer(dataTransfer);
+    if (localFiles.length > 0) {
+      return localFiles;
+    }
+    const remoteFile = await fileFromRemoteDrop(dataTransfer);
+    return remoteFile ? [remoteFile] : [];
+  }
+
+  function dropFailureMessage(error: unknown, fallback: string): string {
+    if (error instanceof Error) {
+      if (error.name === 'TypeError') {
+        return 'This site blocked direct access. Save it first or copy and paste a local image.';
+      }
+      return error.message;
+    }
+    return fallback;
   }
 
   function loadDismissedRootSuggestions(): string[] {
@@ -218,6 +572,7 @@
   let isDragging = $state(false);
   let errorMessage = $state('');
   let isLoading = $state(false);
+  let isVolumeTransitioning = $state(false);
   let isTimelineLoading = $state(false);
   let isTimelinePlaying = $state(false);
   let isOffline = $state(false);
@@ -240,6 +595,8 @@
   let mounts = $state<VolumeMount[]>(initialMounts);
   let activeMountId = $state(initialMounts[0]?.id ?? '');
   let pendingMountId = $state<string | null>(null);
+  let secretPasteTargetMountId = $state<string | null>(null);
+  let secretFileHashes = $state<Record<string, SecretFileHashEntry>>({});
   let isHeaderHovering = $state(false);
   let isSecretDropTarget = $state(false);
   let timelinePlayTimer: ReturnType<typeof setInterval> | null = null;
@@ -678,6 +1035,7 @@
     }
     if (!currentMount || openSecret === '') {
       stopTimelinePlayback();
+      isVolumeTransitioning = false;
       effectiveSecret = '';
       unlockedAddress = '';
       fileList = [];
@@ -700,6 +1058,7 @@
       pendingMountId = null;
       return;
     }
+    isVolumeTransitioning = true;
     debounceTimer = setTimeout(() => {
       tryOpenSecret(openSecret, openLabel, currentMount.id);
       debounceTimer = null;
@@ -753,6 +1112,9 @@
       timelinePosition = 0;
     } finally {
       isLoading = false;
+      if (activeMountId === requestedMountId) {
+        isVolumeTransitioning = false;
+      }
       if (pendingMountId === requestedMountId) {
         pendingMountId = null;
       }
@@ -765,14 +1127,12 @@
     const currentLabel = currentMount ? mountLabel(currentMount) : '';
     if (currentSecret !== '' && (currentSecret !== effectiveSecret || currentLabel !== unlockedAddress) && effectiveSecret !== '') {
       stopTimelinePlayback();
+      isVolumeTransitioning = true;
       effectiveSecret = '';
       unlockedAddress = '';
       auth = null;
       volumeId = null;
-      fileList = [];
       lastRefresh = null;
-      timelineEvents = [];
-      timelinePosition = 0;
       selectedBlobHash = null;
       previewKind = 'none';
       previewText = '';
@@ -797,6 +1157,13 @@
     mounts = [...collapsedExisting, nextMount];
     activeMountId = nextMount.id;
     pendingMountId = null;
+    secretPasteTargetMountId = nextMount.id;
+    void tick().then(() => {
+      const input = document.querySelector<HTMLInputElement>(
+        `.volume-chip.expanded[data-mount-id="${nextMount.id}"] .secret-input`
+      );
+      input?.focus();
+    });
   }
 
   function selectMount(mountId: string) {
@@ -807,12 +1174,14 @@
       return;
     }
     pendingMountId = mountId;
+    secretPasteTargetMountId = null;
     mounts = mounts.map((mount) => ({ ...mount, collapsed: true }));
     activeMountId = mountId;
   }
 
   function reopenMount(mountId: string) {
     pendingMountId = null;
+    secretPasteTargetMountId = mountId;
     mounts = mounts.map((mount) =>
       mount.id === mountId ? { ...mount, collapsed: false } : { ...mount, collapsed: true }
     );
@@ -829,6 +1198,9 @@
     if (pendingMountId === mountId) {
       pendingMountId = null;
     }
+    if (secretPasteTargetMountId === mountId) {
+      secretPasteTargetMountId = null;
+    }
     mounts = mounts.map((mount) =>
       mount.id === mountId ? { ...mount, collapsed: true } : mount
     );
@@ -837,6 +1209,9 @@
   function removeMount(mountId: string) {
     if (pendingMountId === mountId) {
       pendingMountId = null;
+    }
+    if (secretPasteTargetMountId === mountId) {
+      secretPasteTargetMountId = null;
     }
     const next = mounts.filter((mount) => mount.id !== mountId);
     mounts = next;
@@ -933,6 +1308,7 @@
     address = label;
     addressPassword = '';
     pendingMountId = mountId;
+    secretPasteTargetMountId = null;
   }
 
   function mountIdFromDropTarget(target: EventTarget | null): string | null {
@@ -965,7 +1341,7 @@
     event.preventDefault();
     event.stopPropagation();
     isSecretDropTarget = false;
-    const file = event.dataTransfer?.files?.[0];
+    const file = (await filesFromTransfer(event.dataTransfer))[0];
     if (!file) return;
 
     try {
@@ -973,7 +1349,7 @@
       const targetMountId = prepareMountForSecretDrop(event.target);
       await applySecretFileToMount(file, targetMountId);
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Failed to use secret file';
+      errorMessage = dropFailureMessage(error, 'Failed to use secret file');
       pendingMountId = null;
     }
   }
@@ -1790,8 +2166,12 @@
 
   // Drag and drop handlers
   function handleDragOver(e: DragEvent) {
+    if (!canHandleDropPayload(e.dataTransfer)) return;
     e.preventDefault();
     isDragging = true;
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
   }
 
   function handleDragLeave(e: DragEvent) {
@@ -1812,16 +2192,90 @@
       return;
     }
 
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
+    try {
+      errorMessage = '';
+      const files = await filesFromTransfer(e.dataTransfer);
+      if (files.length === 0) return;
+      await uploadFiles(auth, files);
+      await refreshFiles();
+    } catch (error) {
+      errorMessage = dropFailureMessage(error, 'Upload failed');
+      console.error('Error uploading files:', error);
+    }
+  }
 
+  function shouldRoutePasteToSecret(target: EventTarget | null): boolean {
+    if (secretPasteTargetMountId && mounts.some((mount) => mount.id === secretPasteTargetMountId)) {
+      return true;
+    }
+
+    const expandedActiveMount = mounts.find(
+      (mount) => mount.id === activeMountId && !mount.collapsed
+    );
+    if (!expandedActiveMount) {
+      return false;
+    }
+
+    if (!(target instanceof Element)) {
+      return true;
+    }
+
+    return target.closest('.header-shell') !== null;
+  }
+
+  async function handlePaste(event: ClipboardEvent) {
+    const clipboardData = event.clipboardData;
+    if (!clipboardData || !canHandleDropPayload(clipboardData)) {
+      return;
+    }
+
+    const localFiles = localFilesFromTransfer(clipboardData);
+    const allowRemoteClipboardImport =
+      transferTypes(clipboardData).includes('DownloadURL') ||
+      /<img[\s>]/i.test(clipboardData.getData('text/html'));
+    const files =
+      localFiles.length > 0
+        ? localFiles
+        : allowRemoteClipboardImport
+          ? await filesFromTransfer(clipboardData)
+          : [];
+    if (files.length === 0) {
+      return;
+    }
+
+    if (shouldRoutePasteToSecret(event.target)) {
+      event.preventDefault();
+      try {
+        errorMessage = '';
+        const targetMountId =
+          secretPasteTargetMountId && mounts.some((mount) => mount.id === secretPasteTargetMountId)
+            ? secretPasteTargetMountId
+            : prepareMountForSecretDrop(event.target);
+        await applySecretFileToMount(files[0], targetMountId);
+      } catch (error) {
+        errorMessage = dropFailureMessage(error, 'Failed to use pasted file as secret');
+        pendingMountId = null;
+      }
+      return;
+    }
+
+    if (!auth || !effectiveSecret) {
+      return;
+    }
+    if (isHistoryMode) {
+      event.preventDefault();
+      errorMessage = 'History mode is read-only. Jump to Latest before uploading.';
+      return;
+    }
+
+    event.preventDefault();
     try {
       errorMessage = '';
       await uploadFiles(auth, files);
       await refreshFiles();
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Upload failed';
-      console.error('Error uploading files:', error);
+      errorMessage = dropFailureMessage(error, 'Paste upload failed');
+      console.error('Error uploading pasted files:', error);
     }
   }
 
@@ -1915,7 +2369,7 @@
   }
 }} onpointerdown={(event) => {
   collapseExpandedMountFromOutside(event.target);
-}} />
+}} onpaste={handlePaste} />
 
 <div class="app">
   <header class="header">
@@ -1941,12 +2395,12 @@
         isHeaderHovering = false;
       }}
       ondragenter={(event) => {
-        if (event.dataTransfer?.types.includes('Files')) {
+        if (canHandleDropPayload(event.dataTransfer)) {
           isSecretDropTarget = true;
         }
       }}
       ondragover={(event) => {
-        if (!event.dataTransfer?.types.includes('Files')) return;
+        if (!canHandleDropPayload(event.dataTransfer)) return;
         event.preventDefault();
         isSecretDropTarget = true;
         event.dataTransfer.dropEffect = 'copy';
@@ -2002,6 +2456,58 @@
                 </button>
               </div>
               <div class="volume-chip-expanded expanded">
+                {#if hasFileSecret(mount)}
+                  {@const secretHash = secretFileHashForMount(mount)}
+                  <div class="secret-file-card">
+                    <div class="secret-file-card-preview" class:image={hasImageSecretPreview(mount)}>
+                      {#if hasImageSecretPreview(mount) && secretFilePayloadDataUrl(mount)}
+                        <img
+                          class="secret-file-card-image"
+                          src={secretFilePayloadDataUrl(mount) ?? ''}
+                          alt={"Preview of " + (mount.secretFileName || 'secret file')}
+                        />
+                      {:else}
+                        <span class="secret-file-card-icon" aria-hidden="true">
+                          {#if trimSecretPart(mount.secretFileMimeType).startsWith('image/')}
+                            <ImageIcon size={18} strokeWidth={2} />
+                          {:else}
+                            <FileText size={18} strokeWidth={2} />
+                          {/if}
+                        </span>
+                      {/if}
+                    </div>
+                    <div class="secret-file-card-meta">
+                      <p class="secret-file-card-name" title={mount.secretFileName || 'secret-file'}>
+                        {mount.secretFileName || 'secret-file'}
+                      </p>
+                      <p class="secret-file-card-info">
+                        {trimSecretPart(mount.secretFileMimeType) || 'application/octet-stream'}
+                        {#if secretFileBytes(mount)}
+                          {' • '}
+                          {formatSize(secretFileBytes(mount)?.byteLength ?? 0)}
+                        {/if}
+                      </p>
+                      <p class="secret-file-card-hash-label">SHA-256</p>
+                      <p class="secret-file-card-hash" title={secretHash?.hash || 'Computing hash…'}>
+                        {#if secretHash?.pending}
+                          Computing…
+                        {:else if secretHash?.hash}
+                          {secretHash.hash}
+                        {:else}
+                          Unavailable
+                        {/if}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class="workspace-toggle secret-file-download"
+                      onclick={() => downloadSecretFile(mount)}
+                    >
+                      <Download class="button-icon" size={15} strokeWidth={2} />
+                      <span>Download</span>
+                    </button>
+                  </div>
+                {/if}
                 <div class="header-dock-actions">
                   <ArmedActionButton
                     class="panel-action-btn danger"
@@ -2541,6 +3047,15 @@
       </div>
     {:else}
       <div class="volume-workspace">
+      {#if isVolumeTransitioning}
+        <div class="volume-transition-state panel-surface" aria-live="polite">
+          <div class="volume-transition-spinner"></div>
+          <div class="volume-transition-copy">
+            <p class="volume-transition-title">Switching volume</p>
+            <p class="volume-transition-subtitle">Replaying history off-screen…</p>
+          </div>
+        </div>
+      {:else}
       {#if showTimeMachinePanel}
       <section class="time-machine panel-surface" aria-label="Volume timeline">
         <div class="time-machine-head">
@@ -2749,6 +3264,7 @@
             {/if}
           </section>
         </div>
+      {/if}
       {/if}
       </div>
     {/if}
@@ -3071,6 +3587,99 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .secret-file-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 0.8rem;
+    align-items: center;
+    padding: 0.78rem 0.82rem;
+    margin: 0 0.35rem 0.6rem;
+    border-radius: 14px;
+    border: 1px solid rgba(56, 189, 248, 0.16);
+    background:
+      radial-gradient(120% 140% at 0% 0%, rgba(34, 211, 238, 0.08), transparent 56%),
+      linear-gradient(180deg, rgba(8, 17, 31, 0.88), rgba(7, 14, 27, 0.82));
+  }
+
+  .secret-file-card-preview {
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 19, 35, 0.92);
+    border: 1px solid rgba(96, 165, 250, 0.18);
+    color: rgba(191, 219, 254, 0.86);
+    flex: 0 0 auto;
+  }
+
+  .secret-file-card-preview.image {
+    background: rgba(7, 14, 28, 0.98);
+  }
+
+  .secret-file-card-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .secret-file-card-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .secret-file-card-meta {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.14rem;
+  }
+
+  .secret-file-card-name,
+  .secret-file-card-info,
+  .secret-file-card-hash-label,
+  .secret-file-card-hash {
+    margin: 0;
+  }
+
+  .secret-file-card-name {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: rgba(240, 249, 255, 0.97);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .secret-file-card-info {
+    font-size: 0.74rem;
+    color: rgba(191, 219, 254, 0.74);
+  }
+
+  .secret-file-card-hash-label {
+    margin-top: 0.18rem;
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(94, 234, 212, 0.7);
+  }
+
+  .secret-file-card-hash {
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    color: rgba(226, 232, 240, 0.9);
+    word-break: break-all;
+  }
+
+  .secret-file-download {
+    min-width: 108px;
   }
 
   .header-dock-actions {
@@ -3464,6 +4073,56 @@
     flex-direction: column;
     gap: 1rem;
     min-height: auto;
+  }
+
+  .volume-transition-state {
+    min-height: 420px;
+    border: 1px solid rgba(56, 189, 248, 0.18);
+    border-radius: 22px;
+    background:
+      radial-gradient(120% 120% at 0% 0%, rgba(34, 211, 238, 0.12), transparent 52%),
+      radial-gradient(120% 120% at 100% 0%, rgba(14, 165, 233, 0.1), transparent 48%),
+      linear-gradient(160deg, rgba(8, 18, 34, 0.96), rgba(7, 14, 28, 0.94));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    padding: 2rem;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 24px 48px rgba(2, 6, 23, 0.28);
+  }
+
+  .volume-transition-spinner {
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(125, 211, 252, 0.24);
+    border-top-color: rgba(125, 211, 252, 0.96);
+    border-radius: 999px;
+    animation: spin 0.7s linear infinite;
+    flex: 0 0 auto;
+  }
+
+  .volume-transition-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .volume-transition-title,
+  .volume-transition-subtitle {
+    margin: 0;
+  }
+
+  .volume-transition-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: rgba(240, 249, 255, 0.96);
+  }
+
+  .volume-transition-subtitle {
+    font-size: 0.88rem;
+    color: rgba(186, 230, 253, 0.72);
   }
 
   .roots-panel {
