@@ -15,6 +15,7 @@
   import { NEARBYTES_DRAG_TYPE, parseNearbytesDragPayload } from '../lib/nearbytesDrag.js';
   import { parseNearbytesClipboardPayload } from '../lib/referenceClipboard.js';
   import {
+    Info,
     MessageSquareText,
     Paperclip,
     RefreshCw,
@@ -53,6 +54,7 @@
   let sending = $state(false);
   let errorMessage = $state('');
   let dragActive = $state(false);
+  let selectedProfilePublicKey = $state('');
   let requestedVolumeId = '';
   let appliedExternalRefreshVersion = -1;
 
@@ -64,12 +66,14 @@
       loading = false;
       refreshing = false;
       errorMessage = '';
+      selectedProfilePublicKey = '';
       return;
     }
     if (requestedVolumeId === nextVolumeId) {
       return;
     }
     requestedVolumeId = nextVolumeId;
+    selectedProfilePublicKey = '';
     void refreshChat(true);
   });
 
@@ -81,6 +85,38 @@
       map.set(identity.authorPublicKey, identity);
     }
     return map;
+  });
+
+  const selectedProfile = $derived.by(() => {
+    if (!selectedProfilePublicKey) {
+      return null;
+    }
+    const published = identityByPublicKey.get(selectedProfilePublicKey);
+    if (published) {
+      return {
+        displayName: published.record.profile.displayName,
+        bio: published.record.profile.bio ?? '',
+        publicKey: published.authorPublicKey,
+        publishedAt: published.publishedAt,
+        localOnly: false,
+      };
+    }
+    if (activeIdentity?.publicKey === selectedProfilePublicKey) {
+      return {
+        displayName: activeIdentity.displayName || shortPublicKey(selectedProfilePublicKey),
+        bio: activeIdentity.bio,
+        publicKey: selectedProfilePublicKey,
+        publishedAt: undefined,
+        localOnly: true,
+      };
+    }
+    return {
+      displayName: shortPublicKey(selectedProfilePublicKey),
+      bio: '',
+      publicKey: selectedProfilePublicKey,
+      publishedAt: undefined,
+      localOnly: true,
+    };
   });
 
   $effect(() => {
@@ -271,6 +307,24 @@
     return value.length <= 16 ? value : `${value.slice(0, 8)}...${value.slice(-6)}`;
   }
 
+  function senderInitial(publicKey: string): string {
+    const label = senderLabel(publicKey).trim();
+    return label.charAt(0).toUpperCase() || '?';
+  }
+
+  function isOwnMessage(publicKey: string): boolean {
+    return activeIdentity?.publicKey === publicKey;
+  }
+
+  function openProfile(publicKey: string) {
+    selectedProfilePublicKey =
+      selectedProfilePublicKey === publicKey ? '' : publicKey;
+  }
+
+  function closeProfile() {
+    selectedProfilePublicKey = '';
+  }
+
   function formatTimestamp(value: number): string {
     return new Intl.DateTimeFormat(undefined, {
       month: 'short',
@@ -285,21 +339,22 @@
   <div class="chat-header">
     <div class="chat-title-wrap">
       <div class="chat-title-mark">
-        <MessageSquareText size={18} strokeWidth={2} />
+        <MessageSquareText size={16} strokeWidth={2} />
       </div>
       <div>
-        <p class="chat-eyebrow">Volume chat</p>
-        <h3>Signed messages in this volume</h3>
+        <p class="chat-eyebrow">Chat</p>
+        <h3>Messages</h3>
+        <p class="chat-subtitle">Signed messages inside this volume</p>
       </div>
     </div>
     <div class="chat-header-actions">
       <div class="chat-identity-pill">
-        <UserRound size={15} strokeWidth={2} />
-        <span>{activeIdentity?.displayName || 'Not joined'}</span>
+        <UserRound size={14} strokeWidth={2} />
+        <span>{activeIdentity?.displayName ? `You: ${activeIdentity.displayName}` : 'Not joined'}</span>
       </div>
       {#if !readonlyMode}
         <button type="button" class="chat-secondary-btn" onclick={() => onOpenIdentityManager?.()}>
-          {activeIdentity ? 'Switch identity' : 'Join chat'}
+          {activeIdentity ? 'Change' : 'Join'}
         </button>
       {/if}
       <button
@@ -307,11 +362,46 @@
         class="chat-icon-btn"
         onclick={() => void refreshChat()}
         disabled={!auth || refreshing || historyState !== null}
+        aria-label="Refresh chat"
       >
-        <RefreshCw size={15} strokeWidth={2} />
+        <RefreshCw size={14} strokeWidth={2} />
       </button>
     </div>
   </div>
+
+  {#if selectedProfile}
+    <section class="chat-profile-popover panel-surface" aria-label="Profile details">
+      <div class="chat-profile-head">
+        <div class="chat-profile-avatar">{selectedProfile.displayName.charAt(0).toUpperCase() || '?'}</div>
+        <div class="chat-profile-copy">
+          <p class="chat-eyebrow">Profile</p>
+          <h4>{selectedProfile.displayName}</h4>
+        </div>
+        <button type="button" class="chat-icon-btn compact" onclick={closeProfile} aria-label="Close profile">
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+      <p class="chat-profile-bio">
+        {selectedProfile.bio || 'No bio published for this identity yet.'}
+      </p>
+      <dl class="chat-profile-meta">
+        <div>
+          <dt>Identity</dt>
+          <dd>{shortPublicKey(selectedProfile.publicKey)}</dd>
+        </div>
+        <div>
+          <dt>Scope</dt>
+          <dd>{selectedProfile.localOnly ? 'Local draft' : 'Published to this volume'}</dd>
+        </div>
+        {#if selectedProfile.publishedAt}
+          <div>
+            <dt>Published</dt>
+            <dd>{formatTimestamp(selectedProfile.publishedAt)}</dd>
+          </div>
+        {/if}
+      </dl>
+    </section>
+  {/if}
 
   {#if errorMessage}
     <p class="chat-banner error">{errorMessage}</p>
@@ -326,30 +416,41 @@
           {#if readonlyMode}
             No messages at this point in history.
           {:else}
-            No messages yet. Join this volume with one identity and start the conversation.
+            No messages yet. Join this volume and start the conversation.
           {/if}
         </p>
       {:else}
         {#each effectiveChatState.messages as entry (entry.eventHash)}
-          <article class="chat-message-card">
-            <header class="chat-message-head">
-              <strong>{senderLabel(entry.authorPublicKey)}</strong>
-              <span>{formatTimestamp(entry.publishedAt)}</span>
-            </header>
-            {#if entry.message.body}
-              <p class="chat-message-body">{entry.message.body}</p>
-            {/if}
-            {#if entry.message.attachment}
-              <button
-                type="button"
-                class="chat-attachment"
-                onclick={() => void openAttachment(entry.message.attachment!)}
-                title="Open attachment"
-              >
-                <Paperclip size={14} strokeWidth={2} />
-                <span>{entry.message.attachment.name}</span>
-              </button>
-            {/if}
+          <article class="chat-message-card" class:own={isOwnMessage(entry.authorPublicKey)}>
+            <div class="chat-message-avatar">{senderInitial(entry.authorPublicKey)}</div>
+            <div class="chat-message-bubble">
+              <header class="chat-message-head">
+                <button
+                  type="button"
+                  class="chat-author-btn"
+                  onclick={() => openProfile(entry.authorPublicKey)}
+                  title="View profile"
+                >
+                  {senderLabel(entry.authorPublicKey)}
+                  <Info size={12} strokeWidth={2} />
+                </button>
+                <span>{formatTimestamp(entry.publishedAt)}</span>
+              </header>
+              {#if entry.message.body}
+                <p class="chat-message-body">{entry.message.body}</p>
+              {/if}
+              {#if entry.message.attachment}
+                <button
+                  type="button"
+                  class="chat-attachment"
+                  onclick={() => void openAttachment(entry.message.attachment!)}
+                  title="Open attachment"
+                >
+                  <Paperclip size={13} strokeWidth={2} />
+                  <span>{entry.message.attachment.name}</span>
+                </button>
+              {/if}
+            </div>
           </article>
         {/each}
       {/if}
@@ -382,36 +483,36 @@
     >
       <div class="chat-composer-head">
         <div>
-          <p class="chat-eyebrow">Compose</p>
+          <p class="chat-eyebrow">New message</p>
           <h4>
             {readonlyMode
               ? 'Read-only right now'
               : activeIdentity?.displayName
-                ? `Writing as ${activeIdentity.displayName}`
-                : 'Join this volume to send'}
+                ? `As ${activeIdentity.displayName}`
+                : 'Join to send'}
           </h4>
         </div>
         {#if identityNeedsPublish && activeIdentity}
-          <span class="chat-status-pill">Profile update not published</span>
+          <span class="chat-status-pill">Profile update pending</span>
         {/if}
       </div>
       <textarea
         class="chat-textarea"
-        placeholder={activeIdentity ? 'Write a short signed message' : 'Join this volume with one identity to send'}
+        placeholder={activeIdentity ? 'Write a message' : 'Join this volume with one identity to send'}
         bind:value={draftBody}
         disabled={!auth || readonlyMode || !activeIdentity}
       ></textarea>
       {#if pendingAttachment}
         <div class="chat-pending-attachment">
-          <Paperclip size={14} strokeWidth={2} />
+          <Paperclip size={13} strokeWidth={2} />
           <span>{pendingAttachment.name}</span>
-          <button type="button" class="chat-icon-btn" onclick={() => (pendingAttachment = null)}>
+          <button type="button" class="chat-icon-btn compact" onclick={() => (pendingAttachment = null)} aria-label="Remove attachment">
             <X size={14} strokeWidth={2} />
           </button>
         </div>
       {/if}
       <p class="chat-drop-hint">
-        Drag or paste a Nearbytes file reference here to attach it as a signed source reference.
+        Drag or paste a Nearbytes file reference to attach it.
       </p>
       <div class="chat-composer-actions">
         <button
@@ -434,7 +535,7 @@
             (!draftBody.trim() && !pendingAttachment)
           }
         >
-          <Send size={14} strokeWidth={2} />
+          <Send size={13} strokeWidth={2} />
           {sending ? 'Sending…' : 'Send'}
         </button>
       </div>
@@ -448,15 +549,17 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 1rem;
-    padding: 1rem;
+    gap: 0.72rem;
+    padding: 0.82rem;
     overflow: hidden;
+    position: relative;
   }
 
   .chat-header,
   .chat-composer-head,
   .chat-message-head,
-  .chat-composer-actions {
+  .chat-composer-actions,
+  .chat-profile-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -470,32 +573,48 @@
   .chat-attachment {
     display: inline-flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: 0.55rem;
   }
 
   .chat-title-mark {
-    width: 38px;
-    height: 38px;
-    border-radius: 14px;
+    width: 32px;
+    height: 32px;
+    border-radius: 12px;
     display: grid;
     place-items: center;
     background: radial-gradient(circle at 20% 20%, rgba(125, 211, 252, 0.3), rgba(8, 47, 73, 0.94));
     color: rgba(224, 242, 254, 0.96);
+    flex: 0 0 auto;
   }
 
   .chat-eyebrow {
-    margin: 0 0 0.18rem;
-    font-size: 0.72rem;
-    letter-spacing: 0.12em;
+    margin: 0 0 0.14rem;
+    font-size: 0.68rem;
+    letter-spacing: 0.11em;
     text-transform: uppercase;
     color: rgba(125, 211, 252, 0.68);
   }
 
+  .chat-subtitle {
+    margin-top: 0.1rem;
+    font-size: 0.78rem;
+    color: rgba(186, 230, 253, 0.64);
+  }
+
   .chat-shell h3,
   .chat-shell h4,
-  .chat-shell strong,
   .chat-shell p {
     margin: 0;
+  }
+
+  .chat-shell h3 {
+    font-size: 1.05rem;
+    line-height: 1.2;
+  }
+
+  .chat-shell h4 {
+    font-size: 0.92rem;
+    line-height: 1.2;
   }
 
   .chat-header-actions,
@@ -511,30 +630,43 @@
     border: 1px solid rgba(56, 189, 248, 0.18);
     background: rgba(8, 20, 38, 0.82);
     color: rgba(224, 242, 254, 0.94);
-    border-radius: 14px;
-    min-height: 38px;
-    padding: 0.65rem 0.9rem;
+    border-radius: 12px;
+    min-height: 34px;
+    padding: 0.52rem 0.78rem;
     font: inherit;
+    font-size: 0.84rem;
     cursor: pointer;
     transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
   }
 
-  .chat-primary-btn:hover,
-  .chat-secondary-btn:hover,
-  .chat-icon-btn:hover,
+  .chat-primary-btn:hover:not(:disabled),
+  .chat-secondary-btn:hover:not(:disabled),
+  .chat-icon-btn:hover:not(:disabled),
   .chat-attachment:hover {
     border-color: rgba(96, 165, 250, 0.34);
     background: rgba(12, 28, 48, 0.96);
     transform: translateY(-1px);
   }
 
+  .chat-icon-btn {
+    min-width: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .chat-icon-btn.compact {
+    min-height: 30px;
+    min-width: 30px;
+  }
+
   .chat-identity-pill {
-    min-height: 38px;
-    padding: 0 0.9rem;
-    border-radius: 14px;
+    min-height: 34px;
+    padding: 0 0.72rem;
+    border-radius: 12px;
     border: 1px solid rgba(56, 189, 248, 0.12);
     background: rgba(8, 20, 38, 0.6);
     color: rgba(224, 242, 254, 0.84);
+    font-size: 0.84rem;
   }
 
   .chat-primary-btn {
@@ -545,8 +677,8 @@
   .chat-status-pill,
   .chat-banner {
     border-radius: 999px;
-    padding: 0.4rem 0.75rem;
-    font-size: 0.82rem;
+    padding: 0.36rem 0.7rem;
+    font-size: 0.78rem;
   }
 
   .chat-status-pill {
@@ -568,56 +700,109 @@
     min-height: 0;
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
-    gap: 1rem;
+    gap: 0.72rem;
   }
 
   .chat-feed,
   .chat-composer {
     min-height: 0;
-    border-radius: 20px;
+    border-radius: 18px;
     border: 1px solid rgba(56, 189, 248, 0.1);
     background: linear-gradient(180deg, rgba(5, 16, 29, 0.78), rgba(4, 11, 22, 0.86));
   }
 
   .chat-feed {
     overflow: auto;
-    padding: 1rem;
+    padding: 0.8rem;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.62rem;
   }
 
   .chat-empty {
     color: rgba(191, 219, 254, 0.66);
-    padding: 1rem 0.2rem;
+    padding: 0.8rem 0.1rem;
+    font-size: 0.86rem;
   }
 
   .chat-message-card {
-    padding: 0.9rem 1rem;
-    border-radius: 18px;
+    display: flex;
+    align-items: flex-end;
+    gap: 0.52rem;
+    max-width: min(82%, 720px);
+  }
+
+  .chat-message-card.own {
+    align-self: flex-end;
+    flex-direction: row-reverse;
+  }
+
+  .chat-message-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    background: rgba(19, 62, 89, 0.88);
+    color: rgba(224, 242, 254, 0.92);
+    font-size: 0.76rem;
+    font-weight: 700;
+    flex: 0 0 auto;
+    margin-top: 0.1rem;
+  }
+
+  .chat-message-bubble {
+    min-width: 0;
+    padding: 0.72rem 0.82rem;
+    border-radius: 16px;
     background: rgba(9, 24, 42, 0.86);
     border: 1px solid rgba(56, 189, 248, 0.08);
     display: flex;
     flex-direction: column;
-    gap: 0.65rem;
+    gap: 0.48rem;
+  }
+
+  .chat-message-card.own .chat-message-bubble {
+    background: linear-gradient(180deg, rgba(13, 43, 67, 0.94), rgba(9, 30, 50, 0.96));
+    border-color: rgba(34, 211, 238, 0.16);
   }
 
   .chat-message-head {
     color: rgba(186, 230, 253, 0.76);
-    font-size: 0.82rem;
+    font-size: 0.74rem;
+    gap: 0.65rem;
+  }
+
+  .chat-author-btn {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: rgba(224, 242, 254, 0.96);
+    padding: 0;
+    font: inherit;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    cursor: pointer;
+  }
+
+  .chat-author-btn:hover {
+    color: rgba(186, 230, 253, 0.96);
   }
 
   .chat-message-body {
     color: rgba(239, 246, 255, 0.94);
-    line-height: 1.5;
+    line-height: 1.45;
     white-space: pre-wrap;
+    font-size: 0.92rem;
   }
 
   .chat-composer {
-    padding: 1rem;
+    padding: 0.82rem;
     display: flex;
     flex-direction: column;
-    gap: 0.85rem;
+    gap: 0.66rem;
     overflow: visible;
   }
 
@@ -629,30 +814,96 @@
   .chat-textarea,
   .chat-composer textarea {
     width: 100%;
-    border-radius: 16px;
+    border-radius: 14px;
     border: 1px solid rgba(56, 189, 248, 0.14);
     background: rgba(4, 15, 28, 0.88);
     color: rgba(239, 246, 255, 0.94);
     font: inherit;
-    padding: 0.85rem 0.95rem;
+    padding: 0.75rem 0.82rem;
   }
 
   .chat-textarea {
-    min-height: 110px;
+    min-height: 90px;
     resize: vertical;
   }
 
   .chat-drop-hint {
     color: rgba(147, 197, 253, 0.66);
-    font-size: 0.83rem;
+    font-size: 0.78rem;
   }
 
   .chat-pending-attachment {
-    padding: 0.55rem 0.75rem;
-    border-radius: 14px;
+    padding: 0.44rem 0.65rem;
+    border-radius: 12px;
     background: rgba(8, 20, 38, 0.86);
     border: 1px solid rgba(56, 189, 248, 0.14);
     justify-content: space-between;
+    font-size: 0.82rem;
   }
 
+  .chat-profile-popover {
+    position: absolute;
+    top: 3.6rem;
+    right: 0.82rem;
+    width: min(320px, calc(100% - 1.64rem));
+    z-index: 3;
+    padding: 0.82rem;
+    border-radius: 18px;
+    border: 1px solid rgba(56, 189, 248, 0.16);
+    background:
+      radial-gradient(120% 120% at 0% 0%, rgba(34, 211, 238, 0.1), transparent 44%),
+      linear-gradient(180deg, rgba(8, 19, 36, 0.98), rgba(6, 15, 29, 0.96));
+    box-shadow: 0 18px 42px rgba(2, 6, 23, 0.42);
+  }
+
+  .chat-profile-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(180deg, rgba(16, 66, 91, 0.94), rgba(10, 44, 66, 0.96));
+    color: rgba(236, 254, 255, 0.98);
+    font-weight: 700;
+    flex: 0 0 auto;
+  }
+
+  .chat-profile-copy {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .chat-profile-bio {
+    margin-top: 0.72rem;
+    color: rgba(226, 232, 240, 0.88);
+    font-size: 0.86rem;
+    line-height: 1.45;
+  }
+
+  .chat-profile-meta {
+    margin: 0.82rem 0 0;
+    display: grid;
+    gap: 0.55rem;
+  }
+
+  .chat-profile-meta div {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 0.55rem;
+    align-items: baseline;
+  }
+
+  .chat-profile-meta dt {
+    color: rgba(125, 211, 252, 0.66);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .chat-profile-meta dd {
+    margin: 0;
+    color: rgba(224, 242, 254, 0.92);
+    font-size: 0.82rem;
+    overflow-wrap: anywhere;
+  }
 </style>

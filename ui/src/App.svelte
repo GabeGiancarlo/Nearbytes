@@ -4910,10 +4910,10 @@
   .workspace-mode-bar {
     display: inline-flex;
     align-items: center;
-    gap: 0.55rem;
+    gap: 0.4rem;
     align-self: flex-start;
-    padding: 0.28rem;
-    border-radius: 16px;
+    padding: 0.22rem;
+    border-radius: 14px;
     border: 1px solid rgba(56, 189, 248, 0.14);
     background: rgba(7, 16, 30, 0.76);
     backdrop-filter: blur(18px);
@@ -4925,14 +4925,14 @@
     border: 1px solid transparent;
     background: transparent;
     color: rgba(191, 219, 254, 0.72);
-    border-radius: 12px;
-    min-height: 34px;
-    padding: 0 0.82rem;
+    border-radius: 11px;
+    min-height: 30px;
+    padding: 0 0.72rem;
     display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.42rem;
     font: inherit;
-    font-size: 0.8rem;
+    font-size: 0.76rem;
     font-weight: 600;
     cursor: pointer;
     transition:
