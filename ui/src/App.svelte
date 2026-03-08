@@ -739,6 +739,7 @@
   let fileManagerViewMode = $state<FileManagerViewMode>('icons');
   let fileManagerSplit = $state(38);
   let fileManagerElement = $state<HTMLElement | null>(null);
+  let fileManagerActive = $state(false);
   let appReferenceClipboard = $state<AppReferenceClipboard | null>(null);
   let watchConnectionSerial = 0;
   let watchDisconnect: (() => void) | null = null;
@@ -1899,10 +1900,17 @@
   }
 
   function isFileManagerFocused(target: EventTarget | null): boolean {
-    if (!(target instanceof Node) || !fileManagerElement) {
+    if (!fileManagerElement) {
       return false;
     }
-    return fileManagerElement.contains(target);
+    if (target instanceof Node && fileManagerElement.contains(target)) {
+      return true;
+    }
+    const activeElement = document.activeElement;
+    if (activeElement instanceof Node && fileManagerElement.contains(activeElement)) {
+      return true;
+    }
+    return fileManagerActive;
   }
 
   function isEditableTarget(target: EventTarget | null): boolean {
@@ -2359,6 +2367,12 @@
     }
   }
 }} onpointerdown={(event) => {
+  if (
+    fileManagerElement &&
+    (!(event.target instanceof Node) || !fileManagerElement.contains(event.target))
+  ) {
+    fileManagerActive = false;
+  }
   collapseExpandedMountFromOutside(event.target);
 }} onpaste={handlePaste} />
 
@@ -2849,7 +2863,17 @@
           </div>
         </div>
       {:else}
-        <div class="file-manager" bind:this={fileManagerElement} style:grid-template-columns={fileManagerTemplate}>
+        <div
+          class="file-manager"
+          bind:this={fileManagerElement}
+          style:grid-template-columns={fileManagerTemplate}
+          onpointerdown={() => {
+            fileManagerActive = true;
+          }}
+          onfocusin={() => {
+            fileManagerActive = true;
+          }}
+        >
           <section class="file-list-pane" class:with-preview={showPreviewPane}>
             <div class="manager-toolbar">
               <div class="manager-toolbar-top">
