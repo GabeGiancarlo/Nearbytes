@@ -7,6 +7,7 @@
     uploadFiles,
     deleteFile,
     downloadFile,
+    renameFile,
     watchVolume,
     type Auth,
     type FileMetadata,
@@ -685,8 +686,13 @@
   let lastRefresh = $state<number | null>(null);
   let copiedVolumeId = $state(false);
   let searchQuery = $state('');
-  let sortBy = $state<'newest' | 'oldest' | 'name' | 'size'>('newest');
+  let sortBy = $state<'newest' | 'oldest' | 'name' | 'name-desc' | 'size' | 'size-asc'>('newest');
   let selectedBlobHash = $state<string | null>(null);
+  let selectedBlobHashes = $state<string[]>([]);
+  let selectionAnchorBlobHash = $state<string | null>(null);
+  let renamingBlobHash = $state<string | null>(null);
+  let renameDraft = $state('');
+  let renamePending = $state(false);
   let timelineEvents = $state<TimelineEvent[]>([]);
   let timelinePosition = $state(0);
   let previewKind = $state<PreviewKind>('none');
@@ -927,8 +933,16 @@
       sorted.sort((a, b) => a.filename.localeCompare(b.filename));
       return sorted;
     }
+    if (sortBy === 'name-desc') {
+      sorted.sort((a, b) => b.filename.localeCompare(a.filename));
+      return sorted;
+    }
     if (sortBy === 'size') {
       sorted.sort((a, b) => b.size - a.size);
+      return sorted;
+    }
+    if (sortBy === 'size-asc') {
+      sorted.sort((a, b) => a.size - b.size);
       return sorted;
     }
     if (sortBy === 'oldest') {
@@ -941,6 +955,10 @@
 
   const fileManagerTemplate = $derived.by(
     () => (showPreviewPane ? `minmax(300px, ${fileManagerSplit}%) 14px minmax(360px, 1fr)` : '1fr')
+  );
+
+  const selectedFiles = $derived.by(() =>
+    visibleFiles.filter((file) => selectedBlobHashes.includes(file.blobHash))
   );
 
   const selectedFile = $derived.by(
@@ -999,6 +1017,23 @@
     const days = Math.floor(diffMs / dayMs);
     if (days < 7) return `${days}d ago`;
     return formatShortDate(value);
+  }
+
+  function isFileSelected(blobHash: string): boolean {
+    return selectedBlobHashes.includes(blobHash);
+  }
+
+  function fileBaseName(filename: string): string {
+    return filename.split('/').filter(Boolean).at(-1) ?? filename;
+  }
+
+  function fileParentPath(filename: string): string {
+    return filename.split('/').filter(Boolean).slice(0, -1).join('/');
+  }
+
+  function renameDestination(file: FileMetadata, nextBaseName: string): string {
+    const parent = fileParentPath(file.filename);
+    return parent ? `${parent}/${nextBaseName}` : nextBaseName;
   }
 
   function startFileManagerResize(event: PointerEvent) {
@@ -1604,14 +1639,32 @@
   $effect(() => {
     if (visibleFiles.length === 0) {
       selectedBlobHash = null;
+      selectedBlobHashes = [];
+      selectionAnchorBlobHash = null;
+      renamingBlobHash = null;
       showPreviewPane = false;
       return;
     }
-    const selectedStillVisible = selectedBlobHash
-      ? visibleFiles.some((file) => file.blobHash === selectedBlobHash)
-      : false;
-    if (!selectedStillVisible) {
-      selectedBlobHash = null;
+    const visibleBlobHashes = new Set(visibleFiles.map((file) => file.blobHash));
+    const nextSelected = selectedBlobHashes.filter((blobHash) => visibleBlobHashes.has(blobHash));
+    if (nextSelected.length !== selectedBlobHashes.length) {
+      selectedBlobHashes = nextSelected;
+    }
+    if (selectionAnchorBlobHash && !visibleBlobHashes.has(selectionAnchorBlobHash)) {
+      selectionAnchorBlobHash = nextSelected[0] ?? null;
+    }
+    if (!selectedBlobHash || !visibleBlobHashes.has(selectedBlobHash)) {
+      selectedBlobHash = nextSelected[0] ?? null;
+    }
+    if (renamingBlobHash && !visibleBlobHashes.has(renamingBlobHash)) {
+      renamingBlobHash = null;
+      renameDraft = '';
+    }
+    if (nextSelected.length === 0 && renamingBlobHash) {
+      renamingBlobHash = null;
+      renameDraft = '';
+    }
+    if ((nextSelected[0] ?? null) === null && selectedBlobHash === null) {
       showPreviewPane = false;
     }
   });
@@ -1704,13 +1757,70 @@
     };
   });
 
-  function selectFile(file: FileMetadata) {
-    selectedBlobHash = file.blobHash;
+  function setSelection(nextSelection: string[], activeBlobHash: string | null, anchorBlobHash: string | null) {
+    selectedBlobHashes = nextSelection;
+    selectedBlobHash = activeBlobHash;
+    selectionAnchorBlobHash = anchorBlobHash;
+  }
+
+  function selectFile(
+    file: FileMetadata,
+    options: {
+      toggle?: boolean;
+      range?: boolean;
+      additiveRange?: boolean;
+    } = {}
+  ) {
+    const targetBlobHash = file.blobHash;
+    const filesByBlobHash = new Map(visibleFiles.map((item) => [item.blobHash, item]));
+    const targetIndex = visibleFiles.findIndex((item) => item.blobHash === targetBlobHash);
+    const anchorBlobHash =
+      selectionAnchorBlobHash && filesByBlobHash.has(selectionAnchorBlobHash)
+        ? selectionAnchorBlobHash
+        : selectedBlobHash && filesByBlobHash.has(selectedBlobHash)
+          ? selectedBlobHash
+          : targetBlobHash;
+
+    if (options.range && targetIndex >= 0) {
+      const anchorIndex = visibleFiles.findIndex((item) => item.blobHash === anchorBlobHash);
+      const start = Math.min(anchorIndex >= 0 ? anchorIndex : targetIndex, targetIndex);
+      const end = Math.max(anchorIndex >= 0 ? anchorIndex : targetIndex, targetIndex);
+      const rangeSelection = visibleFiles.slice(start, end + 1).map((item) => item.blobHash);
+      const nextSelection = options.additiveRange
+        ? Array.from(new Set([...selectedBlobHashes, ...rangeSelection]))
+        : rangeSelection;
+      setSelection(nextSelection, targetBlobHash, anchorBlobHash);
+      renamingBlobHash = null;
+      renameDraft = '';
+      return;
+    }
+
+    if (options.toggle) {
+      const nextSelection = isFileSelected(targetBlobHash)
+        ? selectedBlobHashes.filter((blobHash) => blobHash !== targetBlobHash)
+        : [...selectedBlobHashes, targetBlobHash];
+      setSelection(
+        nextSelection,
+        nextSelection.includes(targetBlobHash) ? targetBlobHash : (nextSelection.at(-1) ?? null),
+        targetBlobHash
+      );
+      renamingBlobHash = null;
+      renameDraft = '';
+      return;
+    }
+
+    setSelection([targetBlobHash], targetBlobHash, targetBlobHash);
+    renamingBlobHash = null;
+    renameDraft = '';
   }
 
   function openPreviewPane(file?: FileMetadata) {
     if (file) {
-      selectedBlobHash = file.blobHash;
+      if (!isFileSelected(file.blobHash)) {
+        setSelection([file.blobHash], file.blobHash, file.blobHash);
+      } else {
+        selectedBlobHash = file.blobHash;
+      }
     }
     if (selectedBlobHash) {
       showPreviewPane = true;
@@ -1719,6 +1829,53 @@
 
   function closePreviewPane() {
     showPreviewPane = false;
+  }
+
+  function toggleColumnSort(column: 'name' | 'size' | 'date') {
+    if (column === 'name') {
+      sortBy = sortBy === 'name' ? 'name-desc' : 'name';
+      return;
+    }
+    if (column === 'size') {
+      sortBy = sortBy === 'size' ? 'size-asc' : 'size';
+      return;
+    }
+    sortBy = sortBy === 'newest' ? 'oldest' : 'newest';
+  }
+
+  function columnSortState(column: 'name' | 'size' | 'date'): 'ascending' | 'descending' | 'none' {
+    if (column === 'name') {
+      if (sortBy === 'name') return 'ascending';
+      if (sortBy === 'name-desc') return 'descending';
+      return 'none';
+    }
+    if (column === 'size') {
+      if (sortBy === 'size-asc') return 'ascending';
+      if (sortBy === 'size') return 'descending';
+      return 'none';
+    }
+    if (sortBy === 'oldest') return 'ascending';
+    if (sortBy === 'newest') return 'descending';
+    return 'none';
+  }
+
+  function handleManagerKeydown(event: KeyboardEvent) {
+    const activeElement = document.activeElement;
+    if (
+      event.key === 'Escape' &&
+      fileManagerElement &&
+      activeElement instanceof Node &&
+      fileManagerElement.contains(activeElement)
+    ) {
+      event.preventDefault();
+      if (renamingBlobHash) {
+        cancelRenaming();
+        return;
+      }
+      if (showPreviewPane) {
+        closePreviewPane();
+      }
+    }
   }
 
   async function openFileInViewer(file: FileMetadata) {
@@ -1756,6 +1913,70 @@
     if (e.key === ' ') {
       e.preventDefault();
       selectFile(file);
+    }
+  }
+
+  function handleFilePointerSelect(event: MouseEvent, file: FileMetadata) {
+    selectFile(file, {
+      toggle: event.metaKey || event.ctrlKey,
+      range: event.shiftKey,
+      additiveRange: event.shiftKey && (event.metaKey || event.ctrlKey),
+    });
+  }
+
+  function startRenaming(file: FileMetadata) {
+    if (!auth || isHistoryMode) {
+      return;
+    }
+    setSelection([file.blobHash], file.blobHash, file.blobHash);
+    renamingBlobHash = file.blobHash;
+    renameDraft = fileBaseName(file.filename);
+    renamePending = false;
+  }
+
+  function cancelRenaming() {
+    renamingBlobHash = null;
+    renameDraft = '';
+    renamePending = false;
+  }
+
+  async function commitRename(file: FileMetadata) {
+    if (renamePending || renamingBlobHash !== file.blobHash) {
+      return;
+    }
+    if (!auth || isHistoryMode) {
+      cancelRenaming();
+      return;
+    }
+    const nextBaseName = renameDraft.trim();
+    if (nextBaseName === '') {
+      errorMessage = 'File name cannot be empty.';
+      return;
+    }
+    if (nextBaseName.includes('/')) {
+      errorMessage = 'Rename only changes the file name, not the path.';
+      return;
+    }
+    const nextFilename = renameDestination(file, nextBaseName);
+    if (nextFilename === file.filename) {
+      cancelRenaming();
+      return;
+    }
+
+    try {
+      renamePending = true;
+      errorMessage = '';
+      await renameFile(auth, file.filename, nextFilename);
+      cancelRenaming();
+      await refreshFiles();
+      const renamed = fileList.find((entry) => entry.filename === nextFilename) ?? null;
+      if (renamed) {
+        setSelection([renamed.blobHash], renamed.blobHash, renamed.blobHash);
+      }
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Rename failed';
+    } finally {
+      renamePending = false;
     }
   }
 
@@ -2004,6 +2225,7 @@
 
 <svelte:window onkeydown={(e) => {
   if (e.key === 'Escape') {
+    handleManagerKeydown(e);
     collapseMount(activeMountId);
   }
   if (e.key === 'Delete' && e.target instanceof HTMLElement) {
@@ -2546,7 +2768,9 @@
                     <option value="newest">Newest</option>
                     <option value="oldest">Oldest</option>
                     <option value="name">Name</option>
+                    <option value="name-desc">Name (Z-A)</option>
                     <option value="size">Size</option>
+                    <option value="size-asc">Size (Smallest)</option>
                   </select>
                 </div>
                 <button
@@ -2561,7 +2785,13 @@
               </div>
               <div class="manager-summary">
                 <span>{visibleFiles.length} file{visibleFiles.length === 1 ? '' : 's'}</span>
-                <span>{selectedFile ? displayFileName(selectedFile) : 'No file selected'}</span>
+                <span>
+                  {selectedBlobHashes.length === 0
+                    ? 'No selection'
+                    : selectedBlobHashes.length === 1 && selectedFile
+                      ? displayFileName(selectedFile)
+                      : `${selectedBlobHashes.length} selected`}
+                </span>
               </div>
             </div>
             {#if visibleFiles.length === 0}
@@ -2570,9 +2800,21 @@
               <div class="file-list-scroll" class:icons={fileManagerViewMode === 'icons'}>
                 {#if fileManagerViewMode === 'details'}
                   <div class="file-list-head">
-                    <span>Name</span>
-                    <span>Size</span>
-                    <span>Updated</span>
+                    <span class="file-list-sort-wrap" data-sort={columnSortState('name')}>
+                      <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('name')}>
+                        Name
+                      </button>
+                    </span>
+                    <span class="file-list-sort-wrap" data-sort={columnSortState('size')}>
+                      <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('size')}>
+                        Size
+                      </button>
+                    </span>
+                    <span class="file-list-sort-wrap" data-sort={columnSortState('date')}>
+                      <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('date')}>
+                        Updated
+                      </button>
+                    </span>
                   </div>
                 {/if}
                 {#each visibleFiles as file (file.blobHash)}
@@ -2580,13 +2822,13 @@
                   <div
                     class:file-card={fileManagerViewMode === 'icons'}
                     class:file-row={fileManagerViewMode === 'details'}
-                    class:selected={selectedBlobHash === file.blobHash}
+                    class:selected={isFileSelected(file.blobHash)}
                     data-filename={file.filename}
                     draggable="true"
                     tabindex="0"
                     role="button"
-                    onclick={() => selectFile(file)}
-                    ondblclick={() => openFileInViewer(file)}
+                    onclick={(event) => handleFilePointerSelect(event, file)}
+                    ondblclick={() => openPreviewPane(file)}
                     ondragstart={(event) => handleNearbytesFileDragStart(event, file)}
                     onkeydown={(e) => handleFileRowKeydown(e, file)}
                   >
@@ -2595,7 +2837,37 @@
                         <FileIcon size={28} strokeWidth={1.8} />
                       </div>
                       <div class="file-card-copy">
-                        <span class="file-card-name" title={file.filename}>{displayFileName(file)}</span>
+                        {#if renamingBlobHash === file.blobHash}
+                          <input
+                            type="text"
+                            class="file-rename-input"
+                            bind:value={renameDraft}
+                            onclick={(event) => event.stopPropagation()}
+                            ondblclick={(event) => event.stopPropagation()}
+                            onblur={() => commitRename(file)}
+                            onkeydown={(event) => {
+                              event.stopPropagation();
+                              if (event.key === 'Enter') {
+                                void commitRename(file);
+                              } else if (event.key === 'Escape') {
+                                cancelRenaming();
+                              }
+                            }}
+                          />
+                        {:else}
+                          <button
+                            type="button"
+                            class="file-name-trigger file-card-name"
+                            title={file.filename}
+                            ondblclick={(event) => {
+                              event.stopPropagation();
+                              startRenaming(file);
+                            }}
+                            onclick={(event) => event.stopPropagation()}
+                          >
+                            {displayFileName(file)}
+                          </button>
+                        {/if}
                       </div>
                     {:else}
                       <div class="file-row-main">
@@ -2603,7 +2875,37 @@
                           <FileIcon size={15} strokeWidth={2} />
                         </span>
                         <div class="file-row-copy">
-                          <span class="file-row-name" title={file.filename}>{displayFileName(file)}</span>
+                          {#if renamingBlobHash === file.blobHash}
+                            <input
+                              type="text"
+                              class="file-rename-input"
+                              bind:value={renameDraft}
+                              onclick={(event) => event.stopPropagation()}
+                              ondblclick={(event) => event.stopPropagation()}
+                              onblur={() => commitRename(file)}
+                              onkeydown={(event) => {
+                                event.stopPropagation();
+                                if (event.key === 'Enter') {
+                                  void commitRename(file);
+                                } else if (event.key === 'Escape') {
+                                  cancelRenaming();
+                                }
+                              }}
+                            />
+                          {:else}
+                            <button
+                              type="button"
+                              class="file-name-trigger file-row-name"
+                              title={file.filename}
+                              ondblclick={(event) => {
+                                event.stopPropagation();
+                                startRenaming(file);
+                              }}
+                              onclick={(event) => event.stopPropagation()}
+                            >
+                              {displayFileName(file)}
+                            </button>
+                          {/if}
                           <span class="file-row-path" title={file.filename}>{file.filename}</span>
                         </div>
                       </div>
@@ -2636,18 +2938,6 @@
                   </p>
                 </div>
                 <div class="preview-actions">
-                  <button type="button" class="manager-btn" onclick={closePreviewPane}>
-                    <X class="button-icon" size={15} strokeWidth={2} />
-                    Close
-                  </button>
-                  <button type="button" class="manager-btn" onclick={() => openFileInViewer(selectedFile)}>
-                    <Eye class="button-icon" size={15} strokeWidth={2} />
-                    Open
-                  </button>
-                  <button type="button" class="manager-btn" onclick={() => handleDownload(selectedFile)}>
-                    <Download class="button-icon" size={15} strokeWidth={2} />
-                    Download
-                  </button>
                   <ArmedActionButton
                     class="manager-btn danger"
                     text="Delete"
@@ -2659,6 +2949,14 @@
                     title={isHistoryMode ? 'Jump to Latest before deleting' : ''}
                     onPress={() => handleDelete(selectedFile.filename)}
                   />
+                  <button type="button" class="manager-btn" onclick={() => handleDownload(selectedFile)}>
+                    <Download class="button-icon" size={15} strokeWidth={2} />
+                    Download
+                  </button>
+                  <button type="button" class="manager-btn preview-close-btn" onclick={closePreviewPane}>
+                    <X class="button-icon" size={15} strokeWidth={2} />
+                    Close
+                  </button>
                 </div>
               </div>
               <div class="preview-body">
@@ -3944,6 +4242,29 @@
     z-index: 1;
   }
 
+  .file-list-sort {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-align: left;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .file-list-sort:hover {
+    color: rgba(236, 254, 255, 0.92);
+  }
+
+  .file-list-sort-wrap[data-sort='ascending'] .file-list-sort::after {
+    content: ' ↑';
+  }
+
+  .file-list-sort-wrap[data-sort='descending'] .file-list-sort::after {
+    content: ' ↓';
+  }
+
   .file-list-scroll {
     flex: 1 1 auto;
     min-height: 0;
@@ -4028,6 +4349,32 @@
     white-space: nowrap;
     color: rgba(186, 230, 253, 0.45);
     font-size: 0.72rem;
+  }
+
+  .file-rename-input {
+    width: 100%;
+    min-height: 32px;
+    border: 1px solid rgba(56, 189, 248, 0.26);
+    border-radius: 10px;
+    background: rgba(10, 18, 33, 0.9);
+    color: #f8fafc;
+    padding: 0 0.68rem;
+    font: inherit;
+    outline: none;
+  }
+
+  .file-rename-input:focus {
+    border-color: rgba(56, 189, 248, 0.52);
+    box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.12);
+  }
+
+  .file-name-trigger {
+    border: 0;
+    background: transparent;
+    padding: 0;
+    text-align: left;
+    font: inherit;
+    cursor: text;
   }
 
   .file-row-size,
@@ -4172,6 +4519,10 @@
     gap: 0.5rem;
     flex-wrap: wrap;
     justify-content: flex-end;
+  }
+
+  .preview-close-btn {
+    margin-left: auto;
   }
 
   :global(.manager-btn) {

@@ -29,6 +29,7 @@ import {
   openRootInFileManagerBodySchema,
   openBodySchema,
   parseWithSchema,
+  renameFileBodySchema,
   renameFolderBodySchema,
   uploadFieldsSchema,
 } from './validation.js';
@@ -392,6 +393,17 @@ export function createRoutes(deps: RouteDependencies): Router {
       const secret = res.locals.secret as string;
       await deps.fileService.deleteFile(secret, filename);
       res.json({ deleted: true, filename });
+    })
+  );
+
+  router.post(
+    '/files/rename',
+    requireSecret(deps),
+    asyncHandler(async (req, res) => {
+      const { from, to } = parseWithSchema(renameFileBodySchema, req.body);
+      const secret = res.locals.secret as string;
+      const renamed = await deps.fileService.renameFile(secret, from, to);
+      res.json({ renamed });
     })
   );
 

@@ -38,11 +38,13 @@ export interface TimelineEvent {
   type: FileEvent['type'];
   filename: string;
   timestamp: number;
+  toFilename?: string;
   blobHash?: string;
   size?: number;
   mimeType?: string;
   createdAt?: number;
   deletedAt?: number;
+  renamedAt?: number;
 }
 
 export interface RenameFolderSummary {
@@ -50,6 +52,11 @@ export interface RenameFolderSummary {
   toFolder: string;
   movedFiles: number;
   mergedConflicts: number;
+}
+
+export interface RenameFileSummary {
+  fromName: string;
+  toName: string;
 }
 
 export interface FileServiceDependencies {
@@ -69,6 +76,7 @@ export interface FileService {
   deleteFile(secret: string, filename: string): Promise<void>;
   listFiles(secret: string): Promise<FileMetadata[]>;
   getFile(secret: string, blobHash: string): Promise<Buffer>;
+  renameFile(secret: string, fromName: string, toName: string): Promise<RenameFileSummary>;
   renameFolder(
     secret: string,
     fromFolder: string,
@@ -116,6 +124,17 @@ export function createFileService(dependencies: FileServiceDependencies): FileSe
       listFilesWithDeps(secret, dependencies.crypto, dependencies.storage, channelStorage, pathMapper),
     getFile: async (secret, blobHash) =>
       getFileWithDeps(secret, blobHash, dependencies.crypto, channelStorage),
+    renameFile: async (secret, fromName, toName) =>
+      renameFileWithDeps(
+        secret,
+        fromName,
+        toName,
+        dependencies.crypto,
+        dependencies.storage,
+        channelStorage,
+        pathMapper,
+        now
+      ),
     renameFolder: async (secret, fromFolder, toFolder, options) =>
       renameFolderWithDeps(
         secret,
@@ -189,6 +208,15 @@ export async function listFiles(secret: string): Promise<FileMetadata[]> {
 export async function getFile(secret: string, blobHash: string): Promise<Buffer> {
   const service = getDefaultFileService();
   return service.getFile(secret, blobHash);
+}
+
+export async function renameFile(
+  secret: string,
+  fromName: string,
+  toName: string
+): Promise<RenameFileSummary> {
+  const service = getDefaultFileService();
+  return service.renameFile(secret, fromName, toName);
 }
 
 /**
@@ -366,15 +394,7 @@ async function renameFolderWithDeps(
 
   let cursor = baseTimestamp;
   for (const item of plan) {
-    await appendCreateEvent(channelStorage, crypto, keyPair, {
-      filename: item.toName,
-      blobHash: item.file.blobHash,
-      size: item.file.size,
-      mimeType: item.file.mimeType,
-      createdAt: cursor,
-    });
-    cursor += 1;
-    await appendDeleteEvent(channelStorage, crypto, keyPair, item.fromName, cursor);
+    await appendRenameEvent(channelStorage, crypto, keyPair, item.fromName, item.toName, cursor);
     cursor += 1;
   }
 
@@ -383,6 +403,48 @@ async function renameFolderWithDeps(
     toFolder: normalizedTo,
     movedFiles: plan.length,
     mergedConflicts: conflicts.length,
+  };
+}
+
+async function renameFileWithDeps(
+  secret: string,
+  fromName: string,
+  toName: string,
+  crypto: CryptoOperations,
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper,
+  now: () => number
+): Promise<RenameFileSummary> {
+  assertNonEmptyFilename(fromName);
+  assertNonEmptyFilename(toName);
+  if (fromName === toName) {
+    throw new Error('Source and destination file names are the same');
+  }
+
+  const normalizedSecret = normalizeSecret(secret);
+  const volume = await openVolume(normalizedSecret, crypto, storage, pathMapper);
+  const entries = await loadEventLog(volume, channelStorage);
+  await verifyEventLog(entries, volume, crypto);
+
+  const files = materializeFilesFromEntries(entries);
+  if (!files.some((file) => file.filename === fromName)) {
+    throw new Error(`File "${fromName}" does not exist`);
+  }
+  if (files.some((file) => file.filename === toName)) {
+    throw new Error(`File "${toName}" already exists`);
+  }
+
+  const timeline = mapEntriesToTimeline(entries);
+  const maxTimestamp = timeline.reduce((max, event) => Math.max(max, event.timestamp), 0);
+  const renamedAt = Math.max(now(), maxTimestamp + 1);
+  const keyPair = await crypto.deriveKeys(normalizedSecret);
+
+  await appendRenameEvent(channelStorage, crypto, keyPair, fromName, toName, renamedAt);
+
+  return {
+    fromName,
+    toName,
   };
 }
 
@@ -515,6 +577,23 @@ function mapEntriesToTimeline(entries: EventLogEntry[]): TimelineEvent[] {
           deletedAt: inferredTimestamp,
         },
       });
+      continue;
+    }
+
+    if (payload.type === EventType.RENAME_FILE) {
+      const inferredTimestamp = payload.renamedAt ?? sequence;
+      rows.push({
+        sequence,
+        hasExplicitTimestamp: payload.renamedAt !== undefined,
+        event: {
+          eventHash: entry.eventHash,
+          type: 'RENAME_FILE',
+          filename: payload.fileName,
+          toFilename: payload.toFileName,
+          timestamp: inferredTimestamp,
+          renamedAt: inferredTimestamp,
+        },
+      });
     }
   }
 
@@ -543,13 +622,25 @@ function timelineToFileEvents(timeline: TimelineEvent[]): FileEvent[] {
       });
       continue;
     }
-    if (event.deletedAt === undefined) {
+    if (event.type === 'DELETE_FILE') {
+      if (event.deletedAt === undefined) {
+        continue;
+      }
+      fileEvents.push({
+        type: 'DELETE_FILE',
+        filename: event.filename,
+        deletedAt: event.deletedAt,
+      });
+      continue;
+    }
+    if (!event.toFilename || event.renamedAt === undefined) {
       continue;
     }
     fileEvents.push({
-      type: 'DELETE_FILE',
+      type: 'RENAME_FILE',
       filename: event.filename,
-      deletedAt: event.deletedAt,
+      toFilename: event.toFilename,
+      renamedAt: event.renamedAt,
     });
   }
   return fileEvents;
@@ -574,8 +665,18 @@ function compareTimelineRows(
   if (left.event.filename < right.event.filename) return -1;
   if (left.event.filename > right.event.filename) return 1;
 
-  const leftTie = left.event.type === 'CREATE_FILE' ? `C:${left.event.blobHash ?? ''}` : 'D';
-  const rightTie = right.event.type === 'CREATE_FILE' ? `C:${right.event.blobHash ?? ''}` : 'D';
+  const leftTie =
+    left.event.type === 'CREATE_FILE'
+      ? `C:${left.event.blobHash ?? ''}`
+      : left.event.type === 'RENAME_FILE'
+        ? `R:${left.event.toFilename ?? ''}`
+        : 'D';
+  const rightTie =
+    right.event.type === 'CREATE_FILE'
+      ? `C:${right.event.blobHash ?? ''}`
+      : right.event.type === 'RENAME_FILE'
+        ? `R:${right.event.toFilename ?? ''}`
+        : 'D';
   if (leftTie < rightTie) return -1;
   if (leftTie > rightTie) return 1;
 
@@ -638,6 +739,27 @@ async function appendDeleteEvent(
     hash: EMPTY_HASH,
     encryptedKey: createEncryptedData(new Uint8Array(0)),
     deletedAt,
+  };
+  const payloadBytes = serializeEventPayload(payload);
+  const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);
+  await channelStorage.storeEvent(keyPair.publicKey, { payload, signature });
+}
+
+async function appendRenameEvent(
+  channelStorage: ChannelStorage,
+  crypto: CryptoOperations,
+  keyPair: KeyPair,
+  fromName: string,
+  toName: string,
+  renamedAt: number
+): Promise<void> {
+  const payload: EventPayload = {
+    type: EventType.RENAME_FILE,
+    fileName: fromName,
+    toFileName: toName,
+    hash: EMPTY_HASH,
+    encryptedKey: createEncryptedData(new Uint8Array(0)),
+    renamedAt,
   };
   const payloadBytes = serializeEventPayload(payload);
   const signature = await crypto.signPR(payloadBytes, keyPair.privateKey);

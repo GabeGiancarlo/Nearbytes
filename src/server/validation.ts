@@ -24,6 +24,11 @@ export const renameFolderBodySchema = z.object({
   merge: z.boolean().optional().default(false),
 });
 
+export const renameFileBodySchema = z.object({
+  from: z.string().min(1, 'Source file is required'),
+  to: z.string().min(1, 'Destination file is required'),
+});
+
 export const consolidateRootParamSchema = z.object({
   sourceId: z.string().trim().min(1, 'Source root id is required'),
 });

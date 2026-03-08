@@ -35,6 +35,16 @@ export function reconstructFileState(events: FileEvent[]): Map<string, FileMetad
       });
     } else if (event.type === 'DELETE_FILE') {
       files.delete(event.filename);
+    } else if (event.type === 'RENAME_FILE') {
+      const existing = files.get(event.filename);
+      if (!existing) {
+        continue;
+      }
+      files.delete(event.filename);
+      files.set(event.toFilename, {
+        ...existing,
+        filename: event.toFilename,
+      });
     }
   }
 
@@ -42,7 +52,9 @@ export function reconstructFileState(events: FileEvent[]): Map<string, FileMetad
 }
 
 function getEventTimestamp(event: FileEvent): number {
-  return event.type === 'CREATE_FILE' ? event.createdAt : event.deletedAt;
+  if (event.type === 'CREATE_FILE') return event.createdAt;
+  if (event.type === 'DELETE_FILE') return event.deletedAt;
+  return event.renamedAt;
 }
 
 function compareStrings(left: string, right: string): number {
@@ -54,6 +66,9 @@ function compareStrings(left: string, right: string): number {
 function eventTieBreaker(event: FileEvent): string {
   if (event.type === 'CREATE_FILE') {
     return `C:${event.blobHash}`;
+  }
+  if (event.type === 'RENAME_FILE') {
+    return `R:${event.toFilename}`;
   }
   return 'D';
 }

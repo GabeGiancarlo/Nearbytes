@@ -72,6 +72,7 @@ app.whenReady().then(async () => {
 });
 
 async function startDesktop(): Promise<void> {
+  app.setName('Nearbytes');
   applyDesktopIcon();
   const runtimeModule = await loadRuntimeModule();
   const runtime = await runtimeModule.startApiRuntime({
@@ -256,7 +257,7 @@ function applyDesktopIcon(): void {
 }
 
 function resolveDesktopIconPath(): string | null {
-  const iconName = process.platform === 'darwin' ? 'icon.icns' : process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+  const iconName = process.platform === 'darwin' ? 'icon.png' : process.platform === 'win32' ? 'icon.ico' : 'icon.png';
   return resolveExistingPath([
     path.join(app.getAppPath(), 'build', 'icons', iconName),
     path.join(process.resourcesPath, 'build', 'icons', iconName),

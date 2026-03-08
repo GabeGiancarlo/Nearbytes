@@ -59,10 +59,12 @@ export function createSignature(bytes: Uint8Array): Signature {
  * Event type discriminator
  * CREATE_FILE: Adds a file to the volume
  * DELETE_FILE: Removes a file from the volume
+ * RENAME_FILE: Renames a logical filename within the volume
  */
 export enum EventType {
   CREATE_FILE = 'CREATE_FILE',
   DELETE_FILE = 'DELETE_FILE',
+  RENAME_FILE = 'RENAME_FILE',
 }
 
 /**
@@ -77,10 +79,17 @@ export enum EventType {
  * - fileName: The name of the file being deleted
  * - hash: Must be empty hash (all zeros) - not used for deletion
  * - encryptedKey: Must be empty - not used for deletion
+ *
+ * For RENAME_FILE events:
+ * - fileName: The source logical filename
+ * - toFileName: The destination logical filename
+ * - hash: Must be empty hash (all zeros) - not used for rename
+ * - encryptedKey: Must be empty - not used for rename
  */
 export interface EventPayload {
   readonly type: EventType;
   readonly fileName: string;
+  readonly toFileName?: string;
   readonly hash: Hash;
   readonly encryptedKey: EncryptedData;
   /**
@@ -99,6 +108,10 @@ export interface EventPayload {
    * Unix timestamp in milliseconds when the file was deleted (DELETE_FILE only)
    */
   readonly deletedAt?: number;
+  /**
+   * Unix timestamp in milliseconds when the file was renamed (RENAME_FILE only)
+   */
+  readonly renamedAt?: number;
 }
 
 /**
@@ -116,12 +129,14 @@ export interface SerializedEvent {
   readonly payload: {
     readonly type: string; // EventType as string
     readonly fileName: string;
+    readonly toFileName?: string;
     readonly hash: string;
     readonly encryptedKey: string; // Base64
     readonly size?: number;
     readonly mimeType?: string;
     readonly createdAt?: number;
     readonly deletedAt?: number;
+    readonly renamedAt?: number;
   };
   readonly signature: string; // Base64
 }
@@ -135,4 +150,3 @@ export class InvalidHashError extends ValidationError {
     this.name = 'InvalidHashError';
   }
 }
-

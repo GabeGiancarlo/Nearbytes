@@ -1,7 +1,7 @@
 /**
  * File-level event types for the NearBytes file layer.
  */
-export type FileEvent = CreateFileEvent | DeleteFileEvent;
+export type FileEvent = CreateFileEvent | DeleteFileEvent | RenameFileEvent;
 
 /**
  * Event emitted when a file is created or updated.
@@ -22,6 +22,16 @@ export interface DeleteFileEvent {
   type: 'DELETE_FILE';
   filename: string;
   deletedAt: number;
+}
+
+/**
+ * Event emitted when a file is renamed without changing its blob.
+ */
+export interface RenameFileEvent {
+  type: 'RENAME_FILE';
+  filename: string;
+  toFilename: string;
+  renamedAt: number;
 }
 
 /**

@@ -71,6 +71,15 @@ export interface RenameFolderResponse {
   renamed: RenameFolderSummary;
 }
 
+export interface RenameFileSummary {
+  fromName: string;
+  toName: string;
+}
+
+export interface RenameFileResponse {
+  renamed: RenameFileSummary;
+}
+
 export type SourceProvider = 'local' | 'dropbox' | 'mega' | 'gdrive';
 export type RootProvider = SourceProvider;
 export type StorageFullPolicy = 'block-writes' | 'drop-older-blocks';
@@ -522,6 +531,21 @@ export async function deleteFile(auth: Auth, filename: string): Promise<void> {
   await apiRequest(`/files/${encodedName}`, {
     method: 'DELETE',
     auth,
+  });
+}
+
+/**
+ * Renames a single file without rewriting its blob.
+ */
+export async function renameFile(
+  auth: Auth,
+  from: string,
+  to: string
+): Promise<RenameFileResponse> {
+  return apiRequest<RenameFileResponse>('/files/rename', {
+    method: 'POST',
+    auth,
+    body: JSON.stringify({ from, to }),
   });
 }
 

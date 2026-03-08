@@ -174,6 +174,35 @@ describe('Nearbytes API', () => {
     expect(downloaded).toBe('alpha-payload');
   });
 
+  it('renames a single file', async () => {
+    const openRes = await request(app).post('/open').send({ secret: SECRET_RENAME_FOLDER }).expect(200);
+    const token = openRes.body.token as string;
+
+    await request(app)
+      .post('/upload')
+      .set('Authorization', `Bearer ${token}`)
+      .field('filename', 'draft.txt')
+      .attach('file', Buffer.from('rename-me'), 'draft.txt')
+      .expect(200);
+
+    const renameRes = await request(app)
+      .post('/files/rename')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ from: 'draft.txt', to: 'final.txt' })
+      .expect(200);
+
+    expect(renameRes.body.renamed.fromName).toBe('draft.txt');
+    expect(renameRes.body.renamed.toName).toBe('final.txt');
+
+    const listRes = await request(app)
+      .get('/files')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(listRes.body.files.some((file: { filename: string }) => file.filename === 'draft.txt')).toBe(false);
+    expect(listRes.body.files.some((file: { filename: string }) => file.filename === 'final.txt')).toBe(true);
+  });
+
   it('rejects wrong secrets and isolates volumes', async () => {
     const openRes = await request(app)
       .post('/open')

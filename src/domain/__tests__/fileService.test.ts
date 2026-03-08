@@ -164,6 +164,27 @@ describe('FileService', () => {
     await cleanup();
   });
 
+  it('renames a single file with a first-class rename event', async () => {
+    const { service, cleanup } = await createTestService(START_TIME);
+    const secret = 'test:secret:rename-file';
+
+    await service.addFile(secret, 'draft.txt', Buffer.from('hello'));
+
+    const renamed = await service.renameFile(secret, 'draft.txt', 'final.txt');
+    const files = await service.listFiles(secret);
+    const timeline = await service.getTimeline(secret);
+
+    expect(renamed.fromName).toBe('draft.txt');
+    expect(renamed.toName).toBe('final.txt');
+    expect(files).toHaveLength(1);
+    expect(files[0].filename).toBe('final.txt');
+    expect(timeline.at(-1)?.type).toBe('RENAME_FILE');
+    expect(timeline.at(-1)?.filename).toBe('draft.txt');
+    expect(timeline.at(-1)?.toFilename).toBe('final.txt');
+
+    await cleanup();
+  });
+
   it('requires merge when destination folder already contains files', async () => {
     const { service, cleanup } = await createTestService(START_TIME);
     const secret = 'test:secret:rename-merge';
