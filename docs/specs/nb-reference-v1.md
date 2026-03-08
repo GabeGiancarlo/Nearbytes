@@ -27,6 +27,10 @@ Introductory use cases (non-normative):
 
 These are all the same cryptographic shape: a reference is usable once the recipient context can derive the private key matching the targeted public key and can still reach the referenced ciphertext blocks.
 
+Command note:
+
+1. Recipient-bound export/import command semantics are defined in `file-commands-v1.md`.
+
 ## 2. Terms
 
 1. **Volume Secret**: user input used to open a volume (`address` or `address:password`).

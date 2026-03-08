@@ -16,6 +16,10 @@ This specification does not define:
 2. ciphertext-block transport;
 3. conflict-resolution UI beyond overwrite rejection.
 
+Command note:
+
+1. Recipient-bound bundle export/import command semantics are defined in `file-commands-v1.md`.
+
 Security intuition (non-normative):
 
 1. A party that cannot open recipient volume `r` cannot unwrap any nested FEK capsules in the bundle.

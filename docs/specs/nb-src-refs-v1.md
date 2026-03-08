@@ -24,6 +24,10 @@ Introductory use cases (non-normative):
 
 These workflows all depend on the same rule: the bundle is useful only to a party that can derive the source volume key material locally and can still reach the referenced ciphertext blocks.
 
+Command note:
+
+1. Source-bound bundle copy/paste command semantics are defined in `file-commands-v1.md`.
+
 Security intuition (non-normative):
 
 1. A party that cannot open source volume `s` cannot unwrap the nested source-bound FEK capsules.

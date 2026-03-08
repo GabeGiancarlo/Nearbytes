@@ -153,6 +153,56 @@ Downloads and decrypts the file by blob hash.
 
 Returns raw bytes (not JSON).
 
+### POST /references/source/export
+
+Exports one or more logical filenames from the authenticated source volume as a source-bound `nb.src.refs.v1` bundle.
+
+Request:
+
+```json
+{
+  "filenames": ["notes/todo.txt", "photos/a.jpg"]
+}
+```
+
+### POST /references/source/import
+
+Imports a source-bound `nb.src.refs.v1` bundle into the authenticated destination volume.
+
+Request:
+
+```json
+{
+  "sourceSecret": "string",
+  "bundle": { "p": "nb.src.refs.v1", "s": "hex", "items": [] }
+}
+```
+
+### POST /references/recipient/export
+
+Exports one or more logical filenames from the authenticated source volume as a recipient-bound `nb.refs.v1` bundle.
+
+Request:
+
+```json
+{
+  "recipientVolumeId": "hex",
+  "filenames": ["notes/todo.txt"]
+}
+```
+
+### POST /references/recipient/import
+
+Imports a recipient-bound `nb.refs.v1` bundle into the authenticated destination volume.
+
+Request:
+
+```json
+{
+  "bundle": { "p": "nb.refs.v1", "r": "hex", "items": [] }
+}
+```
+
 ### GET /config/roots (local-only)
 
 Returns local multi-root configuration and runtime root status. Requests are accepted only from loopback clients.

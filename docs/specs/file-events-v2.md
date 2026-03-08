@@ -16,6 +16,10 @@ This specification does not define:
 2. ACLs, locking, or concurrent merge policy.
 3. Filesystem mount behavior outside the event log.
 
+Command note:
+
+1. User-level commands such as upload, copy, paste, recipient-bound export, and folder rename orchestration are defined in `file-commands-v1.md`.
+
 ## 2. Terms
 
 1. **Logical filename**: UTF-8 path-like name stored in events, for example `photos/2026/a.jpg`.
