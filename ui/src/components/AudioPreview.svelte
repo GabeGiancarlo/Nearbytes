@@ -19,10 +19,16 @@
   let analyser: AnalyserNode | null = null;
   let mediaSource: MediaElementAudioSourceNode | null = null;
   let spectrumData: Uint8Array | null = null;
+  let renderedLevels: number[] = [];
+  let lastFrameTime = 0;
   let playing = $state(false);
 
   function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
+  }
+
+  function interpolate(current: number, target: number, amount: number): number {
+    return current + (target - current) * amount;
   }
 
   function frequencyToBin(frequency: number, sampleRate: number, binCount: number): number {
@@ -77,9 +83,10 @@
       cancelAnimationFrame(animationFrame);
       animationFrame = 0;
     }
+    lastFrameTime = 0;
   }
 
-  function drawSpectrum() {
+  function drawSpectrum(frameTime = performance.now()) {
     const canvas = canvasElement;
     if (!canvas) return;
     const context = canvas.getContext('2d');
@@ -99,6 +106,16 @@
     context.clearRect(0, 0, width, height);
 
     const barCount = Math.max(24, Math.floor(width / 14));
+    if (renderedLevels.length !== barCount) {
+      renderedLevels = Array.from({ length: barCount }, () => 0.045);
+    }
+    const elapsedSeconds =
+      lastFrameTime === 0
+        ? 1 / 60
+        : clamp((frameTime - lastFrameTime) / 1000, 1 / 120, 0.08);
+    lastFrameTime = frameTime;
+    const attackBlend = 1 - Math.exp(-elapsedSeconds * 4.2);
+    const releaseBlend = 1 - Math.exp(-elapsedSeconds * 2.15);
     const gap = 4;
     const barWidth = Math.max(4, (width - gap * (barCount - 1)) / barCount);
     const gradient = context.createLinearGradient(0, height, 0, 0);
@@ -126,7 +143,11 @@
           ? sampleBandLevel(index, barCount, spectrum, sampleRate)
           : 0;
       const idleLevel = 0.045;
-      const level = playing ? Math.max(0.08, base) : idleLevel;
+      const targetLevel = playing ? Math.max(0.06, base * 0.94) : idleLevel;
+      const currentLevel = renderedLevels[index] ?? idleLevel;
+      const blend = targetLevel > currentLevel ? attackBlend : releaseBlend;
+      const level = interpolate(currentLevel, targetLevel, blend);
+      renderedLevels[index] = level;
       const barHeight = Math.max(10, level * (height - 12));
       const y = height - barHeight;
       context.fillStyle = gradient;
@@ -153,7 +174,7 @@
       analyser.fftSize = 2048;
       analyser.minDecibels = -96;
       analyser.maxDecibels = -18;
-      analyser.smoothingTimeConstant = 0.78;
+      analyser.smoothingTimeConstant = 0.9;
       spectrumData = new Uint8Array(analyser.frequencyBinCount);
     }
     if (!mediaSource) {

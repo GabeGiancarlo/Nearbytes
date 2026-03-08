@@ -2,9 +2,10 @@ import type { KeyPair, Secret } from '../types/keys.js';
 import { createSecret } from '../types/keys.js';
 import type { CryptoOperations } from '../crypto/index.js';
 import type { StorageBackend, ChannelPathMapper } from '../types/storage.js';
-import type { EventPayload, Hash } from '../types/events.js';
+import type { EventPayload, Hash, EncryptedData } from '../types/events.js';
 import { createEncryptedData, EMPTY_HASH, EventType } from '../types/events.js';
 import { createCryptoOperations } from '../crypto/index.js';
+import { DecryptionError } from '../crypto/errors.js';
 import { FilesystemStorageBackend } from '../storage/filesystem.js';
 import { ChannelStorage } from '../storage/channel.js';
 import { getDefaultStorageDir } from '../storagePath.js';
@@ -12,8 +13,29 @@ import { defaultPathMapper } from '../types/storage.js';
 import { serializeEventPayload } from '../storage/serialization.js';
 import { openVolume, loadEventLog, verifyEventLog } from './volume.js';
 import type { FileEvent, FileMetadata } from './fileEvents.js';
-import { reconstructFileState } from './fileState.js';
 import type { EventLogEntry } from '../types/volume.js';
+import {
+  createRecipientKeyCapsule,
+  decryptFileForVolume,
+  encryptFileForVolume,
+  publicKeyFromVolumeId,
+  unwrapFileKeyForVolume,
+  unwrapRecipientKeyCapsule,
+  volumeIdFromPublicKey,
+  wrapFileKeyForVolume,
+} from './fileCrypto.js';
+import {
+  decodeWrappedKey,
+  encodeWrappedKey,
+  parseRecipientReferenceBundle,
+  parseSourceReferenceBundle,
+  serializeRecipientReferenceBundle,
+  serializeSourceReferenceBundle,
+  type FileContentType,
+  type RecipientReferenceBundle,
+  type SourceReferenceBundle,
+} from './fileReferenceCodec.js';
+import { dedupeOrderedFilenames, resolveImportedFilename } from './fileCommands.js';
 
 const SNAPSHOT_FILE_NAME = 'snapshot.latest.json';
 const SNAPSHOT_VERSION = 1;
@@ -33,6 +55,20 @@ export interface SnapshotSummary {
   lastEventHash: string | null;
 }
 
+export interface ReferenceExportResult<TBundle> {
+  bundle: TBundle;
+  serialized: string;
+  upgradedCount: number;
+}
+
+export interface SourceImportResult {
+  imported: FileMetadata[];
+}
+
+export interface RecipientImportResult {
+  imported: FileMetadata[];
+}
+
 export interface TimelineEvent {
   eventHash: string;
   type: FileEvent['type'];
@@ -40,6 +76,7 @@ export interface TimelineEvent {
   timestamp: number;
   toFilename?: string;
   blobHash?: string;
+  contentType?: FileContentType;
   size?: number;
   mimeType?: string;
   createdAt?: number;
@@ -85,6 +122,47 @@ export interface FileService {
   ): Promise<RenameFolderSummary>;
   computeSnapshot(secret: string): Promise<SnapshotSummary>;
   getTimeline(secret: string): Promise<TimelineEvent[]>;
+  exportSourceReferences(
+    secret: string,
+    filenames: string[]
+  ): Promise<ReferenceExportResult<SourceReferenceBundle>>;
+  importSourceReferences(
+    destinationSecret: string,
+    bundle: unknown,
+    sourceSecret: string
+  ): Promise<SourceImportResult>;
+  exportRecipientReferences(
+    secret: string,
+    filenames: string[],
+    recipientVolumeId: string
+  ): Promise<ReferenceExportResult<RecipientReferenceBundle>>;
+  importRecipientReferences(
+    secret: string,
+    bundle: unknown
+  ): Promise<RecipientImportResult>;
+}
+
+interface StoredFileRecord extends FileMetadata {
+  encryptedKey: EncryptedData;
+  contentType: FileContentType;
+}
+
+interface StoredTimelineRow {
+  eventHash: string;
+  type: FileEvent['type'];
+  filename: string;
+  timestamp: number;
+  hasExplicitTimestamp: boolean;
+  sequence: number;
+  toFilename?: string;
+  blobHash?: string;
+  encryptedKey?: EncryptedData;
+  contentType?: FileContentType;
+  size?: number;
+  mimeType?: string;
+  createdAt?: number;
+  deletedAt?: number;
+  renamedAt?: number;
 }
 
 /**
@@ -123,7 +201,14 @@ export function createFileService(dependencies: FileServiceDependencies): FileSe
     listFiles: async (secret) =>
       listFilesWithDeps(secret, dependencies.crypto, dependencies.storage, channelStorage, pathMapper),
     getFile: async (secret, blobHash) =>
-      getFileWithDeps(secret, blobHash, dependencies.crypto, channelStorage),
+      getFileWithDeps(
+        secret,
+        blobHash,
+        dependencies.crypto,
+        dependencies.storage,
+        channelStorage,
+        pathMapper
+      ),
     renameFile: async (secret, fromName, toName) =>
       renameFileWithDeps(
         secret,
@@ -158,6 +243,48 @@ export function createFileService(dependencies: FileServiceDependencies): FileSe
       ),
     getTimeline: async (secret) =>
       getTimelineWithDeps(secret, dependencies.crypto, dependencies.storage, channelStorage, pathMapper),
+    exportSourceReferences: async (secret, filenames) =>
+      exportSourceReferencesWithDeps(
+        secret,
+        filenames,
+        dependencies.crypto,
+        dependencies.storage,
+        channelStorage,
+        pathMapper,
+        now
+      ),
+    importSourceReferences: async (destinationSecret, bundle, sourceSecret) =>
+      importSourceReferencesWithDeps(
+        destinationSecret,
+        bundle,
+        sourceSecret,
+        dependencies.crypto,
+        dependencies.storage,
+        channelStorage,
+        pathMapper,
+        now
+      ),
+    exportRecipientReferences: async (secret, filenames, recipientVolumeId) =>
+      exportRecipientReferencesWithDeps(
+        secret,
+        filenames,
+        recipientVolumeId,
+        dependencies.crypto,
+        dependencies.storage,
+        channelStorage,
+        pathMapper,
+        now
+      ),
+    importRecipientReferences: async (secret, bundle) =>
+      importRecipientReferencesWithDeps(
+        secret,
+        bundle,
+        dependencies.crypto,
+        dependencies.storage,
+        channelStorage,
+        pathMapper,
+        now
+      ),
   };
 }
 
@@ -249,6 +376,40 @@ export async function getTimeline(secret: string): Promise<TimelineEvent[]> {
   return service.getTimeline(secret);
 }
 
+export async function exportSourceReferences(
+  secret: string,
+  filenames: string[]
+): Promise<ReferenceExportResult<SourceReferenceBundle>> {
+  const service = getDefaultFileService();
+  return service.exportSourceReferences(secret, filenames);
+}
+
+export async function importSourceReferences(
+  destinationSecret: string,
+  bundle: unknown,
+  sourceSecret: string
+): Promise<SourceImportResult> {
+  const service = getDefaultFileService();
+  return service.importSourceReferences(destinationSecret, bundle, sourceSecret);
+}
+
+export async function exportRecipientReferences(
+  secret: string,
+  filenames: string[],
+  recipientVolumeId: string
+): Promise<ReferenceExportResult<RecipientReferenceBundle>> {
+  const service = getDefaultFileService();
+  return service.exportRecipientReferences(secret, filenames, recipientVolumeId);
+}
+
+export async function importRecipientReferences(
+  secret: string,
+  bundle: unknown
+): Promise<RecipientImportResult> {
+  const service = getDefaultFileService();
+  return service.importRecipientReferences(secret, bundle);
+}
+
 function getDefaultFileService(): FileService {
   if (!defaultFileService) {
     const storageDir = getDefaultStorageDir();
@@ -279,15 +440,20 @@ async function addFileWithDeps(
   await openVolume(normalizedSecret, crypto, storage, pathMapper);
 
   const keyPair = await crypto.deriveKeys(normalizedSecret);
-  const symmetricKey = await crypto.deriveSymKey(keyPair.privateKey);
-  const encryptedData = await crypto.encryptSym(data, symmetricKey);
-  const blobHash = await crypto.computeHash(encryptedData);
-  await channelStorage.storeEncryptedData(blobHash, encryptedData, true, keyPair.publicKey);
+  const encrypted = await encryptFileForVolume(crypto, keyPair.privateKey, data);
+  await channelStorage.storeEncryptedData(
+    encrypted.blobHash,
+    encrypted.encryptedData,
+    true,
+    keyPair.publicKey
+  );
 
   const createdAt = now();
   await appendCreateEvent(channelStorage, crypto, keyPair, {
     filename,
-    blobHash,
+    blobHash: encrypted.blobHash,
+    encryptedKey: encrypted.encryptedKey,
+    contentType: encrypted.contentType,
     size: data.length,
     mimeType,
     createdAt,
@@ -295,7 +461,8 @@ async function addFileWithDeps(
 
   return {
     filename,
-    blobHash,
+    blobHash: encrypted.blobHash,
+    contentType: encrypted.contentType,
     size: data.length,
     mimeType,
     createdAt,
@@ -465,12 +632,28 @@ async function getFileWithDeps(
   secret: string,
   blobHash: string,
   crypto: CryptoOperations,
-  channelStorage: ChannelStorage
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper
 ): Promise<Buffer> {
-  const keyPair = await crypto.deriveKeys(normalizeSecret(secret));
-  const symmetricKey = await crypto.deriveSymKey(keyPair.privateKey);
+  const normalizedSecret = normalizeSecret(secret);
+  const volume = await openVolume(normalizedSecret, crypto, storage, pathMapper);
+  const entries = await loadEventLog(volume, channelStorage);
+  await verifyEventLog(entries, volume, crypto);
+
+  const currentFile = materializeStoredFilesFromEntries(entries).find((file) => file.blobHash === blobHash);
+  if (!currentFile) {
+    throw new DecryptionError('File is not available in the active volume');
+  }
+
+  const keyPair = await crypto.deriveKeys(normalizedSecret);
   const encryptedData = await channelStorage.retrieveEncryptedData(blobHash as Hash, keyPair.publicKey);
-  const plaintext = await crypto.decryptSym(encryptedData, symmetricKey);
+  const plaintext = await decryptFileForVolume(
+    crypto,
+    keyPair.privateKey,
+    encryptedData,
+    currentFile.encryptedKey
+  );
   return Buffer.from(plaintext);
 }
 
@@ -519,12 +702,258 @@ async function getTimelineWithDeps(
   return mapEntriesToTimeline(entries);
 }
 
-function materializeFilesFromEntries(entries: EventLogEntry[]): FileMetadata[] {
-  const timeline = mapEntriesToTimeline(entries);
-  const fileEvents = timelineToFileEvents(timeline);
+async function exportSourceReferencesWithDeps(
+  secret: string,
+  filenames: string[],
+  crypto: CryptoOperations,
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper,
+  now: () => number
+): Promise<ReferenceExportResult<SourceReferenceBundle>> {
+  const normalizedSecret = normalizeSecret(secret);
+  const orderedFilenames = dedupeOrderedFilenames(filenames);
+  if (orderedFilenames.length === 0) {
+    throw new Error('At least one filename is required');
+  }
 
-  const state = reconstructFileState(fileEvents);
-  const files = Array.from(state.values());
+  const volume = await openVolume(normalizedSecret, crypto, storage, pathMapper);
+  const keyPair = await crypto.deriveKeys(normalizedSecret);
+  let { files } = await loadVolumeFiles(crypto, channelStorage, volume);
+  let upgradedCount = 0;
+
+  upgradedCount += await upgradeLegacyFilesForExport(
+    orderedFilenames,
+    files,
+    keyPair,
+    crypto,
+    channelStorage,
+    now
+  );
+  if (upgradedCount > 0) {
+    ({ files } = await loadVolumeFiles(crypto, channelStorage, volume));
+  }
+
+  const fileMap = new Map(files.map((file) => [file.filename, file]));
+  const bundle: SourceReferenceBundle = {
+    p: 'nb.src.refs.v1',
+    s: volumeIdFromPublicKey(keyPair.publicKey),
+    items: orderedFilenames.map((filename) => {
+      const file = requireStoredFile(fileMap, filename);
+      return {
+        name: file.filename,
+        mime: file.mimeType,
+        createdAt: file.createdAt,
+        ref: {
+          p: 'nb.src.ref.v1',
+          s: volumeIdFromPublicKey(keyPair.publicKey),
+          c: {
+            t: file.contentType,
+            h: file.blobHash,
+            z: file.size,
+          },
+          x: encodeWrappedKey(file.encryptedKey),
+        },
+      };
+    }),
+  };
+
+  return {
+    bundle,
+    serialized: serializeSourceReferenceBundle(bundle),
+    upgradedCount,
+  };
+}
+
+async function importSourceReferencesWithDeps(
+  destinationSecret: string,
+  bundleValue: unknown,
+  sourceSecret: string,
+  crypto: CryptoOperations,
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper,
+  now: () => number
+): Promise<SourceImportResult> {
+  const bundle = parseSourceReferenceBundle(bundleValue);
+  const normalizedDestinationSecret = normalizeSecret(destinationSecret);
+  const normalizedSourceSecret = normalizeSecret(sourceSecret);
+  const destinationKeyPair = await crypto.deriveKeys(normalizedDestinationSecret);
+  const sourceKeyPair = await crypto.deriveKeys(normalizedSourceSecret);
+  const sourceVolumeId = volumeIdFromPublicKey(sourceKeyPair.publicKey);
+  if (bundle.s !== sourceVolumeId) {
+    throw new Error('Source reference bundle does not match the provided source volume');
+  }
+
+  const destinationVolume = await openVolume(normalizedDestinationSecret, crypto, storage, pathMapper);
+  const { entries, files } = await loadVolumeFiles(crypto, channelStorage, destinationVolume);
+  const imported = await importSourceBundleItems(
+    bundle,
+    files,
+    entries,
+    destinationKeyPair,
+    sourceKeyPair,
+    crypto,
+    channelStorage,
+    now
+  );
+
+  return { imported };
+}
+
+async function exportRecipientReferencesWithDeps(
+  secret: string,
+  filenames: string[],
+  recipientVolumeId: string,
+  crypto: CryptoOperations,
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper,
+  now: () => number
+): Promise<ReferenceExportResult<RecipientReferenceBundle>> {
+  const normalizedSecret = normalizeSecret(secret);
+  const orderedFilenames = dedupeOrderedFilenames(filenames);
+  if (orderedFilenames.length === 0) {
+    throw new Error('At least one filename is required');
+  }
+
+  publicKeyFromVolumeId(recipientVolumeId);
+
+  const volume = await openVolume(normalizedSecret, crypto, storage, pathMapper);
+  const keyPair = await crypto.deriveKeys(normalizedSecret);
+  let { files } = await loadVolumeFiles(crypto, channelStorage, volume);
+  let upgradedCount = 0;
+
+  upgradedCount += await upgradeLegacyFilesForExport(
+    orderedFilenames,
+    files,
+    keyPair,
+    crypto,
+    channelStorage,
+    now
+  );
+  if (upgradedCount > 0) {
+    ({ files } = await loadVolumeFiles(crypto, channelStorage, volume));
+  }
+
+  const fileMap = new Map(files.map((file) => [file.filename, file]));
+  const items: RecipientReferenceBundle['items'] = [];
+  for (const filename of orderedFilenames) {
+    const file = requireStoredFile(fileMap, filename);
+    const fileKey = await unwrapFileKeyForVolume(crypto, keyPair.privateKey, file.encryptedKey);
+    const capsule = await createRecipientKeyCapsule(
+      fileKey,
+      recipientVolumeId,
+      {
+        t: file.contentType,
+        h: file.blobHash,
+        z: file.size,
+      }
+    );
+    items.push({
+      name: file.filename,
+      mime: file.mimeType,
+      createdAt: file.createdAt,
+      ref: {
+        p: 'nb.ref.v1',
+        c: {
+          t: file.contentType,
+          h: file.blobHash,
+          z: file.size,
+        },
+        k: {
+          r: capsule.recipientVolumeId,
+          e: capsule.ephemeralPublicKey,
+          n: capsule.nonce,
+          w: capsule.wrappedKey,
+        },
+      },
+    });
+  }
+
+  const bundle: RecipientReferenceBundle = {
+    p: 'nb.refs.v1',
+    r: recipientVolumeId.toLowerCase(),
+    items,
+  };
+
+  return {
+    bundle,
+    serialized: serializeRecipientReferenceBundle(bundle),
+    upgradedCount,
+  };
+}
+
+async function importRecipientReferencesWithDeps(
+  secret: string,
+  bundleValue: unknown,
+  crypto: CryptoOperations,
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  pathMapper: ChannelPathMapper,
+  now: () => number
+): Promise<RecipientImportResult> {
+  const bundle = parseRecipientReferenceBundle(bundleValue);
+  const normalizedSecret = normalizeSecret(secret);
+  const destinationKeyPair = await crypto.deriveKeys(normalizedSecret);
+  const activeVolumeId = volumeIdFromPublicKey(destinationKeyPair.publicKey);
+  if (bundle.r !== activeVolumeId) {
+    throw new Error('Recipient reference bundle does not match the active volume');
+  }
+
+  const destinationVolume = await openVolume(normalizedSecret, crypto, storage, pathMapper);
+  const { entries, files } = await loadVolumeFiles(crypto, channelStorage, destinationVolume);
+  const takenNames = new Set(files.map((file) => file.filename));
+  const imported: FileMetadata[] = [];
+  let nextTimestamp = nextCreateTimestamp(entries, now());
+
+  for (const item of bundle.items) {
+    const finalName = resolveImportedFilename(item.name, takenNames);
+    takenNames.add(finalName);
+
+    const descriptor = item.ref.c;
+    const fileKey = await unwrapRecipientKeyCapsule(
+      destinationKeyPair.privateKey,
+      activeVolumeId,
+      descriptor,
+      item.ref.k
+    );
+    const encryptedKey = await wrapFileKeyForVolume(crypto, destinationKeyPair.privateKey, fileKey);
+    const createdAt = resolveImportedCreatedAt(item.createdAt, nextTimestamp);
+
+    await appendCreateEvent(channelStorage, crypto, destinationKeyPair, {
+      filename: finalName,
+      blobHash: descriptor.h,
+      encryptedKey,
+      contentType: descriptor.t,
+      size: descriptor.z,
+      mimeType: item.mime,
+      createdAt,
+    });
+
+    imported.push({
+      filename: finalName,
+      blobHash: descriptor.h,
+      contentType: descriptor.t,
+      size: descriptor.z,
+      mimeType: item.mime,
+      createdAt,
+    });
+    nextTimestamp = createdAt + 1;
+  }
+
+  return { imported };
+}
+
+function materializeFilesFromEntries(entries: EventLogEntry[]): FileMetadata[] {
+  const files = materializeStoredFilesFromEntries(entries).map((file) => ({
+    filename: file.filename,
+    blobHash: file.blobHash,
+    contentType: file.contentType,
+    size: file.size,
+    mimeType: file.mimeType,
+    createdAt: file.createdAt,
+  }));
   files.sort((a, b) => {
     if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
     if (a.filename < b.filename) return -1;
@@ -535,11 +964,75 @@ function materializeFilesFromEntries(entries: EventLogEntry[]): FileMetadata[] {
 }
 
 function mapEntriesToTimeline(entries: EventLogEntry[]): TimelineEvent[] {
-  const rows: Array<{
-    event: TimelineEvent;
-    hasExplicitTimestamp: boolean;
-    sequence: number;
-  }> = [];
+  return buildTimelineRows(entries).map((row) => ({
+    eventHash: row.eventHash,
+    type: row.type,
+    filename: row.filename,
+    timestamp: row.timestamp,
+    toFilename: row.toFilename,
+    blobHash: row.blobHash,
+    contentType: row.contentType,
+    size: row.size,
+    mimeType: row.mimeType,
+    createdAt: row.createdAt,
+    deletedAt: row.deletedAt,
+    renamedAt: row.renamedAt,
+  }));
+}
+
+function materializeStoredFilesFromEntries(entries: EventLogEntry[]): StoredFileRecord[] {
+  const files = new Map<string, StoredFileRecord>();
+
+  for (const row of buildTimelineRows(entries)) {
+    if (row.type === 'CREATE_FILE') {
+      if (
+        row.blobHash === undefined ||
+        row.encryptedKey === undefined ||
+        row.size === undefined ||
+        row.createdAt === undefined
+      ) {
+        continue;
+      }
+      files.set(row.filename, {
+        filename: row.filename,
+        blobHash: row.blobHash,
+        encryptedKey: row.encryptedKey,
+        contentType: row.contentType ?? 'b',
+        size: row.size,
+        mimeType: row.mimeType,
+        createdAt: row.createdAt,
+      });
+      continue;
+    }
+
+    if (row.type === 'DELETE_FILE') {
+      files.delete(row.filename);
+      continue;
+    }
+
+    if (!row.toFilename) {
+      continue;
+    }
+
+    const existing = files.get(row.filename);
+    if (!existing) {
+      continue;
+    }
+    files.delete(row.filename);
+    files.set(row.toFilename, {
+      ...existing,
+      filename: row.toFilename,
+    });
+  }
+
+  return Array.from(files.values()).sort((left, right) => {
+    if (left.createdAt !== right.createdAt) return left.createdAt - right.createdAt;
+    return left.filename.localeCompare(right.filename);
+  });
+}
+
+function buildTimelineRows(entries: EventLogEntry[]): StoredTimelineRow[] {
+  const rows: StoredTimelineRow[] = [];
 
   for (let sequence = 0; sequence < entries.length; sequence += 1) {
     const entry = entries[sequence];
@@ -548,18 +1041,18 @@ function mapEntriesToTimeline(entries: EventLogEntry[]): TimelineEvent[] {
     if (payload.type === EventType.CREATE_FILE) {
       const inferredTimestamp = payload.createdAt ?? sequence;
       rows.push({
-        sequence,
+        eventHash: entry.eventHash,
+        type: 'CREATE_FILE',
+        filename: payload.fileName,
+        timestamp: inferredTimestamp,
         hasExplicitTimestamp: payload.createdAt !== undefined,
-        event: {
-          eventHash: entry.eventHash,
-          type: 'CREATE_FILE',
-          filename: payload.fileName,
-          timestamp: inferredTimestamp,
-          blobHash: payload.hash,
-          size: payload.size ?? 0,
-          mimeType: payload.mimeType,
-          createdAt: inferredTimestamp,
-        },
+        sequence,
+        blobHash: payload.hash,
+        encryptedKey: payload.encryptedKey,
+        contentType: payload.contentType ?? 'b',
+        size: payload.size ?? 0,
+        mimeType: payload.mimeType,
+        createdAt: inferredTimestamp,
       });
       continue;
     }
@@ -567,15 +1060,13 @@ function mapEntriesToTimeline(entries: EventLogEntry[]): TimelineEvent[] {
     if (payload.type === EventType.DELETE_FILE) {
       const inferredTimestamp = payload.deletedAt ?? sequence;
       rows.push({
-        sequence,
+        eventHash: entry.eventHash,
+        type: 'DELETE_FILE',
+        filename: payload.fileName,
+        timestamp: inferredTimestamp,
         hasExplicitTimestamp: payload.deletedAt !== undefined,
-        event: {
-          eventHash: entry.eventHash,
-          type: 'DELETE_FILE',
-          filename: payload.fileName,
-          timestamp: inferredTimestamp,
-          deletedAt: inferredTimestamp,
-        },
+        sequence,
+        deletedAt: inferredTimestamp,
       });
       continue;
     }
@@ -583,105 +1074,196 @@ function mapEntriesToTimeline(entries: EventLogEntry[]): TimelineEvent[] {
     if (payload.type === EventType.RENAME_FILE) {
       const inferredTimestamp = payload.renamedAt ?? sequence;
       rows.push({
-        sequence,
+        eventHash: entry.eventHash,
+        type: 'RENAME_FILE',
+        filename: payload.fileName,
+        timestamp: inferredTimestamp,
         hasExplicitTimestamp: payload.renamedAt !== undefined,
-        event: {
-          eventHash: entry.eventHash,
-          type: 'RENAME_FILE',
-          filename: payload.fileName,
-          toFilename: payload.toFileName,
-          timestamp: inferredTimestamp,
-          renamedAt: inferredTimestamp,
-        },
+        sequence,
+        toFilename: payload.toFileName,
+        renamedAt: inferredTimestamp,
       });
     }
   }
 
   rows.sort(compareTimelineRows);
-  return rows.map((row) => row.event);
+  return rows;
 }
 
-function timelineToFileEvents(timeline: TimelineEvent[]): FileEvent[] {
-  const fileEvents: FileEvent[] = [];
-  for (const event of timeline) {
-    if (event.type === 'CREATE_FILE') {
-      if (
-        event.blobHash === undefined ||
-        event.size === undefined ||
-        event.createdAt === undefined
-      ) {
-        continue;
-      }
-      fileEvents.push({
-        type: 'CREATE_FILE',
-        filename: event.filename,
-        blobHash: event.blobHash,
-        size: event.size,
-        mimeType: event.mimeType,
-        createdAt: event.createdAt,
-      });
+async function loadVolumeFiles(
+  crypto: CryptoOperations,
+  channelStorage: ChannelStorage,
+  volume: Awaited<ReturnType<typeof openVolume>>
+): Promise<{ entries: EventLogEntry[]; files: StoredFileRecord[] }> {
+  const entries = await loadEventLog(volume, channelStorage);
+  await verifyEventLog(entries, volume, crypto);
+  return {
+    entries,
+    files: materializeStoredFilesFromEntries(entries),
+  };
+}
+
+async function upgradeLegacyFilesForExport(
+  filenames: readonly string[],
+  files: readonly StoredFileRecord[],
+  keyPair: KeyPair,
+  crypto: CryptoOperations,
+  channelStorage: ChannelStorage,
+  now: () => number
+): Promise<number> {
+  const fileMap = new Map(files.map((file) => [file.filename, file]));
+  let upgradedCount = 0;
+  let timestamp = Math.max(
+    now(),
+    ...files.map((file) => file.createdAt + 1),
+    0
+  );
+
+  for (const filename of filenames) {
+    const file = requireStoredFile(fileMap, filename);
+    if (file.encryptedKey.length > 0) {
       continue;
     }
-    if (event.type === 'DELETE_FILE') {
-      if (event.deletedAt === undefined) {
-        continue;
-      }
-      fileEvents.push({
-        type: 'DELETE_FILE',
-        filename: event.filename,
-        deletedAt: event.deletedAt,
-      });
-      continue;
-    }
-    if (!event.toFilename || event.renamedAt === undefined) {
-      continue;
-    }
-    fileEvents.push({
-      type: 'RENAME_FILE',
-      filename: event.filename,
-      toFilename: event.toFilename,
-      renamedAt: event.renamedAt,
+
+    const encryptedData = await channelStorage.retrieveEncryptedData(file.blobHash as Hash, keyPair.publicKey);
+    const plaintext = await decryptFileForVolume(crypto, keyPair.privateKey, encryptedData, file.encryptedKey);
+    const encrypted = await encryptFileForVolume(crypto, keyPair.privateKey, plaintext);
+    await channelStorage.storeEncryptedData(
+      encrypted.blobHash,
+      encrypted.encryptedData,
+      true,
+      keyPair.publicKey
+    );
+    await appendCreateEvent(channelStorage, crypto, keyPair, {
+      filename: file.filename,
+      blobHash: encrypted.blobHash,
+      encryptedKey: encrypted.encryptedKey,
+      contentType: encrypted.contentType,
+      size: file.size,
+      mimeType: file.mimeType,
+      createdAt: timestamp,
     });
+
+    upgradedCount += 1;
+    timestamp += 1;
   }
-  return fileEvents;
+
+  return upgradedCount;
+}
+
+async function importSourceBundleItems(
+  bundle: SourceReferenceBundle,
+  existingFiles: readonly StoredFileRecord[],
+  entries: readonly EventLogEntry[],
+  destinationKeyPair: KeyPair,
+  sourceKeyPair: KeyPair,
+  crypto: CryptoOperations,
+  channelStorage: ChannelStorage,
+  now: () => number
+): Promise<FileMetadata[]> {
+  const takenNames = new Set(existingFiles.map((file) => file.filename));
+  const imported: FileMetadata[] = [];
+  let nextTimestamp = nextCreateTimestamp(entries, now());
+
+  for (const item of bundle.items) {
+    const finalName = resolveImportedFilename(item.name, takenNames);
+    takenNames.add(finalName);
+
+    const fileKey = await unwrapFileKeyForVolume(
+      crypto,
+      sourceKeyPair.privateKey,
+      decodeWrappedKey(item.ref.x, 'Source reference wrapped key')
+    );
+    const encryptedKey = await wrapFileKeyForVolume(crypto, destinationKeyPair.privateKey, fileKey);
+    const createdAt = resolveImportedCreatedAt(item.createdAt, nextTimestamp);
+
+    await appendCreateEvent(channelStorage, crypto, destinationKeyPair, {
+      filename: finalName,
+      blobHash: item.ref.c.h,
+      encryptedKey,
+      contentType: item.ref.c.t,
+      size: item.ref.c.z,
+      mimeType: item.mime,
+      createdAt,
+    });
+
+    imported.push({
+      filename: finalName,
+      blobHash: item.ref.c.h,
+      contentType: item.ref.c.t,
+      size: item.ref.c.z,
+      mimeType: item.mime,
+      createdAt,
+    });
+    nextTimestamp = createdAt + 1;
+  }
+
+  return imported;
+}
+
+function nextCreateTimestamp(entries: readonly EventLogEntry[], fallbackNow: number): number {
+  const timeline = mapEntriesToTimeline([...entries]);
+  const maxTimestamp = timeline.reduce((max, event) => Math.max(max, event.timestamp), 0);
+  return Math.max(fallbackNow, maxTimestamp + 1);
+}
+
+function resolveImportedCreatedAt(
+  preferredCreatedAt: number | undefined,
+  minimumCreatedAt: number
+): number {
+  if (preferredCreatedAt === undefined) {
+    return minimumCreatedAt;
+  }
+  return Math.max(preferredCreatedAt, minimumCreatedAt);
+}
+
+function requireStoredFile(
+  files: ReadonlyMap<string, StoredFileRecord>,
+  filename: string
+): StoredFileRecord {
+  const file = files.get(filename);
+  if (!file) {
+    throw new Error(`File "${filename}" does not exist`);
+  }
+  return file;
 }
 
 function compareTimelineRows(
-  left: { event: TimelineEvent; hasExplicitTimestamp: boolean; sequence: number },
-  right: { event: TimelineEvent; hasExplicitTimestamp: boolean; sequence: number }
+  left: StoredTimelineRow,
+  right: StoredTimelineRow
 ): number {
   if (left.hasExplicitTimestamp !== right.hasExplicitTimestamp) {
     return left.sequence - right.sequence;
   }
 
   if (left.hasExplicitTimestamp && right.hasExplicitTimestamp) {
-    if (left.event.timestamp !== right.event.timestamp) {
-      return left.event.timestamp - right.event.timestamp;
+    if (left.timestamp !== right.timestamp) {
+      return left.timestamp - right.timestamp;
     }
   } else if (left.sequence !== right.sequence) {
     return left.sequence - right.sequence;
   }
 
-  if (left.event.filename < right.event.filename) return -1;
-  if (left.event.filename > right.event.filename) return 1;
+  if (left.filename < right.filename) return -1;
+  if (left.filename > right.filename) return 1;
 
   const leftTie =
-    left.event.type === 'CREATE_FILE'
-      ? `C:${left.event.blobHash ?? ''}`
-      : left.event.type === 'RENAME_FILE'
-        ? `R:${left.event.toFilename ?? ''}`
+    left.type === 'CREATE_FILE'
+      ? `C:${left.blobHash ?? ''}`
+      : left.type === 'RENAME_FILE'
+        ? `R:${left.toFilename ?? ''}`
         : 'D';
   const rightTie =
-    right.event.type === 'CREATE_FILE'
-      ? `C:${right.event.blobHash ?? ''}`
-      : right.event.type === 'RENAME_FILE'
-        ? `R:${right.event.toFilename ?? ''}`
+    right.type === 'CREATE_FILE'
+      ? `C:${right.blobHash ?? ''}`
+      : right.type === 'RENAME_FILE'
+        ? `R:${right.toFilename ?? ''}`
         : 'D';
   if (leftTie < rightTie) return -1;
   if (leftTie > rightTie) return 1;
 
-  if (left.event.eventHash < right.event.eventHash) return -1;
-  if (left.event.eventHash > right.event.eventHash) return 1;
+  if (left.eventHash < right.eventHash) return -1;
+  if (left.eventHash > right.eventHash) return 1;
   return 0;
 }
 
@@ -707,6 +1289,8 @@ async function appendCreateEvent(
   input: {
     filename: string;
     blobHash: string;
+    encryptedKey: EncryptedData;
+    contentType: FileContentType;
     size: number;
     mimeType?: string;
     createdAt: number;
@@ -716,7 +1300,8 @@ async function appendCreateEvent(
     type: EventType.CREATE_FILE,
     fileName: input.filename,
     hash: input.blobHash as Hash,
-    encryptedKey: createEncryptedData(new Uint8Array(0)),
+    encryptedKey: input.encryptedKey,
+    contentType: input.contentType,
     size: input.size,
     mimeType: input.mimeType,
     createdAt: input.createdAt,

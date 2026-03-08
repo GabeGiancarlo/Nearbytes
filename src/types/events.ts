@@ -93,6 +93,10 @@ export interface EventPayload {
   readonly hash: Hash;
   readonly encryptedKey: EncryptedData;
   /**
+   * Ciphertext descriptor type for CREATE_FILE ('b' = block, 'm' = manifest)
+   */
+  readonly contentType?: 'b' | 'm';
+  /**
    * Original plaintext size in bytes (CREATE_FILE only)
    */
   readonly size?: number;
@@ -132,6 +136,7 @@ export interface SerializedEvent {
     readonly toFileName?: string;
     readonly hash: string;
     readonly encryptedKey: string; // Base64
+    readonly contentType?: 'b' | 'm';
     readonly size?: number;
     readonly mimeType?: string;
     readonly createdAt?: number;

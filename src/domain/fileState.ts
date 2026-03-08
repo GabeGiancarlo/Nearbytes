@@ -29,6 +29,7 @@ export function reconstructFileState(events: FileEvent[]): Map<string, FileMetad
       files.set(event.filename, {
         filename: event.filename,
         blobHash: event.blobHash,
+        contentType: event.contentType,
         size: event.size,
         mimeType: event.mimeType,
         createdAt: event.createdAt,

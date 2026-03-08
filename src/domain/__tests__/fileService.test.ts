@@ -4,8 +4,11 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { createCryptoOperations } from '../../crypto/index.js';
 import { storeData } from '../../domain/operations.js';
+import { serializeEventPayload } from '../../storage/serialization.js';
 import { ChannelStorage } from '../../storage/channel.js';
 import { FilesystemStorageBackend } from '../../storage/filesystem.js';
+import { loadEventLog, openVolume } from '../../domain/volume.js';
+import { createEncryptedData, EventType } from '../../types/events.js';
 import { createSecret } from '../../types/keys.js';
 import { defaultPathMapper } from '../../types/storage.js';
 import { createFileService } from '../fileService.js';
@@ -237,6 +240,113 @@ describe('FileService', () => {
 
     await cleanup();
   });
+
+  it('stores new files with wrapped FEKs and decrypts them', async () => {
+    const { service, dir, cleanup } = await createTestService(START_TIME);
+    const secret = 'test:secret:fek-modern';
+
+    const created = await service.addFile(secret, 'wrapped.txt', Buffer.from('wrapped payload'));
+    const entries = await loadEntries(dir, secret);
+    const payload = entries[0].signedEvent.payload;
+    const decrypted = await service.getFile(secret, created.blobHash);
+
+    expect(payload.contentType).toBe('b');
+    expect(payload.encryptedKey.length).toBeGreaterThan(0);
+    expect(decrypted.toString('utf8')).toBe('wrapped payload');
+
+    await cleanup();
+  });
+
+  it('upgrades legacy volume-key files when exporting source references', async () => {
+    const { service, dir, cleanup } = await createTestService(START_TIME);
+    const secret = 'test:secret:legacy-upgrade';
+
+    await appendLegacyVolumeKeyFile(dir, secret, 'legacy-upgrade.txt', Buffer.from('legacy-data'), START_TIME);
+
+    const exported = await service.exportSourceReferences(secret, ['legacy-upgrade.txt']);
+    const files = await service.listFiles(secret);
+    const entries = await loadEntries(dir, secret);
+
+    expect(exported.upgradedCount).toBe(1);
+    expect(exported.bundle.items).toHaveLength(1);
+    expect(exported.bundle.items[0].ref.x.length).toBeGreaterThan(0);
+    expect(files).toHaveLength(1);
+    expect(entries).toHaveLength(2);
+    const upgradedEvent = entries.find((entry) => entry.signedEvent.payload.encryptedKey.length > 0);
+    expect(upgradedEvent).toBeDefined();
+    expect(upgradedEvent?.signedEvent.payload.contentType).toBe('b');
+
+    await cleanup();
+  });
+
+  it('exports and imports source references across volumes without rewriting blobs', async () => {
+    const { service, dir, cleanup } = await createTestService(START_TIME);
+    const sourceSecret = 'test:secret:source-copy';
+    const destinationSecret = 'test:secret:destination-copy';
+
+    const sourceCreated = await service.addFile(sourceSecret, 'share.txt', Buffer.from('shared payload'));
+    const exported = await service.exportSourceReferences(sourceSecret, ['share.txt']);
+    const imported = await service.importSourceReferences(destinationSecret, exported.bundle, sourceSecret);
+    const destinationFiles = await service.listFiles(destinationSecret);
+    const destinationEntries = await loadEntries(dir, destinationSecret);
+    const decrypted = await service.getFile(destinationSecret, destinationFiles[0].blobHash);
+
+    expect(imported.imported).toHaveLength(1);
+    expect(destinationFiles).toHaveLength(1);
+    expect(destinationFiles[0].filename).toBe('share.txt');
+    expect(destinationFiles[0].blobHash).toBe(sourceCreated.blobHash);
+    expect(destinationEntries[0].signedEvent.payload.encryptedKey.length).toBeGreaterThan(0);
+    expect(decrypted.toString('utf8')).toBe('shared payload');
+
+    await cleanup();
+  });
+
+  it('auto-renames conflicting pasted files with Finder-style copy suffixes', async () => {
+    const { service, cleanup } = await createTestService(START_TIME);
+    const sourceSecret = 'test:secret:source-conflict';
+    const destinationSecret = 'test:secret:destination-conflict';
+
+    await service.addFile(sourceSecret, 'notes.txt', Buffer.from('source version'));
+    await service.addFile(destinationSecret, 'notes.txt', Buffer.from('destination version'));
+
+    const exported = await service.exportSourceReferences(sourceSecret, ['notes.txt']);
+    await service.importSourceReferences(destinationSecret, exported.bundle, sourceSecret);
+
+    const files = await service.listFiles(destinationSecret);
+    const names = files.map((file) => file.filename).sort((left, right) => left.localeCompare(right));
+    const copied = files.find((file) => file.filename === 'notes copy.txt');
+
+    expect(names).toEqual(['notes copy.txt', 'notes.txt']);
+    expect(copied).toBeDefined();
+    expect((await service.getFile(destinationSecret, copied!.blobHash)).toString('utf8')).toBe('source version');
+
+    await cleanup();
+  });
+
+  it('exports and imports recipient-bound references only into the targeted volume', async () => {
+    const { service, dir, cleanup } = await createTestService(START_TIME);
+    const sourceSecret = 'test:secret:recipient-source';
+    const recipientSecret = 'test:secret:recipient-target';
+    const otherSecret = 'test:secret:recipient-other';
+
+    await service.addFile(sourceSecret, 'sealed.txt', Buffer.from('recipient payload'));
+    const recipientVolumeId = await getVolumeId(dir, recipientSecret);
+    const exported = await service.exportRecipientReferences(sourceSecret, ['sealed.txt'], recipientVolumeId);
+
+    await expect(service.importRecipientReferences(otherSecret, exported.bundle)).rejects.toThrow(
+      'Recipient reference bundle does not match the active volume'
+    );
+
+    const imported = await service.importRecipientReferences(recipientSecret, exported.bundle);
+    const files = await service.listFiles(recipientSecret);
+
+    expect(imported.imported).toHaveLength(1);
+    expect(files).toHaveLength(1);
+    expect(files[0].filename).toBe('sealed.txt');
+    expect((await service.getFile(recipientSecret, files[0].blobHash)).toString('utf8')).toBe('recipient payload');
+
+    await cleanup();
+  });
 });
 
 async function createTestService(startTime: number): Promise<{
@@ -266,4 +376,49 @@ function createNow(start: number): () => number {
     current += 1000;
     return value;
   };
+}
+
+async function loadEntries(dir: string, secret: string) {
+  const crypto = createCryptoOperations();
+  const storage = new FilesystemStorageBackend(dir);
+  const channelStorage = new ChannelStorage(storage, defaultPathMapper);
+  const volume = await openVolume(createSecret(secret), crypto, storage, defaultPathMapper);
+  return loadEventLog(volume, channelStorage);
+}
+
+async function getVolumeId(dir: string, secret: string): Promise<string> {
+  const crypto = createCryptoOperations();
+  const storage = new FilesystemStorageBackend(dir);
+  const volume = await openVolume(createSecret(secret), crypto, storage, defaultPathMapper);
+  return Buffer.from(volume.publicKey).toString('hex');
+}
+
+async function appendLegacyVolumeKeyFile(
+  dir: string,
+  secret: string,
+  filename: string,
+  data: Buffer,
+  createdAt: number
+): Promise<void> {
+  const crypto = createCryptoOperations();
+  const storage = new FilesystemStorageBackend(dir);
+  const channelStorage = new ChannelStorage(storage, defaultPathMapper);
+  const normalizedSecret = createSecret(secret);
+  const volume = await openVolume(normalizedSecret, crypto, storage, defaultPathMapper);
+  const keyPair = await crypto.deriveKeys(normalizedSecret);
+  const symmetricKey = await crypto.deriveSymKey(keyPair.privateKey);
+  const encryptedData = await crypto.encryptSym(data, symmetricKey);
+  const blobHash = await crypto.computeHash(encryptedData);
+  await channelStorage.storeEncryptedData(blobHash, encryptedData, true, keyPair.publicKey);
+
+  const payload = {
+    type: EventType.CREATE_FILE,
+    fileName: filename,
+    hash: blobHash,
+    encryptedKey: createEncryptedData(new Uint8Array(0)),
+    size: data.length,
+    createdAt,
+  } as const;
+  const signature = await crypto.signPR(serializeEventPayload(payload), keyPair.privateKey);
+  await channelStorage.storeEvent(volume.publicKey, { payload, signature });
 }

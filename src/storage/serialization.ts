@@ -14,6 +14,7 @@ export function serializeEvent(event: SignedEvent): SerializedEvent {
     toFileName?: string;
     hash: string;
     encryptedKey: string;
+    contentType?: 'b' | 'm';
     size?: number;
     mimeType?: string;
     createdAt?: number;
@@ -28,6 +29,9 @@ export function serializeEvent(event: SignedEvent): SerializedEvent {
 
   if (event.payload.size !== undefined) {
     payload.size = event.payload.size;
+  }
+  if (event.payload.contentType !== undefined) {
+    payload.contentType = event.payload.contentType;
   }
   if (event.payload.mimeType !== undefined) {
     payload.mimeType = event.payload.mimeType;
@@ -68,6 +72,13 @@ export function deserializeEvent(data: SerializedEvent): SignedEvent {
   if (data.payload.size !== undefined) {
     assertFiniteUint(data.payload.size, 'size');
   }
+  if (
+    data.payload.contentType !== undefined &&
+    data.payload.contentType !== 'b' &&
+    data.payload.contentType !== 'm'
+  ) {
+    throw new Error('Invalid contentType: must be "b" or "m"');
+  }
   if (data.payload.createdAt !== undefined) {
     assertFiniteUint(data.payload.createdAt, 'createdAt');
   }
@@ -91,6 +102,7 @@ export function deserializeEvent(data: SerializedEvent): SignedEvent {
       toFileName: data.payload.toFileName,
       hash: createHash(data.payload.hash),
       encryptedKey: createEncryptedData(base64ToBytes(data.payload.encryptedKey)),
+      contentType: data.payload.contentType,
       size: data.payload.size,
       mimeType: data.payload.mimeType,
       createdAt: data.payload.createdAt,
@@ -117,6 +129,7 @@ export function deserializeEvent(data: SerializedEvent): SignedEvent {
  */
 export function serializeEventPayload(payload: EventPayload): Uint8Array {
   const hasMetadata =
+    payload.contentType !== undefined ||
     payload.size !== undefined ||
     payload.mimeType !== undefined ||
     payload.createdAt !== undefined ||
@@ -238,6 +251,7 @@ export function deserializeEventPayload(data: Uint8Array): EventPayload {
     fileName,
     hash: createHash(hash),
     encryptedKey: createEncryptedData(encryptedKey),
+    contentType: metadata.contentType,
     size: metadata.size,
     mimeType: metadata.mimeType,
     createdAt: metadata.createdAt,
@@ -254,9 +268,8 @@ function assertFiniteUint(value: number, fieldName: string): void {
 }
 
 function serializeMetadata(payload: EventPayload): Uint8Array {
-  const metadataVersion = 1;
-
   if (payload.type === EventType.CREATE_FILE) {
+    const metadataVersion = 2;
     if (payload.size === undefined) {
       throw new Error('Missing size for CREATE_FILE metadata');
     }
@@ -265,25 +278,31 @@ function serializeMetadata(payload: EventPayload): Uint8Array {
     }
     assertFiniteUint(payload.size, 'size');
     assertFiniteUint(payload.createdAt, 'createdAt');
+    const contentType = payload.contentType ?? 'b';
+    if (contentType !== 'b' && contentType !== 'm') {
+      throw new Error('Invalid contentType for CREATE_FILE metadata');
+    }
 
     const mimeTypeBytes = payload.mimeType ? new TextEncoder().encode(payload.mimeType) : new Uint8Array(0);
     const mimeTypeLength = new Uint8Array(4);
     const mimeTypeLengthView = new DataView(mimeTypeLength.buffer);
     mimeTypeLengthView.setUint32(0, mimeTypeBytes.length, false); // big-endian
 
-    const metadata = new Uint8Array(1 + 8 + 8 + 4 + mimeTypeBytes.length);
+    const metadata = new Uint8Array(1 + 1 + 8 + 8 + 4 + mimeTypeBytes.length);
     const view = new DataView(metadata.buffer, metadata.byteOffset, metadata.byteLength);
 
     metadata[0] = metadataVersion;
-    writeUint64(view, 1, payload.size);
-    writeUint64(view, 1 + 8, payload.createdAt);
-    metadata.set(mimeTypeLength, 1 + 8 + 8);
-    metadata.set(mimeTypeBytes, 1 + 8 + 8 + 4);
+    metadata[1] = contentType === 'm' ? 1 : 0;
+    writeUint64(view, 2, payload.size);
+    writeUint64(view, 2 + 8, payload.createdAt);
+    metadata.set(mimeTypeLength, 2 + 8 + 8);
+    metadata.set(mimeTypeBytes, 2 + 8 + 8 + 4);
 
     return metadata;
   }
 
   if (payload.type === EventType.DELETE_FILE) {
+    const metadataVersion = 1;
     if (payload.deletedAt === undefined) {
       throw new Error('Missing deletedAt for DELETE_FILE metadata');
     }
@@ -297,6 +316,7 @@ function serializeMetadata(payload: EventPayload): Uint8Array {
   }
 
   if (payload.type === EventType.RENAME_FILE) {
+    const metadataVersion = 1;
     if (!payload.toFileName || payload.toFileName.trim().length === 0) {
       throw new Error('Missing toFileName for RENAME_FILE metadata');
     }
@@ -326,6 +346,7 @@ function deserializeMetadata(
   offset: number,
   type: EventType
 ): {
+  contentType?: 'b' | 'm';
   size?: number;
   mimeType?: string;
   createdAt?: number;
@@ -339,26 +360,65 @@ function deserializeMetadata(
   }
 
   const metadataVersion = data[offset];
-  if (metadataVersion !== 1) {
+  if (metadataVersion !== 1 && metadataVersion !== 2) {
     throw new Error(`Unsupported metadata version: ${metadataVersion}`);
   }
 
   if (type === EventType.CREATE_FILE) {
-    if (data.length < offset + 1 + 8 + 8 + 4) {
+    if (metadataVersion === 1) {
+      if (data.length < offset + 1 + 8 + 8 + 4) {
+        throw new Error('Invalid event payload: CREATE_FILE metadata too short');
+      }
+
+      const view = new DataView(data.buffer, data.byteOffset + offset + 1, data.length - offset - 1);
+      const size = readUint64(view, 0, 'size');
+      const createdAt = readUint64(view, 8, 'createdAt');
+
+      const mimeTypeLengthView = new DataView(
+        data.buffer,
+        data.byteOffset + offset + 1 + 8 + 8,
+        4
+      );
+      const mimeTypeLength = mimeTypeLengthView.getUint32(0, false); // big-endian
+      const mimeTypeOffset = offset + 1 + 8 + 8 + 4;
+
+      if (data.length < mimeTypeOffset + mimeTypeLength) {
+        throw new Error('Invalid event payload: mime type length mismatch');
+      }
+
+      const mimeTypeBytes = data.slice(mimeTypeOffset, mimeTypeOffset + mimeTypeLength);
+      const mimeType = mimeTypeLength > 0 ? new TextDecoder().decode(mimeTypeBytes) : undefined;
+
+      return {
+        contentType: 'b',
+        size,
+        mimeType,
+        createdAt,
+        bytesConsumed: 1 + 8 + 8 + 4 + mimeTypeLength,
+      };
+    }
+
+    if (data.length < offset + 1 + 1 + 8 + 8 + 4) {
       throw new Error('Invalid event payload: CREATE_FILE metadata too short');
     }
 
-    const view = new DataView(data.buffer, data.byteOffset + offset + 1, data.length - offset - 1);
+    const contentTypeByte = data[offset + 1];
+    const contentType = contentTypeByte === 1 ? 'm' : contentTypeByte === 0 ? 'b' : null;
+    if (!contentType) {
+      throw new Error(`Invalid event payload: unknown contentType ${contentTypeByte}`);
+    }
+
+    const view = new DataView(data.buffer, data.byteOffset + offset + 2, data.length - offset - 2);
     const size = readUint64(view, 0, 'size');
     const createdAt = readUint64(view, 8, 'createdAt');
 
     const mimeTypeLengthView = new DataView(
       data.buffer,
-      data.byteOffset + offset + 1 + 8 + 8,
+      data.byteOffset + offset + 2 + 8 + 8,
       4
     );
     const mimeTypeLength = mimeTypeLengthView.getUint32(0, false); // big-endian
-    const mimeTypeOffset = offset + 1 + 8 + 8 + 4;
+    const mimeTypeOffset = offset + 2 + 8 + 8 + 4;
 
     if (data.length < mimeTypeOffset + mimeTypeLength) {
       throw new Error('Invalid event payload: mime type length mismatch');
@@ -368,10 +428,11 @@ function deserializeMetadata(
     const mimeType = mimeTypeLength > 0 ? new TextDecoder().decode(mimeTypeBytes) : undefined;
 
     return {
+      contentType,
       size,
       mimeType,
       createdAt,
-      bytesConsumed: 1 + 8 + 8 + 4 + mimeTypeLength,
+      bytesConsumed: 1 + 1 + 8 + 8 + 4 + mimeTypeLength,
     };
   }
 

@@ -24,8 +24,12 @@ import {
 import {
   consolidateRootBodySchema,
   consolidateRootParamSchema,
+  exportRecipientReferencesBodySchema,
+  exportReferencesBodySchema,
   fileHashParamSchema,
   fileNameParamSchema,
+  importRecipientReferencesBodySchema,
+  importSourceReferencesBodySchema,
   openRootInFileManagerBodySchema,
   openBodySchema,
   parseWithSchema,
@@ -384,6 +388,56 @@ export function createRoutes(deps: RouteDependencies): Router {
     })
   );
 
+  router.post(
+    '/references/source/export',
+    requireSecret(deps),
+    asyncHandler(async (req, res) => {
+      const { filenames } = parseWithSchema(exportReferencesBodySchema, req.body);
+      const secret = res.locals.secret as string;
+      const exported = await deps.fileService.exportSourceReferences(secret, filenames);
+      res.json(exported);
+    })
+  );
+
+  router.post(
+    '/references/source/import',
+    requireSecret(deps),
+    asyncHandler(async (req, res) => {
+      const { sourceSecret, bundle } = parseWithSchema(importSourceReferencesBodySchema, req.body);
+      const secret = res.locals.secret as string;
+      const imported = await deps.fileService.importSourceReferences(secret, bundle, sourceSecret);
+      res.json({
+        imported: imported.imported.map(mapFile),
+        importedCount: imported.imported.length,
+      });
+    })
+  );
+
+  router.post(
+    '/references/recipient/export',
+    requireSecret(deps),
+    asyncHandler(async (req, res) => {
+      const { filenames, recipientVolumeId } = parseWithSchema(exportRecipientReferencesBodySchema, req.body);
+      const secret = res.locals.secret as string;
+      const exported = await deps.fileService.exportRecipientReferences(secret, filenames, recipientVolumeId);
+      res.json(exported);
+    })
+  );
+
+  router.post(
+    '/references/recipient/import',
+    requireSecret(deps),
+    asyncHandler(async (req, res) => {
+      const { bundle } = parseWithSchema(importRecipientReferencesBodySchema, req.body);
+      const secret = res.locals.secret as string;
+      const imported = await deps.fileService.importRecipientReferences(secret, bundle);
+      res.json({
+        imported: imported.imported.map(mapFile),
+        importedCount: imported.imported.length,
+      });
+    })
+  );
+
   router.delete(
     '/files/:name',
     requireSecret(deps),
@@ -598,6 +652,7 @@ const DESKTOP_PROTECTED_API_PREFIXES = [
   '/sources',
   '/watch',
   '/folders',
+  '/references',
   '/__debug',
 ] as const;
 

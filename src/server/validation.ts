@@ -29,6 +29,23 @@ export const renameFileBodySchema = z.object({
   to: z.string().min(1, 'Destination file is required'),
 });
 
+export const exportReferencesBodySchema = z.object({
+  filenames: z.array(z.string().min(1, 'Filename is required')).min(1, 'At least one filename is required'),
+});
+
+export const exportRecipientReferencesBodySchema = exportReferencesBodySchema.extend({
+  recipientVolumeId: z.string().min(1, 'Recipient volume id is required'),
+});
+
+export const importSourceReferencesBodySchema = z.object({
+  sourceSecret: z.string().min(1, 'Source secret is required'),
+  bundle: z.unknown(),
+});
+
+export const importRecipientReferencesBodySchema = z.object({
+  bundle: z.unknown(),
+});
+
 export const consolidateRootParamSchema = z.object({
   sourceId: z.string().trim().min(1, 'Source root id is required'),
 });

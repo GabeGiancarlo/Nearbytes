@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { FileText, Image as ImageIcon } from 'lucide-svelte';
+  import { FileText, HardDrive, Image as ImageIcon } from 'lucide-svelte';
 
   const FILE_SECRET_PREFIX = 'nb-file-secret:v1:';
 
@@ -47,7 +47,7 @@
 </script>
 
 <div class="volume-identity" class:compact>
-  {#if hasFileSecret}
+  {#if hasFileSecret || compact}
     <span class="volume-identity-preview" class:image={hasImagePreview}>
       {#if hasImagePreview && previewDataUrl}
         <img
@@ -57,10 +57,12 @@
         />
       {:else}
         <span class="volume-identity-preview-icon" aria-hidden="true">
-          {#if trim(fileMimeType).startsWith('image/')}
+          {#if hasFileSecret && trim(fileMimeType).startsWith('image/')}
             <ImageIcon size={compact ? 13 : 15} strokeWidth={2.1} />
-          {:else}
+          {:else if hasFileSecret}
             <FileText size={compact ? 13 : 15} strokeWidth={2.1} />
+          {:else}
+            <HardDrive size={compact ? 13 : 15} strokeWidth={2.1} />
           {/if}
         </span>
       {/if}

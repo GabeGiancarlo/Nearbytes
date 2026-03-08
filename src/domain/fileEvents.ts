@@ -10,6 +10,7 @@ export interface CreateFileEvent {
   type: 'CREATE_FILE';
   filename: string;
   blobHash: string;
+  contentType: 'b' | 'm';
   size: number;
   mimeType?: string;
   createdAt: number;
@@ -40,6 +41,7 @@ export interface RenameFileEvent {
 export interface FileMetadata {
   filename: string;
   blobHash: string;
+  contentType?: 'b' | 'm';
   size: number;
   mimeType?: string;
   createdAt: number;

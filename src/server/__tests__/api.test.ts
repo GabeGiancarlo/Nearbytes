@@ -16,6 +16,9 @@ const SECRET_OTHER = 'nearbytes-other-secret';
 const SECRET_SNAPSHOT = 'nearbytes-snapshot-secret';
 const SECRET_TIMELINE = 'nearbytes-timeline-secret';
 const SECRET_RENAME_FOLDER = 'nearbytes-rename-folder-secret';
+const SECRET_REFERENCE_SOURCE = 'nearbytes-reference-source-secret';
+const SECRET_REFERENCE_DESTINATION = 'nearbytes-reference-destination-secret';
+const SECRET_REFERENCE_OTHER = 'nearbytes-reference-other-secret';
 const FILE_SECRET_PREFIX = 'nb-file-secret:v1:';
 
 describe('Nearbytes API', () => {
@@ -298,6 +301,103 @@ describe('Nearbytes API', () => {
     expect(timelineRes.body.events[1].timestamp).toBeLessThanOrEqual(
       timelineRes.body.events[2].timestamp
     );
+  });
+
+  it('exports and imports source-bound references through the API', async () => {
+    const sourceOpen = await request(app).post('/open').send({ secret: SECRET_REFERENCE_SOURCE }).expect(200);
+    const sourceToken = sourceOpen.body.token as string;
+
+    await request(app)
+      .post('/upload')
+      .set('Authorization', `Bearer ${sourceToken}`)
+      .attach('file', Buffer.from('source-reference-payload'), 'copy-me.txt')
+      .expect(200);
+
+    const exportRes = await request(app)
+      .post('/references/source/export')
+      .set('Authorization', `Bearer ${sourceToken}`)
+      .send({ filenames: ['copy-me.txt'] })
+      .expect(200);
+
+    expect(exportRes.body.bundle.p).toBe('nb.src.refs.v1');
+    expect(exportRes.body.bundle.items).toHaveLength(1);
+    expect(exportRes.body.serialized).toContain('nb.src.refs.v1');
+
+    const destinationOpen = await request(app)
+      .post('/open')
+      .send({ secret: SECRET_REFERENCE_DESTINATION })
+      .expect(200);
+    const destinationToken = destinationOpen.body.token as string;
+
+    const importRes = await request(app)
+      .post('/references/source/import')
+      .set('Authorization', `Bearer ${destinationToken}`)
+      .send({
+        sourceSecret: SECRET_REFERENCE_SOURCE,
+        bundle: exportRes.body.bundle,
+      })
+      .expect(200);
+
+    expect(importRes.body.importedCount).toBe(1);
+    expect(importRes.body.imported[0].filename).toBe('copy-me.txt');
+
+    const listRes = await request(app)
+      .get('/files')
+      .set('Authorization', `Bearer ${destinationToken}`)
+      .expect(200);
+
+    expect(listRes.body.files).toHaveLength(1);
+    expect(listRes.body.files[0].filename).toBe('copy-me.txt');
+  });
+
+  it('rejects recipient-bound imports into the wrong destination volume', async () => {
+    const sourceOpen = await request(app).post('/open').send({ secret: SECRET_REFERENCE_SOURCE }).expect(200);
+    const sourceToken = sourceOpen.body.token as string;
+
+    const uploadRes = await request(app)
+      .post('/upload')
+      .set('Authorization', `Bearer ${sourceToken}`)
+      .attach('file', Buffer.from('recipient-reference-payload'), 'targeted.txt')
+      .expect(200);
+
+    const destinationOpen = await request(app)
+      .post('/open')
+      .send({ secret: SECRET_REFERENCE_DESTINATION })
+      .expect(200);
+    const destinationToken = destinationOpen.body.token as string;
+    const destinationVolumeId = destinationOpen.body.volumeId as string;
+
+    const exportRes = await request(app)
+      .post('/references/recipient/export')
+      .set('Authorization', `Bearer ${sourceToken}`)
+      .send({
+        filenames: ['targeted.txt'],
+        recipientVolumeId: destinationVolumeId,
+      })
+      .expect(200);
+
+    expect(exportRes.body.bundle.p).toBe('nb.refs.v1');
+    expect(exportRes.body.bundle.items[0].ref.c.h).toBe(uploadRes.body.created.blobHash);
+
+    const otherOpen = await request(app)
+      .post('/open')
+      .send({ secret: SECRET_REFERENCE_OTHER })
+      .expect(200);
+    const otherToken = otherOpen.body.token as string;
+
+    await request(app)
+      .post('/references/recipient/import')
+      .set('Authorization', `Bearer ${otherToken}`)
+      .send({ bundle: exportRes.body.bundle })
+      .expect(500);
+
+    const importRes = await request(app)
+      .post('/references/recipient/import')
+      .set('Authorization', `Bearer ${destinationToken}`)
+      .send({ bundle: exportRes.body.bundle })
+      .expect(200);
+
+    expect(importRes.body.importedCount).toBe(1);
   });
 
   it('returns compact bearer tokens for file-backed secrets', async () => {

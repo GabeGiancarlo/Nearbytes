@@ -7,13 +7,22 @@
     uploadFiles,
     deleteFile,
     downloadFile,
+    exportSourceReferences,
+    importRecipientReferences,
+    importSourceReferences,
     renameFile,
     watchVolume,
     type Auth,
     type FileMetadata,
+    type RecipientReferenceBundle,
+    type SourceReferenceBundle,
     type TimelineEvent,
   } from './lib/api.js';
   import { getCachedFiles, setCachedFiles } from './lib/cache.js';
+  import {
+    parseNearbytesClipboardPayload,
+    writeNearbytesClipboardPayload,
+  } from './lib/referenceClipboard.js';
   import ArmedActionButton from './components/ArmedActionButton.svelte';
   import AudioPreview from './components/AudioPreview.svelte';
   import StoragePanel from './components/StoragePanel.svelte';
@@ -79,6 +88,7 @@
     secretFilePayload: string;
     secretFileName: string;
     secretFileMimeType: string;
+    volumeId?: string;
     collapsed: boolean;
     createdAt: number;
   }
@@ -109,6 +119,7 @@
       secretFileName: typeof overrides.secretFileName === 'string' ? overrides.secretFileName.trim() : '',
       secretFileMimeType:
         typeof overrides.secretFileMimeType === 'string' ? overrides.secretFileMimeType.trim() : '',
+      volumeId: typeof overrides.volumeId === 'string' ? overrides.volumeId.trim().toLowerCase() : undefined,
       collapsed: overrides.collapsed ?? false,
       createdAt: overrides.createdAt ?? Date.now(),
     };
@@ -127,6 +138,7 @@
           (value.secretFilePayload === undefined || typeof value.secretFilePayload === 'string') &&
           (value.secretFileName === undefined || typeof value.secretFileName === 'string') &&
           (value.secretFileMimeType === undefined || typeof value.secretFileMimeType === 'string') &&
+          (value.volumeId === undefined || typeof value.volumeId === 'string') &&
           typeof value.collapsed === 'boolean'
       )
       .map((value) =>
@@ -137,6 +149,7 @@
           secretFilePayload: value.secretFilePayload,
           secretFileName: value.secretFileName,
           secretFileMimeType: value.secretFileMimeType,
+          volumeId: value.volumeId,
           collapsed: value.collapsed,
           createdAt: value.createdAt,
         })
@@ -170,6 +183,7 @@
       secretFilePayload: mount.secretFilePayload,
       secretFileName: mount.secretFileName,
       secretFileMimeType: mount.secretFileMimeType,
+      volumeId: mount.volumeId,
       collapsed: mount.collapsed,
       createdAt: mount.createdAt,
     }));
@@ -850,6 +864,7 @@
       ...currentMount,
       address,
       password: addressPassword,
+      volumeId: undefined,
     };
     mounts = next;
   });
@@ -1293,6 +1308,9 @@
       }
       auth = authResult;
       volumeId = response.volumeId;
+      mounts = mounts.map((mount) =>
+        mount.id === requestedMountId ? { ...mount, volumeId: response.volumeId } : mount
+      );
       lastRefresh = Date.now();
       errorMessage = response.storageHint ?? '';
       effectiveSecret = openSecret;
@@ -1489,6 +1507,7 @@
             secretFilePayload: '',
             secretFileName: '',
             secretFileMimeType: '',
+            volumeId: undefined,
           }
         : mount
     );
@@ -1508,6 +1527,7 @@
             secretFilePayload: '',
             secretFileName: '',
             secretFileMimeType: '',
+            volumeId: undefined,
           }
         : mount
     );
@@ -1531,6 +1551,7 @@
             secretFilePayload: payload,
             secretFileName: label,
             secretFileMimeType: trimSecretPart(file.type),
+            volumeId: undefined,
             collapsed: false,
           }
         : { ...mount, collapsed: true }
@@ -1868,6 +1889,79 @@
     }
   }
 
+  function isFileManagerFocused(target: EventTarget | null): boolean {
+    if (!(target instanceof Node) || !fileManagerElement) {
+      return false;
+    }
+    return fileManagerElement.contains(target);
+  }
+
+  function isEditableTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+    return (
+      target.isContentEditable ||
+      target.closest('input, textarea, select, [contenteditable="true"]') !== null
+    );
+  }
+
+  function mountedSecretForVolumeId(targetVolumeId: string): string | null {
+    const normalized = targetVolumeId.trim().toLowerCase();
+    const mount = mounts.find(
+      (candidate) =>
+        candidate.volumeId?.trim().toLowerCase() === normalized && buildMountSecret(candidate).trim() !== ''
+    );
+    return mount ? buildMountSecret(mount) : null;
+  }
+
+  async function copySelectedFilesToClipboard() {
+    if (!auth || !effectiveSecret) {
+      return;
+    }
+    if (isHistoryMode) {
+      errorMessage = 'History mode is read-only. Jump to Latest before copying.';
+      return;
+    }
+    if (selectedFiles.length === 0) {
+      return;
+    }
+
+    errorMessage = '';
+    const exported = await exportSourceReferences(
+      auth,
+      selectedFiles.map((file) => file.filename)
+    );
+    await writeNearbytesClipboardPayload(exported.serialized);
+  }
+
+  async function importNearbytesClipboardPayload(payload: { kind: 'source'; bundle: SourceReferenceBundle } | { kind: 'recipient'; bundle: RecipientReferenceBundle }): Promise<boolean> {
+    if (!auth || !effectiveSecret) {
+      errorMessage = 'Open a destination volume before pasting.';
+      return true;
+    }
+    if (isHistoryMode) {
+      errorMessage = 'History mode is read-only. Jump to Latest before pasting.';
+      return true;
+    }
+
+    errorMessage = '';
+
+    if (payload.kind === 'source') {
+      const sourceSecret = mountedSecretForVolumeId(payload.bundle.s);
+      if (!sourceSecret) {
+        errorMessage = 'Source volume is not mounted or unlocked locally.';
+        return true;
+      }
+      await importSourceReferences(auth, payload.bundle, sourceSecret);
+    } else {
+      await importRecipientReferences(auth, payload.bundle);
+    }
+
+    await refreshFiles();
+    return true;
+  }
+
   async function openFileInViewer(file: FileMetadata) {
     if (!auth) return;
     const popup = window.open('', '_blank', 'noopener,noreferrer');
@@ -2088,6 +2182,19 @@
       return;
     }
 
+    const nearbytesPayload = parseNearbytesClipboardPayload(
+      clipboardData.getData('text/plain') || ''
+    );
+    if (nearbytesPayload && !shouldRoutePasteToSecret(event.target)) {
+      event.preventDefault();
+      try {
+        await importNearbytesClipboardPayload(nearbytesPayload);
+      } catch (error) {
+        errorMessage = error instanceof Error ? error.message : 'Paste import failed';
+      }
+      return;
+    }
+
     const localFiles = localFilesFromTransfer(clipboardData);
     const allowRemoteClipboardImport =
       transferTypes(clipboardData).includes('DownloadURL') ||
@@ -2217,6 +2324,20 @@
   if (e.key === 'Escape') {
     handleManagerKeydown(e);
     collapseMount(activeMountId);
+  }
+  if (
+    (e.metaKey || e.ctrlKey) &&
+    !e.altKey &&
+    !e.shiftKey &&
+    e.key.toLowerCase() === 'c' &&
+    isFileManagerFocused(e.target) &&
+    selectedFiles.length > 0 &&
+    !isEditableTarget(e.target)
+  ) {
+    e.preventDefault();
+    void copySelectedFilesToClipboard().catch((error) => {
+      errorMessage = error instanceof Error ? error.message : 'Copy failed';
+    });
   }
   if (e.key === 'Delete' && e.target instanceof HTMLElement) {
     const fileItem = e.target.closest('[data-filename]');
@@ -2414,8 +2535,7 @@
             </div>
           {:else}
             <div
-              class="volume-chip collapsed-shell"
-              class:parked={!isHeaderHovering && !isSecretDropTarget}
+              class="volume-chip collapsed-shell parked"
               class:selected={mount.id === activeMountId && mount.collapsed}
               data-mount-id={mount.id}
             >
@@ -3086,7 +3206,7 @@
     min-width: 132px;
     max-width: min(72vw, 420px);
     padding: 0.1rem;
-    transition: max-width 0.28s ease, border-radius 0.28s ease, background-color 0.28s ease, border-color 0.28s ease, box-shadow 0.28s ease, transform 0.28s ease;
+    transition: min-width 0.28s ease, max-width 0.28s ease, border-radius 0.28s ease, background-color 0.28s ease, border-color 0.28s ease, box-shadow 0.28s ease, transform 0.28s ease;
     overflow: hidden;
     font: inherit;
     color: inherit;
@@ -3101,6 +3221,7 @@
     align-items: stretch;
     gap: 0;
     transition:
+      min-width 0.22s ease,
       max-width 0.22s ease,
       opacity 0.18s ease,
       transform 0.22s ease,
@@ -3109,13 +3230,76 @@
   }
 
   .volume-chip.collapsed-shell.parked {
+    min-width: 46px;
+    max-width: 46px;
+    transform: translateX(0) scale(1);
+  }
+
+  .volume-chip.collapsed-shell.parked .header-dock {
+    padding: 0.32rem;
+  }
+
+  .volume-chip.collapsed-shell.parked .header-dock-badge {
+    gap: 0;
+  }
+
+  .volume-chip.collapsed-shell.parked .header-dock-badge-top {
+    gap: 0;
+  }
+
+  .volume-chip.collapsed-shell :global(.volume-identity-copy) {
+    max-width: 220px;
+    opacity: 1;
+    transform: translateX(0);
+    overflow: hidden;
+    transition:
+      max-width 0.22s ease,
+      opacity 0.18s ease,
+      transform 0.22s ease;
+  }
+
+  .volume-chip.collapsed-shell.parked :global(.volume-identity-copy) {
     max-width: 0;
     opacity: 0;
-    transform: translateX(-6px) scale(0.96);
-    pointer-events: none;
-    overflow: hidden;
-    margin: 0;
-    border-color: transparent;
+    transform: translateX(-5px);
+  }
+
+  .volume-chip.collapsed-shell.parked:focus-within {
+    min-width: 132px;
+    max-width: min(72vw, 420px);
+  }
+
+  .volume-chip.collapsed-shell.parked:hover {
+    min-width: 132px;
+    max-width: min(72vw, 420px);
+  }
+
+  .volume-chip.collapsed-shell.parked:focus-within .header-dock {
+    padding: 0.26rem 0.36rem 0.26rem 0.62rem;
+  }
+
+  .volume-chip.collapsed-shell.parked:hover .header-dock {
+    padding: 0.26rem 0.36rem 0.26rem 0.62rem;
+  }
+
+  .volume-chip.collapsed-shell.parked:focus-within .header-dock-badge-top {
+    gap: 0.5rem;
+  }
+
+  .volume-chip.collapsed-shell.parked:hover .header-dock-badge-top {
+    gap: 0.5rem;
+  }
+
+  .volume-chip.collapsed-shell.parked:focus-within :global(.volume-identity-copy) {
+    max-width: 220px;
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .volume-chip.collapsed-shell.parked:hover :global(.volume-identity-copy) {
+    max-width: 220px;
+    opacity: 1;
+    transform: translateX(0);
   }
 
   .volume-chip.expanded {
@@ -3170,6 +3354,21 @@
 
   .volume-chip.selected .badge-meter {
     background: rgba(34, 211, 238, 0.18);
+  }
+
+  .volume-chip.selected.parked .header-dock {
+    padding-left: 0.32rem;
+  }
+
+  .volume-chip.selected.parked .header-dock-badge {
+    padding-left: 0;
+  }
+
+  .volume-chip.selected.parked .header-dock-badge::before {
+    width: 0;
+    height: 0;
+    opacity: 0;
+    box-shadow: none;
   }
 
   .header-dock {

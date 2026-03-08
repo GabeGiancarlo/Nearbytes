@@ -8,9 +8,73 @@ export type Auth = { type: 'token'; token: string } | { type: 'secret'; secret: 
 export interface FileMetadata {
   filename: string;
   blobHash: string;
+  contentType?: 'b' | 'm';
   size: number;
   mimeType?: string;
   createdAt: number;
+}
+
+export interface ContentDescriptor {
+  t: 'b' | 'm';
+  h: string;
+  z: number;
+}
+
+export interface SourceFileReference {
+  p: 'nb.src.ref.v1';
+  s: string;
+  c: ContentDescriptor;
+  x: string;
+}
+
+export interface SourceReferenceBundleItem {
+  name: string;
+  mime?: string;
+  createdAt?: number;
+  ref: SourceFileReference;
+}
+
+export interface SourceReferenceBundle {
+  p: 'nb.src.refs.v1';
+  s: string;
+  items: SourceReferenceBundleItem[];
+}
+
+export interface RecipientKeyCapsule {
+  r: string;
+  e: string;
+  n: string;
+  w: string;
+}
+
+export interface RecipientFileReference {
+  p: 'nb.ref.v1';
+  c: ContentDescriptor;
+  k: RecipientKeyCapsule;
+}
+
+export interface RecipientReferenceBundleItem {
+  name: string;
+  mime?: string;
+  createdAt?: number;
+  ref: RecipientFileReference;
+}
+
+export interface RecipientReferenceBundle {
+  p: 'nb.refs.v1';
+  r: string;
+  items: RecipientReferenceBundleItem[];
+}
+
+export interface ReferenceExportResponse<TBundle> {
+  bundle: TBundle;
+  serialized: string;
+  upgradedCount: number;
+}
+
+export interface ReferenceImportResponse {
+  imported: FileMetadata[];
+  importedCount: number;
 }
 
 export interface OpenVolumeResponse {
@@ -562,6 +626,52 @@ export async function renameFolder(
     method: 'POST',
     auth,
     body: JSON.stringify({ from, to, merge }),
+  });
+}
+
+export async function exportSourceReferences(
+  auth: Auth,
+  filenames: string[]
+): Promise<ReferenceExportResponse<SourceReferenceBundle>> {
+  return apiRequest<ReferenceExportResponse<SourceReferenceBundle>>('/references/source/export', {
+    method: 'POST',
+    auth,
+    body: JSON.stringify({ filenames }),
+  });
+}
+
+export async function importSourceReferences(
+  auth: Auth,
+  bundle: SourceReferenceBundle,
+  sourceSecret: string
+): Promise<ReferenceImportResponse> {
+  return apiRequest<ReferenceImportResponse>('/references/source/import', {
+    method: 'POST',
+    auth,
+    body: JSON.stringify({ bundle, sourceSecret }),
+  });
+}
+
+export async function exportRecipientReferences(
+  auth: Auth,
+  filenames: string[],
+  recipientVolumeId: string
+): Promise<ReferenceExportResponse<RecipientReferenceBundle>> {
+  return apiRequest<ReferenceExportResponse<RecipientReferenceBundle>>('/references/recipient/export', {
+    method: 'POST',
+    auth,
+    body: JSON.stringify({ filenames, recipientVolumeId }),
+  });
+}
+
+export async function importRecipientReferences(
+  auth: Auth,
+  bundle: RecipientReferenceBundle
+): Promise<ReferenceImportResponse> {
+  return apiRequest<ReferenceImportResponse>('/references/recipient/import', {
+    method: 'POST',
+    auth,
+    body: JSON.stringify({ bundle }),
   });
 }
 
