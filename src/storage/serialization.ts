@@ -269,7 +269,7 @@ function assertFiniteUint(value: number, fieldName: string): void {
 
 function serializeMetadata(payload: EventPayload): Uint8Array {
   if (payload.type === EventType.CREATE_FILE) {
-    const metadataVersion = 2;
+    const metadataVersion = payload.contentType !== undefined ? 2 : 1;
     if (payload.size === undefined) {
       throw new Error('Missing size for CREATE_FILE metadata');
     }
@@ -287,6 +287,19 @@ function serializeMetadata(payload: EventPayload): Uint8Array {
     const mimeTypeLength = new Uint8Array(4);
     const mimeTypeLengthView = new DataView(mimeTypeLength.buffer);
     mimeTypeLengthView.setUint32(0, mimeTypeBytes.length, false); // big-endian
+
+    if (metadataVersion === 1) {
+      const metadata = new Uint8Array(1 + 8 + 8 + 4 + mimeTypeBytes.length);
+      const view = new DataView(metadata.buffer, metadata.byteOffset, metadata.byteLength);
+
+      metadata[0] = metadataVersion;
+      writeUint64(view, 1, payload.size);
+      writeUint64(view, 1 + 8, payload.createdAt);
+      metadata.set(mimeTypeLength, 1 + 8 + 8);
+      metadata.set(mimeTypeBytes, 1 + 8 + 8 + 4);
+
+      return metadata;
+    }
 
     const metadata = new Uint8Array(1 + 1 + 8 + 8 + 4 + mimeTypeBytes.length);
     const view = new DataView(metadata.buffer, metadata.byteOffset, metadata.byteLength);
