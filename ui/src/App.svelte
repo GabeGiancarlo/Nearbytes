@@ -8,7 +8,6 @@
     deleteFile,
     downloadFile,
     exportSourceReferences,
-    importSourceReferences,
     publishIdentity,
     renameFile,
     watchVolume,
@@ -30,17 +29,18 @@
     persistVolumeIdentityAssignments,
     type ConfiguredIdentity,
   } from './lib/chatIdentities.js';
+  import {
+    exportSourceReferenceBundleFromDrag,
+    importMountedSourceReferenceBundle,
+    parseSourceReferenceBundleText,
+  } from './lib/nearbytesReferenceTransfer.js';
   import { writeNearbytesClipboardPayload } from './lib/referenceClipboard.js';
   import ArmedActionButton from './components/ArmedActionButton.svelte';
   import AudioPreview from './components/AudioPreview.svelte';
   import StoragePanel from './components/StoragePanel.svelte';
   import VolumeChat from './components/VolumeChat.svelte';
   import VolumeIdentity from './components/VolumeIdentity.svelte';
-  import {
-    NEARBYTES_DRAG_TYPE,
-    parseNearbytesDragPayload,
-    type NearbytesDragPayload,
-  } from './lib/nearbytesDrag.js';
+  import { NEARBYTES_DRAG_TYPE } from './lib/nearbytesDrag.js';
   import {
     Activity,
     ClipboardPaste,
@@ -104,8 +104,11 @@
     secretFileMimeType: string;
     volumeId?: string;
     collapsed: boolean;
+    showFilesPane: boolean;
+    showChatPane: boolean;
+    workspaceSplit: number;
     createdAt: number;
-  }
+  };
 
   type MountedVolumePresentation = {
     volumeId: string;
@@ -116,7 +119,6 @@
   };
 
   type FileManagerViewMode = 'icons' | 'details';
-  type VolumeWorkspaceMode = 'files' | 'chat';
 
   type AppReferenceClipboard = {
     bundle: SourceReferenceBundle;
@@ -135,6 +137,12 @@
         typeof overrides.secretFileMimeType === 'string' ? overrides.secretFileMimeType.trim() : '',
       volumeId: typeof overrides.volumeId === 'string' ? overrides.volumeId.trim().toLowerCase() : undefined,
       collapsed: overrides.collapsed ?? false,
+      showFilesPane: overrides.showFilesPane ?? true,
+      showChatPane: overrides.showChatPane ?? false,
+      workspaceSplit:
+        typeof overrides.workspaceSplit === 'number' && Number.isFinite(overrides.workspaceSplit)
+          ? Math.max(34, Math.min(66, overrides.workspaceSplit))
+          : 56,
       createdAt: overrides.createdAt ?? Date.now(),
     };
   }
@@ -153,7 +161,10 @@
           (value.secretFileName === undefined || typeof value.secretFileName === 'string') &&
           (value.secretFileMimeType === undefined || typeof value.secretFileMimeType === 'string') &&
           (value.volumeId === undefined || typeof value.volumeId === 'string') &&
-          typeof value.collapsed === 'boolean'
+          typeof value.collapsed === 'boolean' &&
+          (value.showFilesPane === undefined || typeof value.showFilesPane === 'boolean') &&
+          (value.showChatPane === undefined || typeof value.showChatPane === 'boolean') &&
+          (value.workspaceSplit === undefined || typeof value.workspaceSplit === 'number')
       )
       .map((value) =>
         createMount({
@@ -165,6 +176,9 @@
           secretFileMimeType: value.secretFileMimeType,
           volumeId: value.volumeId,
           collapsed: value.collapsed,
+          showFilesPane: value.showFilesPane,
+          showChatPane: value.showChatPane,
+          workspaceSplit: value.workspaceSplit,
           createdAt: value.createdAt,
         })
       );
@@ -199,6 +213,9 @@
       secretFileMimeType: mount.secretFileMimeType,
       volumeId: mount.volumeId,
       collapsed: mount.collapsed,
+      showFilesPane: mount.showFilesPane,
+      showChatPane: mount.showChatPane,
+      workspaceSplit: mount.workspaceSplit,
       createdAt: mount.createdAt,
     }));
   }
@@ -351,6 +368,24 @@
   function canHandleDropPayload(dataTransfer: DataTransfer | null | undefined): boolean {
     const types = transferTypes(dataTransfer);
     if (types.includes('Files') || types.includes('DownloadURL') || types.includes(NEARBYTES_DRAG_TYPE)) {
+      return true;
+    }
+    return types.some((type) =>
+      type === 'text/uri-list' ||
+      type === 'text/html' ||
+      type === 'text/plain' ||
+      type === 'public.url' ||
+      type === 'public.url-name' ||
+      type === 'UniformResourceLocator'
+    );
+  }
+
+  function canHandleSecretDropPayload(dataTransfer: DataTransfer | null | undefined): boolean {
+    const types = transferTypes(dataTransfer);
+    if (types.includes(NEARBYTES_DRAG_TYPE)) {
+      return false;
+    }
+    if (types.includes('Files') || types.includes('DownloadURL')) {
       return true;
     }
     return types.some((type) =>
@@ -624,22 +659,6 @@
     });
   }
 
-  async function fileFromNearbytesTransfer(dataTransfer: DataTransfer): Promise<File | null> {
-    const payload = parseNearbytesDragPayload(dataTransfer.getData(NEARBYTES_DRAG_TYPE));
-    if (!payload || !auth) {
-      return null;
-    }
-    const blob = await downloadFile(auth, payload.blobHash);
-    const mimeType =
-      trimSecretPart(payload.mimeType ?? '') ||
-      trimSecretPart(blob.type) ||
-      'application/octet-stream';
-    return new File([blob], sanitizeDroppedFilename(payload.filename, 'nearbytes-file'), {
-      type: mimeType,
-      lastModified: Date.now(),
-    });
-  }
-
   function localFilesFromTransfer(dataTransfer: DataTransfer | null | undefined): File[] {
     if (!dataTransfer) return [];
     const directFiles = Array.from(dataTransfer.files ?? []);
@@ -655,10 +674,6 @@
     const localFiles = localFilesFromTransfer(dataTransfer);
     if (localFiles.length > 0) {
       return localFiles;
-    }
-    const nearbytesFile = await fileFromNearbytesTransfer(dataTransfer);
-    if (nearbytesFile) {
-      return [nearbytesFile];
     }
     const remoteFile = await fileFromRemoteDrop(dataTransfer);
     return remoteFile ? [remoteFile] : [];
@@ -737,10 +752,10 @@
   let identityManagerError = $state('');
   let identityHydrated = false;
   let chatRefreshVersion = $state(0);
-  let volumeWorkspaceMode = $state<VolumeWorkspaceMode>('files');
   let fileManagerViewMode = $state<FileManagerViewMode>('icons');
   let fileManagerSplit = $state(38);
   let fileManagerElement = $state<HTMLElement | null>(null);
+  let workspacePanelsElement = $state<HTMLElement | null>(null);
   let fileManagerActive = $state(false);
   let appReferenceClipboard = $state<AppReferenceClipboard | null>(null);
   let watchConnectionSerial = 0;
@@ -1205,6 +1220,14 @@
     return sorted;
   });
 
+  const activeMount = $derived.by(() => mounts.find((mount) => mount.id === activeMountId) ?? null);
+  const showFilesWorkspace = $derived.by(() => activeMount?.showFilesPane ?? true);
+  const showChatWorkspace = $derived.by(() => activeMount?.showChatPane ?? false);
+  const workspaceSplit = $derived.by(() => activeMount?.workspaceSplit ?? 56);
+  const showSplitWorkspace = $derived.by(() => showFilesWorkspace && showChatWorkspace);
+  const workspacePanelsTemplate = $derived.by(() =>
+    showSplitWorkspace ? `minmax(360px, ${workspaceSplit}%) 14px minmax(320px, 1fr)` : '1fr'
+  );
   const fileManagerTemplate = $derived.by(
     () => (showPreviewPane ? `minmax(300px, ${fileManagerSplit}%) 14px minmax(360px, 1fr)` : '1fr')
   );
@@ -1216,7 +1239,6 @@
   const selectedFile = $derived.by(
     () => visibleFiles.find((file) => file.filename === selectedFileName) ?? null
   );
-  const activeMount = $derived.by(() => mounts.find((mount) => mount.id === activeMountId) ?? null);
   const currentMountedVolumePresentation = $derived.by<MountedVolumePresentation | null>(() => {
     if (!activeMount || !volumeId) {
       return null;
@@ -1299,6 +1321,33 @@
     const updateSplit = (clientX: number) => {
       const clamped = Math.min(rect.width - minRight, Math.max(minLeft, clientX - rect.left));
       fileManagerSplit = Math.max(28, Math.min(62, (clamped / rect.width) * 100));
+    };
+
+    updateSplit(event.clientX);
+
+    const onMove = (moveEvent: PointerEvent) => updateSplit(moveEvent.clientX);
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+  }
+
+  function startWorkspaceResize(event: PointerEvent) {
+    const container = workspacePanelsElement;
+    if (!container || !showSplitWorkspace) return;
+    event.preventDefault();
+    const rect = container.getBoundingClientRect();
+    const minLeft = 360;
+    const minRight = 320;
+
+    const updateSplit = (clientX: number) => {
+      const clamped = Math.min(rect.width - minRight, Math.max(minLeft, clientX - rect.left));
+      updateActiveMountWorkspace({
+        workspaceSplit: Math.max(34, Math.min(66, (clamped / rect.width) * 100)),
+      });
     };
 
     updateSplit(event.clientX);
@@ -1843,6 +1892,9 @@
   }
 
   async function handleSecretFileDrop(event: DragEvent) {
+    if (event.dataTransfer?.types.includes(NEARBYTES_DRAG_TYPE)) {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     isSecretDropTarget = false;
@@ -2093,16 +2145,47 @@
     showPreviewPane = false;
   }
 
-  function selectVolumeWorkspaceMode(mode: VolumeWorkspaceMode) {
-    volumeWorkspaceMode = mode;
-    if (mode === 'chat') {
+  function updateActiveMountWorkspace(
+    patch: Partial<Pick<VolumeMount, 'showFilesPane' | 'showChatPane' | 'workspaceSplit'>>
+  ) {
+    if (!activeMountId) {
+      return;
+    }
+    mounts = mounts.map((mount) =>
+      mount.id === activeMountId
+        ? createMount({
+            ...mount,
+            ...patch,
+          })
+        : mount
+    );
+  }
+
+  function toggleWorkspacePane(pane: 'files' | 'chat') {
+    const currentMount = mounts.find((mount) => mount.id === activeMountId);
+    if (!currentMount) {
+      return;
+    }
+    const nextShowFiles = pane === 'files' ? !currentMount.showFilesPane : currentMount.showFilesPane;
+    const nextShowChat = pane === 'chat' ? !currentMount.showChatPane : currentMount.showChatPane;
+    if (!nextShowFiles && !nextShowChat) {
+      return;
+    }
+
+    updateActiveMountWorkspace({
+      showFilesPane: nextShowFiles,
+      showChatPane: nextShowChat,
+    });
+
+    if (!nextShowFiles) {
       showPreviewPane = false;
       renamingFileName = null;
       renameDraft = '';
       fileManagerActive = false;
-      return;
     }
-    showIdentityManager = false;
+    if (!nextShowChat) {
+      showIdentityManager = false;
+    }
   }
 
   function addConfiguredChatIdentity() {
@@ -2164,6 +2247,13 @@
   }
 
   function openIdentityManagerForChat() {
+    const currentMount = mounts.find((mount) => mount.id === activeMountId);
+    if (currentMount && !currentMount.showChatPane) {
+      updateActiveMountWorkspace({
+        showFilesPane: currentMount.showFilesPane,
+        showChatPane: true,
+      });
+    }
     if (currentVolumeChatIdentityId) {
       activeChatIdentityId = currentVolumeChatIdentityId;
     }
@@ -2334,6 +2424,19 @@
     return mount ? buildMountSecret(mount) : null;
   }
 
+  async function importNearbytesBundleIntoCurrentVolume(bundle: SourceReferenceBundle) {
+    if (!auth || !effectiveSecret) {
+      throw new Error('Open a destination volume before pasting.');
+    }
+    if (isHistoryMode) {
+      throw new Error('History mode is read-only. Jump to Latest before pasting.');
+    }
+
+    errorMessage = '';
+    await importMountedSourceReferenceBundle(auth, bundle, mountedSecretForVolumeId);
+    await refreshFiles();
+  }
+
   async function copySelectedFilesToClipboard() {
     if (!auth || !effectiveSecret) {
       return;
@@ -2362,23 +2465,7 @@
     if (!appReferenceClipboard) {
       return;
     }
-    const sourceSecret = mountedSecretForVolumeId(appReferenceClipboard.bundle.s);
-    if (!sourceSecret) {
-      errorMessage = 'Source volume is not mounted or unlocked locally.';
-      return;
-    }
-    if (!auth || !effectiveSecret) {
-      errorMessage = 'Open a destination volume before pasting.';
-      return;
-    }
-    if (isHistoryMode) {
-      errorMessage = 'History mode is read-only. Jump to Latest before pasting.';
-      return;
-    }
-
-    errorMessage = '';
-    await importSourceReferences(auth, appReferenceClipboard.bundle, sourceSecret);
-    await refreshFiles();
+    await importNearbytesBundleIntoCurrentVolume(appReferenceClipboard.bundle);
   }
 
   async function openFileInViewer(file: FileMetadata) {
@@ -2535,16 +2622,6 @@
   async function handleDrop(e: DragEvent) {
     e.preventDefault();
     isDragging = false;
-
-    if (e.dataTransfer && transferTypes(e.dataTransfer).includes(NEARBYTES_DRAG_TYPE)) {
-      errorMessage = 'Drop Nearbytes files on the top volume bar to use them as a secret.';
-      return;
-    }
-
-    if (!auth || !effectiveSecret) {
-      errorMessage = 'Enter address and optional password first';
-      return;
-    }
     if (isHistoryMode) {
       errorMessage = 'History mode is read-only. Jump to Latest before uploading.';
       return;
@@ -2552,6 +2629,28 @@
 
     try {
       errorMessage = '';
+      if (e.dataTransfer?.types.includes(NEARBYTES_DRAG_TYPE)) {
+        if (!auth || !effectiveSecret) {
+          throw new Error('Open a destination volume before pasting.');
+        }
+        const bundle = await exportSourceReferenceBundleFromDrag(
+          auth,
+          e.dataTransfer.getData(NEARBYTES_DRAG_TYPE)
+        );
+        await importNearbytesBundleIntoCurrentVolume(bundle);
+        return;
+      }
+
+      const sourceBundle = parseSourceReferenceBundleText(e.dataTransfer?.getData('text/plain') ?? '');
+      if (sourceBundle) {
+        await importNearbytesBundleIntoCurrentVolume(sourceBundle);
+        return;
+      }
+
+      if (!auth || !effectiveSecret) {
+        errorMessage = 'Enter address and optional password first';
+        return;
+      }
       const files = await filesFromTransfer(e.dataTransfer);
       if (files.length === 0) return;
       await uploadFiles(auth, files);
@@ -2585,9 +2684,12 @@
     if (!event.dataTransfer) {
       return;
     }
-    const payload: NearbytesDragPayload = {
-      blobHash: file.blobHash,
-      filename: file.filename,
+    const payload = {
+      filenames:
+        selectedFileNames.includes(file.filename) && selectedFileNames.length > 1
+          ? [...selectedFileNames]
+          : [file.filename],
+      primaryFilename: file.filename,
       mimeType: file.mimeType,
     };
     event.dataTransfer.effectAllowed = 'copy';
@@ -2611,6 +2713,22 @@
     }
 
     const clipboardData = event.clipboardData;
+    if (
+      clipboardData &&
+      isFileManagerFocused(event.target) &&
+      !isEditableTarget(event.target)
+    ) {
+      const sourceBundle = parseSourceReferenceBundleText(clipboardData.getData('text/plain'));
+      if (sourceBundle) {
+        event.preventDefault();
+        try {
+          await importNearbytesBundleIntoCurrentVolume(sourceBundle);
+        } catch (error) {
+          errorMessage = error instanceof Error ? error.message : 'Paste import failed';
+        }
+        return;
+      }
+    }
     if (!clipboardData || !canHandleDropPayload(clipboardData)) {
       return;
     }
@@ -2802,12 +2920,12 @@
         isHeaderHovering = false;
       }}
       ondragenter={(event) => {
-        if (canHandleDropPayload(event.dataTransfer)) {
+        if (canHandleSecretDropPayload(event.dataTransfer)) {
           isSecretDropTarget = true;
         }
       }}
       ondragover={(event) => {
-        if (!canHandleDropPayload(event.dataTransfer)) return;
+        if (!canHandleSecretDropPayload(event.dataTransfer)) return;
         event.preventDefault();
         isSecretDropTarget = true;
         event.dataTransfer.dropEffect = 'copy';
@@ -3059,7 +3177,7 @@
           >
             <HardDrive class="button-icon" size={14} strokeWidth={2} />
           </button>
-          {#if volumeWorkspaceMode === 'chat'}
+          {#if showChatWorkspace}
             <button
               type="button"
               class="header-tool-btn"
@@ -3087,7 +3205,7 @@
         </div>
       </div>
 
-      {#if volumeWorkspaceMode === 'chat' && showIdentityManager}
+      {#if showChatWorkspace && showIdentityManager}
         <div class="identity-row panel-surface">
           <div class="identity-row-head">
             <div class="identity-row-title">
@@ -3463,14 +3581,13 @@
       </section>
       {/if}
 
-      <div class="workspace-mode-bar panel-surface" role="tablist" aria-label="Volume workspace">
+      <div class="workspace-mode-bar panel-surface" role="group" aria-label="Volume workspace">
         <button
           type="button"
           class="workspace-mode-btn"
-          class:active={volumeWorkspaceMode === 'files'}
-          role="tab"
-          aria-selected={volumeWorkspaceMode === 'files'}
-          onclick={() => selectVolumeWorkspaceMode('files')}
+          class:active={showFilesWorkspace}
+          aria-pressed={showFilesWorkspace}
+          onclick={() => toggleWorkspacePane('files')}
         >
           <File size={15} strokeWidth={2} />
           <span>Files</span>
@@ -3478,330 +3595,356 @@
         <button
           type="button"
           class="workspace-mode-btn"
-          class:active={volumeWorkspaceMode === 'chat'}
-          role="tab"
-          aria-selected={volumeWorkspaceMode === 'chat'}
-          onclick={() => selectVolumeWorkspaceMode('chat')}
+          class:active={showChatWorkspace}
+          aria-pressed={showChatWorkspace}
+          onclick={() => toggleWorkspacePane('chat')}
         >
           <MessageSquareText size={15} strokeWidth={2} />
           <span>Chat</span>
         </button>
       </div>
 
-      {#if volumeWorkspaceMode === 'chat'}
-        <VolumeChat
-          {auth}
-          {volumeId}
-          readonlyMode={isHistoryMode}
-          historyState={isHistoryMode ? historicalChatState : null}
-          activeIdentity={joinedChatIdentity}
-          identityNeedsPublish={joinedChatIdentityNeedsPublish}
-          onOpenIdentityManager={openIdentityManagerForChat}
-          onChatMutated={handleChatMutated}
-          externalRefreshVersion={chatRefreshVersion}
-        />
-      {:else if viewFiles.length === 0 && !isLoading}
-        <div class="empty-state">
-          <div class="empty-content">
-            <svg class="empty-icon" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M32 8L8 20L32 32L56 20L32 8Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
-              <path d="M8 20V44L32 56L56 44V20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
-              <path d="M32 32V56" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
-            </svg>
-            {#if isHistoryMode}
-              <p class="empty-hint">No files at this point in history</p>
-              <p class="empty-subhint">Move the timeline toward Latest to see newer files</p>
-            {:else}
-              <p class="empty-hint">No files yet</p>
-              <p class="empty-subhint">Drop files here to add them</p>
-            {/if}
-          </div>
-        </div>
-      {:else}
-        <div
-          class="file-manager"
-          bind:this={fileManagerElement}
-          style:grid-template-columns={fileManagerTemplate}
-          onpointerdown={() => {
-            fileManagerActive = true;
-          }}
-          onfocusin={() => {
-            fileManagerActive = true;
-          }}
-        >
-          <section class="file-list-pane" class:with-preview={showPreviewPane}>
-            <div class="manager-toolbar">
-              <div class="manager-toolbar-top">
-                <input
-                  type="text"
-                  class="manager-search"
-                  placeholder="Search files"
-                  bind:value={searchQuery}
-                  aria-label="Search files"
-                />
-                <div class="manager-view-switch" role="tablist" aria-label="File browser view">
-                  <button
-                    type="button"
-                    class="view-toggle"
-                    class:active={fileManagerViewMode === 'icons'}
-                    onclick={() => (fileManagerViewMode = 'icons')}
-                    aria-pressed={fileManagerViewMode === 'icons'}
-                    title="Icon view"
-                  >
-                    <LayoutGrid size={15} strokeWidth={2} />
-                  </button>
-                  <button
-                    type="button"
-                    class="view-toggle"
-                    class:active={fileManagerViewMode === 'details'}
-                    onclick={() => (fileManagerViewMode = 'details')}
-                    aria-pressed={fileManagerViewMode === 'details'}
-                    title="Details view"
-                  >
-                    <Rows3 size={15} strokeWidth={2} />
-                  </button>
+      <div
+        class="workspace-panels"
+        bind:this={workspacePanelsElement}
+        style:grid-template-columns={workspacePanelsTemplate}
+      >
+        {#if showFilesWorkspace}
+          <div class="workspace-pane">
+            {#if viewFiles.length === 0 && !isLoading}
+              <div class="empty-state">
+                <div class="empty-content">
+                  <svg class="empty-icon" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M32 8L8 20L32 32L56 20L32 8Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
+                    <path d="M8 20V44L32 56L56 44V20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
+                    <path d="M32 32V56" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
+                  </svg>
+                  {#if isHistoryMode}
+                    <p class="empty-hint">No files at this point in history</p>
+                    <p class="empty-subhint">Move the timeline toward Latest to see newer files</p>
+                  {:else}
+                    <p class="empty-hint">No files yet</p>
+                    <p class="empty-subhint">Drop files here to add them</p>
+                  {/if}
                 </div>
               </div>
-              <div class="manager-toolbar-bottom">
-                <div class="manager-filters">
-                  <select class="manager-sort" bind:value={sortBy} aria-label="Sort files">
-                    <option value="newest">Newest</option>
-                    <option value="oldest">Oldest</option>
-                    <option value="name">Name</option>
-                    <option value="name-desc">Name (Z-A)</option>
-                    <option value="size">Size</option>
-                    <option value="size-asc">Size (Smallest)</option>
-                  </select>
-                </div>
-                {#if appReferenceClipboard}
-                  <button
-                    type="button"
-                    class="manager-btn toolbar-btn"
-                    onclick={() => void pasteCopiedFiles()}
-                    disabled={!auth || isHistoryMode}
-                    title={!auth ? 'Open a destination volume before pasting' : isHistoryMode ? 'Jump to Latest before pasting' : ''}
-                  >
-                    <ClipboardPaste class="button-icon" size={15} strokeWidth={2} />
-                    Paste {appReferenceClipboard.itemCount} item{appReferenceClipboard.itemCount === 1 ? '' : 's'}
-                  </button>
-                {/if}
-              </div>
-              <div class="manager-summary">
-                <span>{visibleFiles.length} file{visibleFiles.length === 1 ? '' : 's'}</span>
-                <span>
-                  {selectedFileNames.length === 0
-                    ? 'No selection'
-                    : selectedFileNames.length === 1 && selectedFile
-                      ? displayFileName(selectedFile)
-                      : `${selectedFileNames.length} selected`}
-                </span>
-              </div>
-            </div>
-            {#if visibleFiles.length === 0}
-              <div class="list-empty">No files match your search.</div>
             {:else}
-              <div class="file-list-scroll" class:icons={fileManagerViewMode === 'icons'}>
-                {#if fileManagerViewMode === 'details'}
-                  <div class="file-list-head">
-                    <span class="file-list-sort-wrap" data-sort={columnSortState('name')}>
-                      <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('name')}>
-                        Name
-                      </button>
-                    </span>
-                    <span class="file-list-sort-wrap" data-sort={columnSortState('size')}>
-                      <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('size')}>
-                        Size
-                      </button>
-                    </span>
-                    <span class="file-list-sort-wrap" data-sort={columnSortState('date')}>
-                      <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('date')}>
-                        Updated
-                      </button>
-                    </span>
-                  </div>
-                {/if}
-                {#each visibleFiles as file (file.filename)}
-                  {@const FileIcon = fileIconComponent(file)}
-                  <div
-                    class:file-card={fileManagerViewMode === 'icons'}
-                    class:file-row={fileManagerViewMode === 'details'}
-                    class:selected={isFileSelected(file.filename)}
-                    data-filename={file.filename}
-                    draggable="true"
-                    tabindex="0"
-                    role="button"
-                    onclick={(event) => handleFilePointerSelect(event, file)}
-                    ondblclick={() => openPreviewPane(file)}
-                    ondragstart={(event) => handleNearbytesFileDragStart(event, file)}
-                    onkeydown={(e) => handleFileRowKeydown(e, file)}
-                  >
-                    {#if fileManagerViewMode === 'icons'}
-                      <div class={`file-card-art ${fileAccentTone(file)}`}>
-                        <FileIcon size={28} strokeWidth={1.8} />
+              <div
+                class="file-manager"
+                bind:this={fileManagerElement}
+                style:grid-template-columns={fileManagerTemplate}
+                onpointerdown={() => {
+                  fileManagerActive = true;
+                }}
+                onfocusin={() => {
+                  fileManagerActive = true;
+                }}
+              >
+                <section class="file-list-pane" class:with-preview={showPreviewPane}>
+                  <div class="manager-toolbar">
+                    <div class="manager-toolbar-top">
+                      <input
+                        type="text"
+                        class="manager-search"
+                        placeholder="Search files"
+                        bind:value={searchQuery}
+                        aria-label="Search files"
+                      />
+                      <div class="manager-view-switch" role="tablist" aria-label="File browser view">
+                        <button
+                          type="button"
+                          class="view-toggle"
+                          class:active={fileManagerViewMode === 'icons'}
+                          onclick={() => (fileManagerViewMode = 'icons')}
+                          aria-pressed={fileManagerViewMode === 'icons'}
+                          title="Icon view"
+                        >
+                          <LayoutGrid size={15} strokeWidth={2} />
+                        </button>
+                        <button
+                          type="button"
+                          class="view-toggle"
+                          class:active={fileManagerViewMode === 'details'}
+                          onclick={() => (fileManagerViewMode = 'details')}
+                          aria-pressed={fileManagerViewMode === 'details'}
+                          title="Details view"
+                        >
+                          <Rows3 size={15} strokeWidth={2} />
+                        </button>
                       </div>
-                      <div class="file-card-copy">
-                        {#if renamingFileName === file.filename}
-                          <input
-                            type="text"
-                            class="file-rename-input"
-                            bind:value={renameDraft}
-                            onclick={(event) => event.stopPropagation()}
-                            ondblclick={(event) => event.stopPropagation()}
-                            onblur={() => commitRename(file)}
-                            onkeydown={(event) => {
-                              event.stopPropagation();
-                              if (event.key === 'Enter') {
-                                void commitRename(file);
-                              } else if (event.key === 'Escape') {
-                                cancelRenaming();
-                              }
-                            }}
+                    </div>
+                    <div class="manager-toolbar-bottom">
+                      <div class="manager-filters">
+                        <select class="manager-sort" bind:value={sortBy} aria-label="Sort files">
+                          <option value="newest">Newest</option>
+                          <option value="oldest">Oldest</option>
+                          <option value="name">Name</option>
+                          <option value="name-desc">Name (Z-A)</option>
+                          <option value="size">Size</option>
+                          <option value="size-asc">Size (Smallest)</option>
+                        </select>
+                      </div>
+                      {#if appReferenceClipboard}
+                        <button
+                          type="button"
+                          class="manager-btn toolbar-btn"
+                          onclick={() => void pasteCopiedFiles()}
+                          disabled={!auth || isHistoryMode}
+                          title={!auth ? 'Open a destination volume before pasting' : isHistoryMode ? 'Jump to Latest before pasting' : ''}
+                        >
+                          <ClipboardPaste class="button-icon" size={15} strokeWidth={2} />
+                          Paste {appReferenceClipboard.itemCount} item{appReferenceClipboard.itemCount === 1 ? '' : 's'}
+                        </button>
+                      {/if}
+                    </div>
+                    <div class="manager-summary">
+                      <span>{visibleFiles.length} file{visibleFiles.length === 1 ? '' : 's'}</span>
+                      <span>
+                        {selectedFileNames.length === 0
+                          ? 'No selection'
+                          : selectedFileNames.length === 1 && selectedFile
+                            ? displayFileName(selectedFile)
+                            : `${selectedFileNames.length} selected`}
+                      </span>
+                    </div>
+                  </div>
+                  {#if visibleFiles.length === 0}
+                    <div class="list-empty">No files match your search.</div>
+                  {:else}
+                    <div class="file-list-scroll" class:icons={fileManagerViewMode === 'icons'}>
+                      {#if fileManagerViewMode === 'details'}
+                        <div class="file-list-head">
+                          <span class="file-list-sort-wrap" data-sort={columnSortState('name')}>
+                            <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('name')}>
+                              Name
+                            </button>
+                          </span>
+                          <span class="file-list-sort-wrap" data-sort={columnSortState('size')}>
+                            <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('size')}>
+                              Size
+                            </button>
+                          </span>
+                          <span class="file-list-sort-wrap" data-sort={columnSortState('date')}>
+                            <button type="button" class="file-list-sort" onclick={() => toggleColumnSort('date')}>
+                              Updated
+                            </button>
+                          </span>
+                        </div>
+                      {/if}
+                      {#each visibleFiles as file (file.filename)}
+                        {@const FileIcon = fileIconComponent(file)}
+                        <div
+                          class:file-card={fileManagerViewMode === 'icons'}
+                          class:file-row={fileManagerViewMode === 'details'}
+                          class:selected={isFileSelected(file.filename)}
+                          data-filename={file.filename}
+                          draggable="true"
+                          tabindex="0"
+                          role="button"
+                          onclick={(event) => handleFilePointerSelect(event, file)}
+                          ondblclick={() => openPreviewPane(file)}
+                          ondragstart={(event) => handleNearbytesFileDragStart(event, file)}
+                          onkeydown={(e) => handleFileRowKeydown(e, file)}
+                        >
+                          {#if fileManagerViewMode === 'icons'}
+                            <div class={`file-card-art ${fileAccentTone(file)}`}>
+                              <FileIcon size={28} strokeWidth={1.8} />
+                            </div>
+                            <div class="file-card-copy">
+                              {#if renamingFileName === file.filename}
+                                <input
+                                  type="text"
+                                  class="file-rename-input"
+                                  bind:value={renameDraft}
+                                  onclick={(event) => event.stopPropagation()}
+                                  ondblclick={(event) => event.stopPropagation()}
+                                  onblur={() => commitRename(file)}
+                                  onkeydown={(event) => {
+                                    event.stopPropagation();
+                                    if (event.key === 'Enter') {
+                                      void commitRename(file);
+                                    } else if (event.key === 'Escape') {
+                                      cancelRenaming();
+                                    }
+                                  }}
+                                />
+                              {:else}
+                                <button
+                                  type="button"
+                                  class="file-name-trigger file-card-name"
+                                  title={file.filename}
+                                  ondblclick={(event) => {
+                                    event.stopPropagation();
+                                    startRenaming(file);
+                                  }}
+                                  onclick={(event) => handleFilePointerSelect(event, file)}
+                                >
+                                  {displayFileName(file)}
+                                </button>
+                              {/if}
+                            </div>
+                          {:else}
+                            <div class="file-row-main">
+                              <span class={`file-row-icon ${fileAccentTone(file)}`}>
+                                <FileIcon size={15} strokeWidth={2} />
+                              </span>
+                              <div class="file-row-copy">
+                                {#if renamingFileName === file.filename}
+                                  <input
+                                    type="text"
+                                    class="file-rename-input"
+                                    bind:value={renameDraft}
+                                    onclick={(event) => event.stopPropagation()}
+                                    ondblclick={(event) => event.stopPropagation()}
+                                    onblur={() => commitRename(file)}
+                                    onkeydown={(event) => {
+                                      event.stopPropagation();
+                                      if (event.key === 'Enter') {
+                                        void commitRename(file);
+                                      } else if (event.key === 'Escape') {
+                                        cancelRenaming();
+                                      }
+                                    }}
+                                  />
+                                {:else}
+                                  <button
+                                    type="button"
+                                    class="file-name-trigger file-row-name"
+                                    title={file.filename}
+                                    ondblclick={(event) => {
+                                      event.stopPropagation();
+                                      startRenaming(file);
+                                    }}
+                                    onclick={(event) => handleFilePointerSelect(event, file)}
+                                  >
+                                    {displayFileName(file)}
+                                  </button>
+                                {/if}
+                                <span class="file-row-path" title={file.filename}>{file.filename}</span>
+                              </div>
+                            </div>
+                            <span class="file-row-size">{formatSize(file.size)}</span>
+                            <span class="file-row-date">{formatRelativeDay(file.createdAt)}</span>
+                          {/if}
+                        </div>
+                      {/each}
+                      <button
+                        type="button"
+                        class="file-list-clear-hitbox"
+                        aria-label="Clear file selection"
+                        tabindex="-1"
+                        onclick={clearSelection}
+                      ></button>
+                    </div>
+                  {/if}
+                </section>
+                {#if showPreviewPane}
+                  <button
+                    type="button"
+                    class="file-manager-divider"
+                    aria-label="Resize file manager panes"
+                    onpointerdown={startFileManagerResize}
+                  >
+                    <span class="file-manager-divider-grip">
+                      <GripVertical size={16} strokeWidth={1.8} />
+                    </span>
+                  </button>
+                  <section class="preview-pane">
+                    {#if selectedFile}
+                      <div class="preview-header">
+                        <div>
+                          <h3 class="preview-title" title={selectedFile.filename}>{selectedFile.filename}</h3>
+                          <p class="preview-meta">
+                            {selectedFile.mimeType || 'Unknown type'} • {formatSize(selectedFile.size)} • {formatDate(selectedFile.createdAt)}
+                          </p>
+                        </div>
+                        <div class="preview-actions">
+                          <ArmedActionButton
+                            class="manager-btn danger"
+                            text="Delete"
+                            armed={true}
+                            armDelayMs={0}
+                            autoDisarmMs={3000}
+                            disabled={isHistoryMode}
+                            resetKey={`${selectedFile.blobHash}:${isHistoryMode}`}
+                            title={isHistoryMode ? 'Jump to Latest before deleting' : ''}
+                            onPress={() => handleDelete(selectedFile.filename)}
                           />
-                        {:else}
-                          <button
-                            type="button"
-                            class="file-name-trigger file-card-name"
-                            title={file.filename}
-                            ondblclick={(event) => {
-                              event.stopPropagation();
-                              startRenaming(file);
-                            }}
-                            onclick={(event) => handleFilePointerSelect(event, file)}
-                          >
-                            {displayFileName(file)}
+                          <button type="button" class="manager-btn" onclick={() => handleDownload(selectedFile)}>
+                            <Download class="button-icon" size={15} strokeWidth={2} />
+                            Download
                           </button>
+                          <button type="button" class="manager-btn preview-close-btn" onclick={closePreviewPane}>
+                            <X class="button-icon" size={15} strokeWidth={2} />
+                            Close
+                          </button>
+                        </div>
+                      </div>
+                      <div class="preview-body">
+                        {#if previewLoading}
+                          <p class="preview-message">Loading preview…</p>
+                        {:else if previewError}
+                          <p class="preview-message error">{previewError}</p>
+                        {:else if previewKind === 'image' && previewUrl}
+                          <img class="preview-image" src={previewUrl} alt={"Preview of " + selectedFile.filename} />
+                        {:else if previewKind === 'video' && previewUrl}
+                          <!-- svelte-ignore a11y_media_has_caption -->
+                          <video class="preview-media" controls src={previewUrl}></video>
+                        {:else if previewKind === 'audio' && previewUrl}
+                          <AudioPreview
+                            src={previewUrl}
+                            title={displayFileName(selectedFile)}
+                            mimeType={selectedFile.mimeType}
+                          />
+                        {:else if previewKind === 'pdf' && previewUrl}
+                          <iframe class="preview-pdf" src={previewUrl} title={"PDF preview: " + selectedFile.filename}></iframe>
+                        {:else if previewKind === 'text'}
+                          <pre class="preview-text">{previewText}</pre>
+                        {:else}
+                          <p class="preview-message">Preview unavailable. Double-click the file to open it.</p>
                         {/if}
                       </div>
                     {:else}
-                      <div class="file-row-main">
-                        <span class={`file-row-icon ${fileAccentTone(file)}`}>
-                          <FileIcon size={15} strokeWidth={2} />
-                        </span>
-                        <div class="file-row-copy">
-                          {#if renamingFileName === file.filename}
-                            <input
-                              type="text"
-                              class="file-rename-input"
-                              bind:value={renameDraft}
-                              onclick={(event) => event.stopPropagation()}
-                              ondblclick={(event) => event.stopPropagation()}
-                              onblur={() => commitRename(file)}
-                              onkeydown={(event) => {
-                                event.stopPropagation();
-                                if (event.key === 'Enter') {
-                                  void commitRename(file);
-                                } else if (event.key === 'Escape') {
-                                  cancelRenaming();
-                                }
-                              }}
-                            />
-                          {:else}
-                            <button
-                              type="button"
-                              class="file-name-trigger file-row-name"
-                              title={file.filename}
-                              ondblclick={(event) => {
-                                event.stopPropagation();
-                                startRenaming(file);
-                              }}
-                              onclick={(event) => handleFilePointerSelect(event, file)}
-                            >
-                              {displayFileName(file)}
-                            </button>
-                          {/if}
-                          <span class="file-row-path" title={file.filename}>{file.filename}</span>
-                        </div>
+                      <div class="preview-empty">
+                        <p>Select a file to preview.</p>
                       </div>
-                      <span class="file-row-size">{formatSize(file.size)}</span>
-                      <span class="file-row-date">{formatRelativeDay(file.createdAt)}</span>
                     {/if}
-                  </div>
-                {/each}
-                <button
-                  type="button"
-                  class="file-list-clear-hitbox"
-                  aria-label="Clear file selection"
-                  tabindex="-1"
-                  onclick={clearSelection}
-                ></button>
+                  </section>
+                {/if}
               </div>
             {/if}
-          </section>
-          {#if showPreviewPane}
+          </div>
+        {/if}
+
+        {#if showSplitWorkspace}
           <button
             type="button"
-            class="file-manager-divider"
-            aria-label="Resize file manager panes"
-            onpointerdown={startFileManagerResize}
+            class="workspace-divider"
+            aria-label="Resize files and chat panes"
+            onpointerdown={startWorkspaceResize}
           >
-            <span class="file-manager-divider-grip">
+            <span class="workspace-divider-grip">
               <GripVertical size={16} strokeWidth={1.8} />
             </span>
           </button>
-          <section class="preview-pane">
-            {#if selectedFile}
-              <div class="preview-header">
-                <div>
-                  <h3 class="preview-title" title={selectedFile.filename}>{selectedFile.filename}</h3>
-                  <p class="preview-meta">
-                    {selectedFile.mimeType || 'Unknown type'} • {formatSize(selectedFile.size)} • {formatDate(selectedFile.createdAt)}
-                  </p>
-                </div>
-                <div class="preview-actions">
-                  <ArmedActionButton
-                    class="manager-btn danger"
-                    text="Delete"
-                    armed={true}
-                    armDelayMs={0}
-                    autoDisarmMs={3000}
-                    disabled={isHistoryMode}
-                    resetKey={`${selectedFile.blobHash}:${isHistoryMode}`}
-                    title={isHistoryMode ? 'Jump to Latest before deleting' : ''}
-                    onPress={() => handleDelete(selectedFile.filename)}
-                  />
-                  <button type="button" class="manager-btn" onclick={() => handleDownload(selectedFile)}>
-                    <Download class="button-icon" size={15} strokeWidth={2} />
-                    Download
-                  </button>
-                  <button type="button" class="manager-btn preview-close-btn" onclick={closePreviewPane}>
-                    <X class="button-icon" size={15} strokeWidth={2} />
-                    Close
-                  </button>
-                </div>
-              </div>
-              <div class="preview-body">
-                {#if previewLoading}
-                  <p class="preview-message">Loading preview…</p>
-                {:else if previewError}
-                  <p class="preview-message error">{previewError}</p>
-                {:else if previewKind === 'image' && previewUrl}
-                  <img class="preview-image" src={previewUrl} alt={"Preview of " + selectedFile.filename} />
-                {:else if previewKind === 'video' && previewUrl}
-                  <!-- svelte-ignore a11y_media_has_caption -->
-                  <video class="preview-media" controls src={previewUrl}></video>
-                {:else if previewKind === 'audio' && previewUrl}
-                  <AudioPreview
-                    src={previewUrl}
-                    title={displayFileName(selectedFile)}
-                    mimeType={selectedFile.mimeType}
-                  />
-                {:else if previewKind === 'pdf' && previewUrl}
-                  <iframe class="preview-pdf" src={previewUrl} title={"PDF preview: " + selectedFile.filename}></iframe>
-                {:else if previewKind === 'text'}
-                  <pre class="preview-text">{previewText}</pre>
-                {:else}
-                  <p class="preview-message">Preview unavailable. Double-click the file to open it.</p>
-                {/if}
-              </div>
-            {:else}
-              <div class="preview-empty">
-                <p>Select a file to preview.</p>
-              </div>
-            {/if}
-          </section>
-          {/if}
-        </div>
-      {/if}
+        {/if}
+
+        {#if showChatWorkspace}
+          <div class="workspace-pane">
+            <VolumeChat
+              {auth}
+              {volumeId}
+              readonlyMode={isHistoryMode}
+              historyState={isHistoryMode ? historicalChatState : null}
+              activeIdentity={joinedChatIdentity}
+              identityNeedsPublish={joinedChatIdentityNeedsPublish}
+              onOpenIdentityManager={openIdentityManagerForChat}
+              onChatMutated={handleChatMutated}
+              externalRefreshVersion={chatRefreshVersion}
+            />
+          </div>
+        {/if}
+      </div>
       {/if}
       </div>
     {/if}
@@ -4970,6 +5113,22 @@
     overflow: hidden;
   }
 
+  .workspace-panels {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    display: grid;
+    gap: 0;
+    align-items: stretch;
+  }
+
+  .workspace-pane {
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+  }
+
   .volume-transition-state {
     min-height: 420px;
     border: 1px solid rgba(56, 189, 248, 0.18);
@@ -5714,7 +5873,8 @@
     background: rgba(248, 113, 113, 0.16);
   }
 
-  .file-manager-divider {
+  .file-manager-divider,
+  .workspace-divider {
     position: relative;
     min-height: 0;
     cursor: col-resize;
@@ -5727,7 +5887,8 @@
     background: transparent;
   }
 
-  .file-manager-divider::before {
+  .file-manager-divider::before,
+  .workspace-divider::before {
     content: '';
     width: 1px;
     height: 100%;
@@ -5735,7 +5896,8 @@
     transition: background 0.18s ease;
   }
 
-  .file-manager-divider-grip {
+  .file-manager-divider-grip,
+  .workspace-divider-grip {
     position: absolute;
     width: 6px;
     height: 52px;
@@ -5751,12 +5913,16 @@
   }
 
   .file-manager-divider:hover::before,
-  .file-manager-divider:focus-visible::before {
+  .file-manager-divider:focus-visible::before,
+  .workspace-divider:hover::before,
+  .workspace-divider:focus-visible::before {
     background: linear-gradient(180deg, rgba(34, 211, 238, 0), rgba(34, 211, 238, 0.18), rgba(34, 211, 238, 0));
   }
 
   .file-manager-divider:hover .file-manager-divider-grip,
-  .file-manager-divider:focus-visible .file-manager-divider-grip {
+  .file-manager-divider:focus-visible .file-manager-divider-grip,
+  .workspace-divider:hover .workspace-divider-grip,
+  .workspace-divider:focus-visible .workspace-divider-grip {
     background: rgba(186, 230, 253, 0.14);
   }
 
@@ -5849,6 +6015,12 @@
       gap: 0.75rem;
     }
 
+    .workspace-panels {
+      grid-template-columns: 1fr !important;
+      grid-template-rows: auto auto;
+      gap: 0.75rem;
+    }
+
     .identity-editor-panel {
       grid-template-columns: 1fr;
     }
@@ -5866,7 +6038,8 @@
       gap: 0.75rem;
     }
 
-    .file-manager-divider {
+    .file-manager-divider,
+    .workspace-divider {
       display: none;
     }
 

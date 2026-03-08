@@ -1,7 +1,6 @@
 <script lang="ts">
   import {
     downloadFile,
-    exportSourceReferences,
     listChat,
     sendChatMessage,
     type Auth,
@@ -12,8 +11,12 @@
     buildIdentitySecret,
     type ConfiguredIdentity,
   } from '../lib/chatIdentities.js';
-  import { NEARBYTES_DRAG_TYPE, parseNearbytesDragPayload } from '../lib/nearbytesDrag.js';
-  import { parseNearbytesClipboardPayload } from '../lib/referenceClipboard.js';
+  import { NEARBYTES_DRAG_TYPE } from '../lib/nearbytesDrag.js';
+  import {
+    createChatAttachmentFromSourceBundle,
+    exportSourceReferenceBundleFromDrag,
+    parseSourceReferenceBundleText,
+  } from '../lib/nearbytesReferenceTransfer.js';
   import {
     Info,
     MessageSquareText,
@@ -192,28 +195,6 @@
     }
   }
 
-  async function attachDraggedFile(payloadText: string) {
-    if (!auth) {
-      return;
-    }
-    const payload = parseNearbytesDragPayload(payloadText);
-    if (!payload) {
-      return;
-    }
-    const exported = await exportSourceReferences(auth, [payload.filename]);
-    const item = exported.bundle.items[0];
-    if (!item) {
-      throw new Error('Dragged file could not be exported as a reference.');
-    }
-    pendingAttachment = {
-      kind: 'nb.src.ref.v1',
-      name: item.name,
-      mime: item.mime,
-      createdAt: item.createdAt,
-      ref: item.ref,
-    };
-  }
-
   async function handleDrop(event: DragEvent) {
     event.preventDefault();
     dragActive = false;
@@ -224,41 +205,43 @@
       return;
     }
     try {
+      event.stopPropagation();
+      if (!auth) {
+        return;
+      }
       errorMessage = '';
-      await attachDraggedFile(event.dataTransfer.getData(NEARBYTES_DRAG_TYPE));
+      const bundle = await exportSourceReferenceBundleFromDrag(
+        auth,
+        event.dataTransfer.getData(NEARBYTES_DRAG_TYPE)
+      );
+      const { attachment, truncated } = createChatAttachmentFromSourceBundle(bundle);
+      pendingAttachment = attachment;
+      if (truncated) {
+        errorMessage =
+          'Attached the first dragged file. Chat messages currently support one file reference at a time.';
+      }
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Failed to attach dragged file';
     }
   }
 
   function attachSourceReferenceFromClipboardText(payloadText: string): boolean {
-    const payload = parseNearbytesClipboardPayload(payloadText);
-    if (!payload) {
+    const bundle = parseSourceReferenceBundleText(payloadText);
+    if (!bundle) {
       return false;
     }
-    if (payload.kind !== 'source') {
-      errorMessage = 'Only source-bound Nearbytes references can be attached in chat right now.';
-      return true;
-    }
-
-    const [firstItem] = payload.bundle.items;
-    if (!firstItem) {
-      errorMessage = 'Clipboard does not contain any Nearbytes file references.';
-      return true;
-    }
-
-    pendingAttachment = {
-      kind: 'nb.src.ref.v1',
-      name: firstItem.name,
-      mime: firstItem.mime,
-      createdAt: firstItem.createdAt,
-      ref: firstItem.ref,
-    };
-    errorMessage =
-      payload.bundle.items.length > 1
-        ? `Attached ${firstItem.name}. Chat messages currently support one file reference at a time.`
+    try {
+      const { attachment, truncated } = createChatAttachmentFromSourceBundle(bundle);
+      pendingAttachment = attachment;
+      errorMessage = truncated
+        ? `Attached ${attachment.name}. Chat messages currently support one file reference at a time.`
         : '';
-    return true;
+      return true;
+    } catch (error) {
+      errorMessage =
+        error instanceof Error ? error.message : 'Clipboard does not contain any Nearbytes file references.';
+      return true;
+    }
   }
 
   function handleComposerPaste(event: ClipboardEvent) {
