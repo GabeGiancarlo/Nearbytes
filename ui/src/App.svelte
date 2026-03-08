@@ -1273,6 +1273,15 @@
       pendingMountId = null;
       return;
     }
+    if (
+      auth &&
+      effectiveSecret !== '' &&
+      openSecret === effectiveSecret &&
+      openLabel === unlockedAddress
+    ) {
+      isVolumeTransitioning = false;
+      return;
+    }
     isVolumeTransitioning = true;
     debounceTimer = setTimeout(() => {
       tryOpenSecret(openSecret, openLabel, currentMount.id);
