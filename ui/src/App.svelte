@@ -24,8 +24,10 @@
     createConfiguredIdentity,
     loadActiveIdentityId,
     loadConfiguredIdentities,
+    loadVolumeIdentityAssignments,
     persistActiveIdentityId,
     persistConfiguredIdentities,
+    persistVolumeIdentityAssignments,
     type ConfiguredIdentity,
   } from './lib/chatIdentities.js';
   import { writeNearbytesClipboardPayload } from './lib/referenceClipboard.js';
@@ -728,6 +730,7 @@
   let isRefreshing = $state(false);
   let configuredIdentities = $state<ConfiguredIdentity[]>([]);
   let activeChatIdentityId = $state('');
+  let volumeChatIdentityAssignments = $state<Record<string, string>>({});
   let showIdentityManager = $state(false);
   let identityManagerLoading = $state(false);
   let identityManagerMessage = $state('');
@@ -752,6 +755,7 @@
   onMount(() => {
     configuredIdentities = loadConfiguredIdentities();
     activeChatIdentityId = loadActiveIdentityId();
+    volumeChatIdentityAssignments = loadVolumeIdentityAssignments();
     identityHydrated = true;
 
     const bridge = getDesktopBridge();
@@ -792,6 +796,13 @@
   });
 
   $effect(() => {
+    if (!identityHydrated) {
+      return;
+    }
+    persistVolumeIdentityAssignments(volumeChatIdentityAssignments);
+  });
+
+  $effect(() => {
     if (configuredIdentities.length === 0) {
       if (activeChatIdentityId !== '') {
         activeChatIdentityId = '';
@@ -802,6 +813,22 @@
       return;
     }
     activeChatIdentityId = configuredIdentities[0].id;
+  });
+
+  $effect(() => {
+    const validIds = new Set(configuredIdentities.map((identity) => identity.id));
+    let changed = false;
+    const nextAssignments: Record<string, string> = {};
+    for (const [targetVolumeId, identityId] of Object.entries(volumeChatIdentityAssignments)) {
+      if (validIds.has(identityId)) {
+        nextAssignments[targetVolumeId] = identityId;
+      } else {
+        changed = true;
+      }
+    }
+    if (changed) {
+      volumeChatIdentityAssignments = nextAssignments;
+    }
   });
 
   $effect(() => {
@@ -1034,8 +1061,20 @@
     reconstructChatStateFromTimeline(timelineEvents.length)
   );
 
-  const activeChatIdentity = $derived.by(
+  const selectedChatIdentity = $derived.by(
     () => configuredIdentities.find((identity) => identity.id === activeChatIdentityId) ?? null
+  );
+
+  const currentVolumeChatIdentityId = $derived.by(() => {
+    if (!volumeId) {
+      return '';
+    }
+    return volumeChatIdentityAssignments[volumeId] ?? '';
+  });
+
+  const joinedChatIdentity = $derived.by(
+    () =>
+      configuredIdentities.find((identity) => identity.id === currentVolumeChatIdentityId) ?? null
   );
 
   const publishedIdentityByPublicKey = $derived.by(() => {
@@ -1046,23 +1085,44 @@
     return map;
   });
 
-  const activePublishedIdentity = $derived.by(() => {
-    if (!activeChatIdentity?.publicKey) {
+  const selectedPublishedIdentity = $derived.by(() => {
+    if (!selectedChatIdentity?.publicKey) {
       return null;
     }
-    return publishedIdentityByPublicKey.get(activeChatIdentity.publicKey) ?? null;
+    return publishedIdentityByPublicKey.get(selectedChatIdentity.publicKey) ?? null;
   });
 
-  const activeChatIdentityNeedsPublish = $derived.by(() => {
-    if (!activeChatIdentity) {
+  const selectedChatIdentityNeedsPublish = $derived.by(() => {
+    if (!selectedChatIdentity) {
       return false;
     }
-    if (!activeChatIdentity.publicKey || !activePublishedIdentity) {
+    if (!selectedChatIdentity.publicKey || !selectedPublishedIdentity) {
       return true;
     }
     return (
-      activePublishedIdentity.record.profile.displayName !== activeChatIdentity.displayName.trim() ||
-      (activePublishedIdentity.record.profile.bio ?? '') !== activeChatIdentity.bio.trim()
+      selectedPublishedIdentity.record.profile.displayName !==
+        selectedChatIdentity.displayName.trim() ||
+      (selectedPublishedIdentity.record.profile.bio ?? '') !== selectedChatIdentity.bio.trim()
+    );
+  });
+
+  const joinedPublishedIdentity = $derived.by(() => {
+    if (!joinedChatIdentity?.publicKey) {
+      return null;
+    }
+    return publishedIdentityByPublicKey.get(joinedChatIdentity.publicKey) ?? null;
+  });
+
+  const joinedChatIdentityNeedsPublish = $derived.by(() => {
+    if (!joinedChatIdentity) {
+      return false;
+    }
+    if (!joinedChatIdentity.publicKey || !joinedPublishedIdentity) {
+      return true;
+    }
+    return (
+      joinedPublishedIdentity.record.profile.displayName !== joinedChatIdentity.displayName.trim() ||
+      (joinedPublishedIdentity.record.profile.bio ?? '') !== joinedChatIdentity.bio.trim()
     );
   });
 
@@ -2040,7 +2100,9 @@
       renamingFileName = null;
       renameDraft = '';
       fileManagerActive = false;
+      return;
     }
+    showIdentityManager = false;
   }
 
   function addConfiguredChatIdentity() {
@@ -2053,25 +2115,44 @@
   }
 
   function updateConfiguredChatIdentity(identityId: string, patch: Partial<ConfiguredIdentity>) {
-    configuredIdentities = configuredIdentities.map((identity) =>
-      identity.id === identityId
-        ? createConfiguredIdentity({
-            ...identity,
-            ...patch,
-            publicKey:
-              patch.address !== undefined || patch.password !== undefined
-                ? undefined
-                : patch.publicKey ?? identity.publicKey,
-          })
-        : identity
-    );
+    let secretChanged = false;
+    configuredIdentities = configuredIdentities.map((identity) => {
+      if (identity.id !== identityId) {
+        return identity;
+      }
+
+      const nextAddress =
+        typeof patch.address === 'string' ? patch.address.trim() : identity.address;
+      const nextPassword =
+        typeof patch.password === 'string' ? patch.password.trim() : identity.password;
+      secretChanged = nextAddress !== identity.address || nextPassword !== identity.password;
+
+      return createConfiguredIdentity({
+        ...identity,
+        ...patch,
+        publicKey: secretChanged ? undefined : patch.publicKey ?? identity.publicKey,
+      });
+    });
+
+    if (secretChanged) {
+      const nextAssignments = Object.fromEntries(
+        Object.entries(volumeChatIdentityAssignments).filter(
+          ([, assignedIdentityId]) => assignedIdentityId !== identityId
+        )
+      );
+      if (Object.keys(nextAssignments).length !== Object.keys(volumeChatIdentityAssignments).length) {
+        volumeChatIdentityAssignments = nextAssignments;
+        identityManagerError = '';
+        identityManagerMessage = 'Identity secret changed. Rejoin any volume chats explicitly.';
+      }
+    }
   }
 
   function removeConfiguredChatIdentity(identityId: string) {
-    configuredIdentities = configuredIdentities.filter((identity) => identity.id !== identityId);
+    const nextIdentities = configuredIdentities.filter((identity) => identity.id !== identityId);
+    configuredIdentities = nextIdentities;
     if (activeChatIdentityId === identityId) {
-      activeChatIdentityId =
-        configuredIdentities.find((identity) => identity.id !== identityId)?.id ?? '';
+      activeChatIdentityId = nextIdentities[0]?.id ?? '';
     }
     identityManagerError = '';
     identityManagerMessage = '';
@@ -2082,8 +2163,15 @@
     chatRefreshVersion += 1;
   }
 
-  async function publishActiveChatIdentity(): Promise<ConfiguredIdentity | null> {
-    if (!auth || !activeChatIdentity) {
+  function openIdentityManagerForChat() {
+    if (currentVolumeChatIdentityId) {
+      activeChatIdentityId = currentVolumeChatIdentityId;
+    }
+    showIdentityManager = true;
+  }
+
+  async function publishSelectedChatIdentity(): Promise<ConfiguredIdentity | null> {
+    if (!auth || !selectedChatIdentity) {
       identityManagerError = 'Choose an identity first.';
       identityManagerMessage = '';
       return null;
@@ -2093,37 +2181,37 @@
       identityManagerMessage = '';
       return null;
     }
-    if (activeChatIdentity.address.trim() === '') {
+    if (selectedChatIdentity.address.trim() === '') {
       identityManagerError = 'Identity secret is required.';
       identityManagerMessage = '';
       showIdentityManager = true;
       return null;
     }
-    if (activeChatIdentity.displayName.trim() === '') {
+    if (selectedChatIdentity.displayName.trim() === '') {
       identityManagerError = 'Display name is required before publishing.';
       identityManagerMessage = '';
       showIdentityManager = true;
       return null;
     }
-    if (!activeChatIdentityNeedsPublish && activeChatIdentity.publicKey) {
-      return activeChatIdentity;
+    if (!selectedChatIdentityNeedsPublish && selectedChatIdentity.publicKey) {
+      return selectedChatIdentity;
     }
 
     identityManagerLoading = true;
     identityManagerError = '';
     identityManagerMessage = '';
     try {
-      const published = await publishIdentity(auth, buildIdentitySecret(activeChatIdentity), {
-        displayName: activeChatIdentity.displayName.trim(),
-        bio: activeChatIdentity.bio.trim() || undefined,
+      const published = await publishIdentity(auth, buildIdentitySecret(selectedChatIdentity), {
+        displayName: selectedChatIdentity.displayName.trim(),
+        bio: selectedChatIdentity.bio.trim() || undefined,
       });
-      updateConfiguredChatIdentity(activeChatIdentity.id, {
+      updateConfiguredChatIdentity(selectedChatIdentity.id, {
         publicKey: published.published.authorPublicKey,
       });
       await handleChatMutated();
-      identityManagerMessage = `Published ${activeChatIdentity.displayName.trim()} to this volume.`;
+      identityManagerMessage = `Published ${selectedChatIdentity.displayName.trim()} to this volume.`;
       return {
-        ...activeChatIdentity,
+        ...selectedChatIdentity,
         publicKey: published.published.authorPublicKey,
       };
     } catch (error) {
@@ -2132,6 +2220,38 @@
     } finally {
       identityManagerLoading = false;
     }
+  }
+
+  async function joinCurrentVolumeChat(): Promise<ConfiguredIdentity | null> {
+    if (!auth || !volumeId) {
+      identityManagerError = 'Open a volume before joining chat.';
+      identityManagerMessage = '';
+      return null;
+    }
+    if (!selectedChatIdentity) {
+      identityManagerError = 'Choose an identity before joining this chat.';
+      identityManagerMessage = '';
+      showIdentityManager = true;
+      return null;
+    }
+    if (isHistoryMode) {
+      identityManagerError = 'History mode is read-only. Jump to Latest before joining chat.';
+      identityManagerMessage = '';
+      return null;
+    }
+
+    const publishedIdentity = await publishSelectedChatIdentity();
+    if (!publishedIdentity) {
+      return null;
+    }
+
+    volumeChatIdentityAssignments = {
+      ...volumeChatIdentityAssignments,
+      [volumeId]: publishedIdentity.id,
+    };
+    identityManagerError = '';
+    identityManagerMessage = `Joined this volume as ${publishedIdentity.displayName.trim()}.`;
+    return publishedIdentity;
   }
 
   function toggleColumnSort(column: 'name' | 'size' | 'date') {
@@ -2890,7 +3010,15 @@
         {/each}
         <div
           class="mounts-actions"
-          class:visible={isHeaderHovering || isSecretDropTarget || showStatusPanel || showTimeMachinePanel || showSourcesPanel || showVolumeStoragePanel}
+          class:visible={
+            isHeaderHovering ||
+            isSecretDropTarget ||
+            showStatusPanel ||
+            showTimeMachinePanel ||
+            showSourcesPanel ||
+            showVolumeStoragePanel ||
+            showIdentityManager
+          }
         >
           <button
             type="button"
@@ -2931,6 +3059,21 @@
           >
             <HardDrive class="button-icon" size={14} strokeWidth={2} />
           </button>
+          {#if volumeWorkspaceMode === 'chat'}
+            <button
+              type="button"
+              class="header-tool-btn"
+              class:active={showIdentityManager}
+              aria-label="Identities"
+              title="Identities"
+              onclick={(event) => {
+                event.stopPropagation();
+                showIdentityManager = !showIdentityManager;
+              }}
+            >
+              <UserRound class="button-icon" size={14} strokeWidth={2} />
+            </button>
+          {/if}
           <button
             type="button"
             class="mount-add-btn"
@@ -2944,7 +3087,7 @@
         </div>
       </div>
 
-      {#if volumeWorkspaceMode === 'chat'}
+      {#if volumeWorkspaceMode === 'chat' && showIdentityManager}
         <div class="identity-row panel-surface">
           <div class="identity-row-head">
             <div class="identity-row-title">
@@ -2955,16 +3098,30 @@
               <button
                 type="button"
                 class="workspace-toggle"
-                onclick={() => (showIdentityManager = !showIdentityManager)}
+                onclick={() => void joinCurrentVolumeChat()}
+                disabled={!auth || isHistoryMode || identityManagerLoading || !selectedChatIdentity}
+                title={
+                  !auth
+                    ? 'Open a volume before joining'
+                    : isHistoryMode
+                      ? 'Jump to Latest before joining'
+                      : ''
+                }
               >
-                <Settings2 class="button-icon" size={15} strokeWidth={2} />
-                <span>{showIdentityManager ? 'Hide editor' : 'Edit'}</span>
+                <MessageSquareText class="button-icon" size={15} strokeWidth={2} />
+                <span>
+                  {identityManagerLoading
+                    ? 'Joining…'
+                    : selectedChatIdentity && selectedChatIdentity.id === currentVolumeChatIdentityId
+                      ? 'Joined'
+                      : 'Join this volume'}
+                </span>
               </button>
               <button
                 type="button"
                 class="workspace-toggle"
-                onclick={() => void publishActiveChatIdentity()}
-                disabled={!auth || isHistoryMode || identityManagerLoading || !activeChatIdentity}
+                onclick={() => void publishSelectedChatIdentity()}
+                disabled={!auth || isHistoryMode || identityManagerLoading || !selectedChatIdentity}
                 title={
                   !auth
                     ? 'Open a volume before publishing'
@@ -2977,7 +3134,7 @@
                 <span>
                   {identityManagerLoading
                     ? 'Publishing…'
-                    : activeChatIdentityNeedsPublish
+                    : selectedChatIdentityNeedsPublish
                       ? 'Publish identity'
                       : 'Published'}
                 </span>
@@ -3005,7 +3162,11 @@
                 >
                   <span class="identity-pill-name">{identity.displayName || 'Unnamed identity'}</span>
                   <span class="identity-pill-state">
-                    {#if identity.id === activeChatIdentityId && activeChatIdentityNeedsPublish}
+                    {#if identity.id === currentVolumeChatIdentityId && joinedChatIdentityNeedsPublish}
+                      Joined · update pending
+                    {:else if identity.id === currentVolumeChatIdentityId}
+                      Joined
+                    {:else if identity.id === activeChatIdentityId && selectedChatIdentityNeedsPublish}
                       Needs publish
                     {:else if identity.publicKey}
                       Published
@@ -3023,6 +3184,11 @@
           </div>
 
           <p class="identity-row-note">
+            This volume will chat as
+            <strong>{joinedChatIdentity?.displayName || 'no identity yet'}</strong>.
+            Joining is an explicit per-volume local choice.
+          </p>
+          <p class="identity-row-note">
             Publish writes a signed <code>DECLARE_IDENTITY</code> event into the current volume log.
           </p>
 
@@ -3032,15 +3198,15 @@
             <p class="identity-row-banner success">{identityManagerMessage}</p>
           {/if}
 
-          {#if showIdentityManager && activeChatIdentity}
+          {#if selectedChatIdentity}
             <div class="identity-editor-panel">
               <label>
                 <span>Identity secret</span>
                 <input
                   type="text"
-                  value={activeChatIdentity.address}
+                  value={selectedChatIdentity.address}
                   oninput={(event) =>
-                    updateConfiguredChatIdentity(activeChatIdentity.id, {
+                    updateConfiguredChatIdentity(selectedChatIdentity.id, {
                       address: (event.currentTarget as HTMLInputElement).value,
                     })}
                   placeholder="address or secret seed"
@@ -3050,9 +3216,9 @@
                 <span>Password (optional)</span>
                 <input
                   type="password"
-                  value={activeChatIdentity.password}
+                  value={selectedChatIdentity.password}
                   oninput={(event) =>
-                    updateConfiguredChatIdentity(activeChatIdentity.id, {
+                    updateConfiguredChatIdentity(selectedChatIdentity.id, {
                       password: (event.currentTarget as HTMLInputElement).value,
                     })}
                   placeholder="optional"
@@ -3062,9 +3228,9 @@
                 <span>Display name</span>
                 <input
                   type="text"
-                  value={activeChatIdentity.displayName}
+                  value={selectedChatIdentity.displayName}
                   oninput={(event) =>
-                    updateConfiguredChatIdentity(activeChatIdentity.id, {
+                    updateConfiguredChatIdentity(selectedChatIdentity.id, {
                       displayName: (event.currentTarget as HTMLInputElement).value,
                     })}
                   placeholder="Ada"
@@ -3075,17 +3241,17 @@
                 <textarea
                   rows="2"
                   oninput={(event) =>
-                    updateConfiguredChatIdentity(activeChatIdentity.id, {
+                    updateConfiguredChatIdentity(selectedChatIdentity.id, {
                       bio: (event.currentTarget as HTMLTextAreaElement).value,
                     })}
                   placeholder="Who is speaking from this key?"
-                >{activeChatIdentity.bio}</textarea>
+                >{selectedChatIdentity.bio}</textarea>
               </label>
               <div class="identity-editor-panel-actions">
                 <button
                   type="button"
                   class="workspace-toggle remove"
-                  onclick={() => removeConfiguredChatIdentity(activeChatIdentity.id)}
+                  onclick={() => removeConfiguredChatIdentity(selectedChatIdentity.id)}
                 >
                   <Trash2 class="button-icon" size={15} strokeWidth={2} />
                   <span>Remove</span>
@@ -3093,14 +3259,14 @@
                 <button
                   type="button"
                   class="workspace-toggle"
-                  onclick={() => void publishActiveChatIdentity()}
+                  onclick={() => void publishSelectedChatIdentity()}
                   disabled={!auth || isHistoryMode || identityManagerLoading}
                 >
                   <MessageSquareText class="button-icon" size={15} strokeWidth={2} />
                   <span>
                     {identityManagerLoading
                       ? 'Publishing…'
-                      : activeChatIdentityNeedsPublish
+                      : selectedChatIdentityNeedsPublish
                         ? 'Publish to volume'
                         : 'Published'}
                   </span>
@@ -3328,9 +3494,9 @@
           {volumeId}
           readonlyMode={isHistoryMode}
           historyState={isHistoryMode ? historicalChatState : null}
-          activeIdentity={activeChatIdentity}
-          identityNeedsPublish={activeChatIdentityNeedsPublish}
-          ensureIdentityPublished={publishActiveChatIdentity}
+          activeIdentity={joinedChatIdentity}
+          identityNeedsPublish={joinedChatIdentityNeedsPublish}
+          onOpenIdentityManager={openIdentityManagerForChat}
           onChatMutated={handleChatMutated}
           externalRefreshVersion={chatRefreshVersion}
         />

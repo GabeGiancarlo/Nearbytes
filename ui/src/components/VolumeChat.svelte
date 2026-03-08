@@ -13,6 +13,7 @@
     type ConfiguredIdentity,
   } from '../lib/chatIdentities.js';
   import { NEARBYTES_DRAG_TYPE, parseNearbytesDragPayload } from '../lib/nearbytesDrag.js';
+  import { parseNearbytesClipboardPayload } from '../lib/referenceClipboard.js';
   import {
     MessageSquareText,
     Paperclip,
@@ -29,7 +30,7 @@
     historyState = null,
     activeIdentity = null,
     identityNeedsPublish = false,
-    ensureIdentityPublished = async () => null,
+    onOpenIdentityManager = undefined,
     onChatMutated = undefined,
     externalRefreshVersion = 0,
   } = $props<{
@@ -39,7 +40,7 @@
     historyState?: VolumeChatState | null;
     activeIdentity?: ConfiguredIdentity | null;
     identityNeedsPublish?: boolean;
-    ensureIdentityPublished?: () => Promise<ConfiguredIdentity | null>;
+    onOpenIdentityManager?: (() => void) | undefined;
     onChatMutated?: (() => Promise<void> | void) | undefined;
     externalRefreshVersion?: number;
   }>();
@@ -122,20 +123,25 @@
     if (!auth || readonlyMode || sending) {
       return;
     }
-    const body = draftBody.trim();
-    if (body === '' && !pendingAttachment) {
+    if (!activeIdentity) {
+      errorMessage = 'Join this volume with one identity before sending.';
+      onOpenIdentityManager?.();
       return;
     }
-    const publishedIdentity = await ensureIdentityPublished();
-    if (!publishedIdentity) {
-      errorMessage = 'Publish an identity from the top bar before sending.';
+    if (buildIdentitySecret(activeIdentity).trim() === '') {
+      errorMessage = 'The joined identity is incomplete. Open identities and join again.';
+      onOpenIdentityManager?.();
+      return;
+    }
+    const body = draftBody.trim();
+    if (body === '' && !pendingAttachment) {
       return;
     }
 
     sending = true;
     try {
       errorMessage = '';
-      await sendChatMessage(auth, buildIdentitySecret(publishedIdentity), {
+      await sendChatMessage(auth, buildIdentitySecret(activeIdentity), {
         body: body === '' ? undefined : body,
         attachment: pendingAttachment ?? undefined,
       });
@@ -187,6 +193,47 @@
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Failed to attach dragged file';
     }
+  }
+
+  function attachSourceReferenceFromClipboardText(payloadText: string): boolean {
+    const payload = parseNearbytesClipboardPayload(payloadText);
+    if (!payload) {
+      return false;
+    }
+    if (payload.kind !== 'source') {
+      errorMessage = 'Only source-bound Nearbytes references can be attached in chat right now.';
+      return true;
+    }
+
+    const [firstItem] = payload.bundle.items;
+    if (!firstItem) {
+      errorMessage = 'Clipboard does not contain any Nearbytes file references.';
+      return true;
+    }
+
+    pendingAttachment = {
+      kind: 'nb.src.ref.v1',
+      name: firstItem.name,
+      mime: firstItem.mime,
+      createdAt: firstItem.createdAt,
+      ref: firstItem.ref,
+    };
+    errorMessage =
+      payload.bundle.items.length > 1
+        ? `Attached ${firstItem.name}. Chat messages currently support one file reference at a time.`
+        : '';
+    return true;
+  }
+
+  function handleComposerPaste(event: ClipboardEvent) {
+    if (readonlyMode) {
+      return;
+    }
+    const payloadText = event.clipboardData?.getData('text/plain') ?? '';
+    if (!attachSourceReferenceFromClipboardText(payloadText)) {
+      return;
+    }
+    event.preventDefault();
   }
 
   async function openAttachment(attachment: ChatAttachment) {
@@ -248,8 +295,13 @@
     <div class="chat-header-actions">
       <div class="chat-identity-pill">
         <UserRound size={15} strokeWidth={2} />
-        <span>{activeIdentity?.displayName || 'Choose an identity above'}</span>
+        <span>{activeIdentity?.displayName || 'Not joined'}</span>
       </div>
+      {#if !readonlyMode}
+        <button type="button" class="chat-secondary-btn" onclick={() => onOpenIdentityManager?.()}>
+          {activeIdentity ? 'Switch identity' : 'Join chat'}
+        </button>
+      {/if}
       <button
         type="button"
         class="chat-icon-btn"
@@ -274,7 +326,7 @@
           {#if readonlyMode}
             No messages at this point in history.
           {:else}
-            No messages yet. Publish an identity and start the conversation.
+            No messages yet. Join this volume with one identity and start the conversation.
           {/if}
         </p>
       {:else}
@@ -308,6 +360,7 @@
       class:drag-active={dragActive}
       role="group"
       aria-label="Chat composer"
+      onpaste={handleComposerPaste}
       ondragenter={(event) => {
         if (event.dataTransfer?.types.includes(NEARBYTES_DRAG_TYPE)) {
           event.preventDefault();
@@ -330,17 +383,23 @@
       <div class="chat-composer-head">
         <div>
           <p class="chat-eyebrow">Compose</p>
-          <h4>{readonlyMode ? 'Read-only right now' : activeIdentity?.displayName || 'Pick an identity above'}</h4>
+          <h4>
+            {readonlyMode
+              ? 'Read-only right now'
+              : activeIdentity?.displayName
+                ? `Writing as ${activeIdentity.displayName}`
+                : 'Join this volume to send'}
+          </h4>
         </div>
         {#if identityNeedsPublish && activeIdentity}
-          <span class="chat-status-pill">Publish identity to send</span>
+          <span class="chat-status-pill">Profile update not published</span>
         {/if}
       </div>
       <textarea
         class="chat-textarea"
-        placeholder="Write a short signed message"
+        placeholder={activeIdentity ? 'Write a short signed message' : 'Join this volume with one identity to send'}
         bind:value={draftBody}
-        disabled={!auth || readonlyMode}
+        disabled={!auth || readonlyMode || !activeIdentity}
       ></textarea>
       {#if pendingAttachment}
         <div class="chat-pending-attachment">
@@ -351,7 +410,9 @@
           </button>
         </div>
       {/if}
-      <p class="chat-drop-hint">Drag a Nearbytes file here to attach it as a signed source reference.</p>
+      <p class="chat-drop-hint">
+        Drag or paste a Nearbytes file reference here to attach it as a signed source reference.
+      </p>
       <div class="chat-composer-actions">
         <button
           type="button"
@@ -365,7 +426,13 @@
           type="button"
           class="chat-primary-btn"
           onclick={() => void handleSendMessage()}
-          disabled={!auth || readonlyMode || sending || (!draftBody.trim() && !pendingAttachment)}
+          disabled={
+            !auth ||
+            !activeIdentity ||
+            readonlyMode ||
+            sending ||
+            (!draftBody.trim() && !pendingAttachment)
+          }
         >
           <Send size={14} strokeWidth={2} />
           {sending ? 'Sending…' : 'Send'}
@@ -500,7 +567,7 @@
     flex: 1 1 auto;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
+    grid-template-rows: minmax(0, 1fr) auto;
     gap: 1rem;
   }
 
@@ -551,7 +618,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.85rem;
-    overflow: auto;
+    overflow: visible;
   }
 
   .chat-composer.drag-active {
@@ -571,7 +638,7 @@
   }
 
   .chat-textarea {
-    min-height: 140px;
+    min-height: 110px;
     resize: vertical;
   }
 
@@ -588,9 +655,4 @@
     justify-content: space-between;
   }
 
-  @media (max-width: 980px) {
-    .chat-layout {
-      grid-template-columns: 1fr;
-    }
-  }
 </style>

@@ -10,6 +10,7 @@ export interface ConfiguredIdentity {
 
 const CHAT_IDENTITIES_KEY = 'nearbytes-chat-identities-v1';
 const ACTIVE_CHAT_IDENTITY_KEY = 'nearbytes-chat-active-identity-v1';
+const VOLUME_CHAT_IDENTITY_KEY = 'nearbytes-chat-volume-identity-v1';
 
 export function createConfiguredIdentity(overrides: Partial<ConfiguredIdentity> = {}): ConfiguredIdentity {
   return {
@@ -83,6 +84,34 @@ export function loadActiveIdentityId(): string {
 export function persistActiveIdentityId(identityId: string): void {
   try {
     localStorage.setItem(ACTIVE_CHAT_IDENTITY_KEY, identityId);
+  } catch {
+    // ignore
+  }
+}
+
+export function loadVolumeIdentityAssignments(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(VOLUME_CHAT_IDENTITY_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([key, value]) => typeof key === 'string' && typeof value === 'string'
+      )
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function persistVolumeIdentityAssignments(assignments: Record<string, string>): void {
+  try {
+    localStorage.setItem(VOLUME_CHAT_IDENTITY_KEY, JSON.stringify(assignments));
   } catch {
     // ignore
   }
