@@ -8,21 +8,16 @@
     deleteFile,
     downloadFile,
     exportSourceReferences,
-    importRecipientReferences,
     importSourceReferences,
     renameFile,
     watchVolume,
     type Auth,
     type FileMetadata,
-    type RecipientReferenceBundle,
     type SourceReferenceBundle,
     type TimelineEvent,
   } from './lib/api.js';
   import { getCachedFiles, setCachedFiles } from './lib/cache.js';
-  import {
-    parseNearbytesClipboardPayload,
-    writeNearbytesClipboardPayload,
-  } from './lib/referenceClipboard.js';
+  import { writeNearbytesClipboardPayload } from './lib/referenceClipboard.js';
   import ArmedActionButton from './components/ArmedActionButton.svelte';
   import AudioPreview from './components/AudioPreview.svelte';
   import StoragePanel from './components/StoragePanel.svelte';
@@ -31,7 +26,6 @@
     Activity,
     ClipboardPaste,
     Download,
-    Eye,
     File,
     FileArchive,
     FileAudio,
@@ -108,6 +102,11 @@
   };
 
   type FileManagerViewMode = 'icons' | 'details';
+
+  type AppReferenceClipboard = {
+    bundle: SourceReferenceBundle;
+    itemCount: number;
+  };
 
   function createMount(overrides: Partial<VolumeMount> = {}): VolumeMount {
     return {
@@ -740,6 +739,7 @@
   let fileManagerViewMode = $state<FileManagerViewMode>('icons');
   let fileManagerSplit = $state(38);
   let fileManagerElement = $state<HTMLElement | null>(null);
+  let appReferenceClipboard = $state<AppReferenceClipboard | null>(null);
   let watchConnectionSerial = 0;
   let watchDisconnect: (() => void) | null = null;
   let autoRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1941,34 +1941,34 @@
       auth,
       selectedFiles.map((file) => file.filename)
     );
+    appReferenceClipboard = {
+      bundle: exported.bundle,
+      itemCount: exported.bundle.items.length,
+    };
     await writeNearbytesClipboardPayload(exported.serialized);
   }
 
-  async function importNearbytesClipboardPayload(payload: { kind: 'source'; bundle: SourceReferenceBundle } | { kind: 'recipient'; bundle: RecipientReferenceBundle }): Promise<boolean> {
+  async function pasteCopiedFiles() {
+    if (!appReferenceClipboard) {
+      return;
+    }
+    const sourceSecret = mountedSecretForVolumeId(appReferenceClipboard.bundle.s);
+    if (!sourceSecret) {
+      errorMessage = 'Source volume is not mounted or unlocked locally.';
+      return;
+    }
     if (!auth || !effectiveSecret) {
       errorMessage = 'Open a destination volume before pasting.';
-      return true;
+      return;
     }
     if (isHistoryMode) {
       errorMessage = 'History mode is read-only. Jump to Latest before pasting.';
-      return true;
+      return;
     }
 
     errorMessage = '';
-
-    if (payload.kind === 'source') {
-      const sourceSecret = mountedSecretForVolumeId(payload.bundle.s);
-      if (!sourceSecret) {
-        errorMessage = 'Source volume is not mounted or unlocked locally.';
-        return true;
-      }
-      await importSourceReferences(auth, payload.bundle, sourceSecret);
-    } else {
-      await importRecipientReferences(auth, payload.bundle);
-    }
-
+    await importSourceReferences(auth, appReferenceClipboard.bundle, sourceSecret);
     await refreshFiles();
-    return true;
   }
 
   async function openFileInViewer(file: FileMetadata) {
@@ -2186,21 +2186,22 @@
   }
 
   async function handlePaste(event: ClipboardEvent) {
-    const clipboardData = event.clipboardData;
-    if (!clipboardData || !canHandleDropPayload(clipboardData)) {
-      return;
-    }
-
-    const nearbytesPayload = parseNearbytesClipboardPayload(
-      clipboardData.getData('text/plain') || ''
-    );
-    if (nearbytesPayload && !shouldRoutePasteToSecret(event.target)) {
+    if (
+      appReferenceClipboard &&
+      isFileManagerFocused(event.target) &&
+      !isEditableTarget(event.target)
+    ) {
       event.preventDefault();
       try {
-        await importNearbytesClipboardPayload(nearbytesPayload);
+        await pasteCopiedFiles();
       } catch (error) {
         errorMessage = error instanceof Error ? error.message : 'Paste import failed';
       }
+      return;
+    }
+
+    const clipboardData = event.clipboardData;
+    if (!clipboardData || !canHandleDropPayload(clipboardData)) {
       return;
     }
 
@@ -2893,15 +2894,18 @@
                     <option value="size-asc">Size (Smallest)</option>
                   </select>
                 </div>
-                <button
-                  type="button"
-                  class="manager-btn toolbar-btn"
-                  onclick={() => openPreviewPane()}
-                  disabled={!selectedFile}
-                >
-                  <Eye class="button-icon" size={15} strokeWidth={2} />
-                  {showPreviewPane ? 'Preview Open' : 'Open Preview'}
-                </button>
+                {#if appReferenceClipboard}
+                  <button
+                    type="button"
+                    class="manager-btn toolbar-btn"
+                    onclick={() => void pasteCopiedFiles()}
+                    disabled={!auth || isHistoryMode}
+                    title={!auth ? 'Open a destination volume before pasting' : isHistoryMode ? 'Jump to Latest before pasting' : ''}
+                  >
+                    <ClipboardPaste class="button-icon" size={15} strokeWidth={2} />
+                    Paste {appReferenceClipboard.itemCount} item{appReferenceClipboard.itemCount === 1 ? '' : 's'}
+                  </button>
+                {/if}
               </div>
               <div class="manager-summary">
                 <span>{visibleFiles.length} file{visibleFiles.length === 1 ? '' : 's'}</span>
