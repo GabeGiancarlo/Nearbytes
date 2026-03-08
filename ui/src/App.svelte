@@ -6,7 +6,6 @@
     getTimeline,
     uploadFiles,
     deleteFile,
-    renameFolder,
     downloadFile,
     watchVolume,
     type Auth,
@@ -22,13 +21,20 @@
     ClipboardPaste,
     Download,
     Eye,
+    File,
+    FileArchive,
+    FileAudio,
+    FileCode2,
     FileText,
-    FolderTree,
+    FileVideo,
+    GripVertical,
     HardDrive,
     History,
     Image as ImageIcon,
+    LayoutGrid,
     Plus,
     RefreshCw,
+    Rows3,
     Search,
     Settings2,
     Trash2,
@@ -88,6 +94,8 @@
     filename: string;
     mimeType?: string;
   };
+
+  type FileManagerViewMode = 'icons' | 'details';
 
   function createMount(overrides: Partial<VolumeMount> = {}): VolumeMount {
     return {
@@ -686,7 +694,7 @@
   let previewText = $state('');
   let previewLoading = $state(false);
   let previewError = $state('');
-  let selectedFolder = $state('');
+  let showPreviewPane = $state(false);
   let currentPreviewObjectUrl: string | null = null;
   const previewBlobCache = new Map<string, Blob>();
   const initialMounts = loadVolumeMounts();
@@ -708,6 +716,9 @@
   let autoSyncEnabled = $state(false);
   let autoSyncStatus = $state<'idle' | 'connecting' | 'active' | 'unsupported' | 'error'>('idle');
   let isRefreshing = $state(false);
+  let fileManagerViewMode = $state<FileManagerViewMode>('icons');
+  let fileManagerSplit = $state(38);
+  let fileManagerElement = $state<HTMLElement | null>(null);
   let watchConnectionSerial = 0;
   let watchDisconnect: (() => void) | null = null;
   let autoRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -906,30 +917,11 @@
     return materialized;
   });
 
-  const folderPaths = $derived.by(() => {
-    const folders = new Set<string>();
-    for (const file of viewFiles) {
-      const parts = file.filename.split('/').filter((part) => part.length > 0);
-      for (let i = 1; i < parts.length; i += 1) {
-        folders.add(parts.slice(0, i).join('/'));
-      }
-    }
-    return Array.from(folders).sort((left, right) => left.localeCompare(right));
-  });
-
-  const filesInSelectedFolder = $derived.by(() => {
-    if (selectedFolder.trim() === '') {
-      return viewFiles;
-    }
-    const prefix = `${selectedFolder}/`;
-    return viewFiles.filter((file) => file.filename.startsWith(prefix));
-  });
-
   const visibleFiles = $derived.by(() => {
     const query = searchQuery.trim().toLowerCase();
     const filtered = query
-      ? filesInSelectedFolder.filter((file) => file.filename.toLowerCase().includes(query))
-      : filesInSelectedFolder;
+      ? viewFiles.filter((file) => file.filename.toLowerCase().includes(query))
+      : viewFiles;
     const sorted = [...filtered];
     if (sortBy === 'name') {
       sorted.sort((a, b) => a.filename.localeCompare(b.filename));
@@ -947,12 +939,9 @@
     return sorted;
   });
 
-  $effect(() => {
-    if (selectedFolder.trim() === '') return;
-    if (!folderPaths.includes(selectedFolder)) {
-      selectedFolder = '';
-    }
-  });
+  const fileManagerTemplate = $derived.by(
+    () => (showPreviewPane ? `minmax(300px, ${fileManagerSplit}%) 14px minmax(360px, 1fr)` : '1fr')
+  );
 
   const selectedFile = $derived.by(
     () => visibleFiles.find((file) => file.blobHash === selectedBlobHash) ?? null
@@ -977,6 +966,64 @@
       timelinePlayTimer = null;
     }
     isTimelinePlaying = false;
+  }
+
+  function fileAccentTone(file: FileMetadata): string {
+    const mime = (file.mimeType || '').toLowerCase();
+    if (mime.startsWith('image/')) return 'tone-image';
+    if (mime.startsWith('video/')) return 'tone-video';
+    if (mime.startsWith('audio/')) return 'tone-audio';
+    if (mime.includes('pdf') || mime.startsWith('text/')) return 'tone-text';
+    if (mime.includes('zip') || mime.includes('tar') || mime.includes('compressed')) return 'tone-archive';
+    return 'tone-default';
+  }
+
+  function fileIconComponent(file: FileMetadata) {
+    const mime = (file.mimeType || '').toLowerCase();
+    if (mime.startsWith('image/')) return ImageIcon;
+    if (mime.startsWith('video/')) return FileVideo;
+    if (mime.startsWith('audio/')) return FileAudio;
+    if (mime.startsWith('text/') || mime.includes('json') || mime.includes('xml') || mime.includes('javascript') || mime.includes('typescript')) {
+      return FileCode2;
+    }
+    if (mime.includes('zip') || mime.includes('tar') || mime.includes('compressed')) return FileArchive;
+    if (mime.includes('pdf')) return FileText;
+    return File;
+  }
+
+  function formatRelativeDay(value: number): string {
+    const diffMs = Date.now() - value;
+    const dayMs = 24 * 60 * 60 * 1000;
+    if (diffMs < dayMs) return 'Today';
+    if (diffMs < dayMs * 2) return 'Yesterday';
+    const days = Math.floor(diffMs / dayMs);
+    if (days < 7) return `${days}d ago`;
+    return formatShortDate(value);
+  }
+
+  function startFileManagerResize(event: PointerEvent) {
+    const container = fileManagerElement;
+    if (!container) return;
+    event.preventDefault();
+    const rect = container.getBoundingClientRect();
+    const minLeft = 300;
+    const minRight = 360;
+
+    const updateSplit = (clientX: number) => {
+      const clamped = Math.min(rect.width - minRight, Math.max(minLeft, clientX - rect.left));
+      fileManagerSplit = Math.max(28, Math.min(62, (clamped / rect.width) * 100));
+    };
+
+    updateSplit(event.clientX);
+
+    const onMove = (moveEvent: PointerEvent) => updateSplit(moveEvent.clientX);
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
   }
 
   function delayReject<T>(ms: number, message: string): Promise<T> {
@@ -1557,13 +1604,15 @@
   $effect(() => {
     if (visibleFiles.length === 0) {
       selectedBlobHash = null;
+      showPreviewPane = false;
       return;
     }
     const selectedStillVisible = selectedBlobHash
       ? visibleFiles.some((file) => file.blobHash === selectedBlobHash)
       : false;
     if (!selectedStillVisible) {
-      selectedBlobHash = visibleFiles[0].blobHash;
+      selectedBlobHash = null;
+      showPreviewPane = false;
     }
   });
 
@@ -1609,7 +1658,7 @@
     previewLoading = false;
     revokePreviewUrl();
 
-    if (!file || !auth) {
+    if (!showPreviewPane || !file || !auth) {
       previewKind = 'none';
       return;
     }
@@ -1659,6 +1708,19 @@
     selectedBlobHash = file.blobHash;
   }
 
+  function openPreviewPane(file?: FileMetadata) {
+    if (file) {
+      selectedBlobHash = file.blobHash;
+    }
+    if (selectedBlobHash) {
+      showPreviewPane = true;
+    }
+  }
+
+  function closePreviewPane() {
+    showPreviewPane = false;
+  }
+
   async function openFileInViewer(file: FileMetadata) {
     if (!auth) return;
     const popup = window.open('', '_blank', 'noopener,noreferrer');
@@ -1688,7 +1750,7 @@
   function handleFileRowKeydown(e: KeyboardEvent, file: FileMetadata) {
     if (e.key === 'Enter') {
       e.preventDefault();
-      openFileInViewer(file);
+      openPreviewPane(file);
       return;
     }
     if (e.key === ' ') {
@@ -1697,93 +1759,8 @@
     }
   }
 
-  function normalizeFolderInput(value: string): string {
-    return value
-      .trim()
-      .replace(/\\/g, '/')
-      .replace(/^\/+/, '')
-      .replace(/\/+$/, '')
-      .replace(/\/{2,}/g, '/');
-  }
-
   function displayFileName(file: FileMetadata): string {
-    if (selectedFolder.trim() === '') {
-      return file.filename;
-    }
-    const prefix = `${selectedFolder}/`;
-    if (!file.filename.startsWith(prefix)) {
-      return file.filename;
-    }
-    return file.filename.slice(prefix.length);
-  }
-
-  async function handleRenameFolder() {
-    if (!auth) return;
-    if (isHistoryMode) {
-      errorMessage = 'History mode is read-only. Jump to Latest before renaming folders.';
-      return;
-    }
-    const sourceFolder = normalizeFolderInput(selectedFolder);
-    if (sourceFolder.length === 0) {
-      errorMessage = 'Select a folder to rename.';
-      return;
-    }
-
-    const input = window.prompt('Rename folder', sourceFolder);
-    if (input === null) {
-      return;
-    }
-
-    const destinationFolder = normalizeFolderInput(input);
-    if (destinationFolder.length === 0) {
-      errorMessage = 'Destination folder cannot be empty.';
-      return;
-    }
-    if (destinationFolder === sourceFolder) {
-      return;
-    }
-
-    let merge = false;
-    const destinationExists = folderPaths.includes(destinationFolder);
-    if (destinationExists) {
-      merge = window.confirm(
-        `Folder "${destinationFolder}" already exists. Merge "${sourceFolder}" into it?`
-      );
-      if (!merge) {
-        return;
-      }
-    }
-
-    try {
-      errorMessage = '';
-      await renameFolder(auth, sourceFolder, destinationFolder, merge);
-      selectedFolder = destinationFolder;
-      await refreshFiles();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Folder rename failed';
-      if (
-        !merge &&
-        message.toLowerCase().includes('destination folder already contains')
-      ) {
-        const retryMerge = window.confirm(
-          `Folder "${destinationFolder}" already contains files. Merge and continue?`
-        );
-        if (!retryMerge) {
-          return;
-        }
-        try {
-          errorMessage = '';
-          await renameFolder(auth, sourceFolder, destinationFolder, true);
-          selectedFolder = destinationFolder;
-          await refreshFiles();
-          return;
-        } catch (retryError) {
-          errorMessage = retryError instanceof Error ? retryError.message : 'Folder merge failed';
-          return;
-        }
-      }
-      errorMessage = message;
-    }
+    return file.filename.split('/').filter(Boolean).at(-1) ?? file.filename;
   }
 
   // Refresh file list
@@ -2529,51 +2506,80 @@
           </div>
         </div>
       {:else}
-        <div class="file-manager">
-          <section class="file-list-pane">
+        <div class="file-manager" bind:this={fileManagerElement} style:grid-template-columns={fileManagerTemplate}>
+          <section class="file-list-pane" class:with-preview={showPreviewPane}>
             <div class="manager-toolbar">
-              <input
-                type="text"
-                class="manager-search"
-                placeholder="Search files"
-                bind:value={searchQuery}
-                aria-label="Search files"
-              />
-              <select class="manager-sort" bind:value={sortBy} aria-label="Sort files">
-                <option value="newest">Newest</option>
-                <option value="oldest">Oldest</option>
-                <option value="name">Name</option>
-                <option value="size">Size</option>
-              </select>
-              <select class="manager-folder" bind:value={selectedFolder} aria-label="Filter by folder">
-                <option value="">All folders</option>
-                {#each folderPaths as folder (folder)}
-                  <option value={folder}>{folder}</option>
-                {/each}
-              </select>
-              <button
-                type="button"
-                class="manager-btn toolbar-btn"
-                onclick={handleRenameFolder}
-                disabled={selectedFolder.trim() === '' || isHistoryMode}
-                title={isHistoryMode ? 'Jump to Latest before renaming folders' : 'Rename selected folder'}
-              >
-                <FolderTree class="button-icon" size={15} strokeWidth={2} />
-                Rename Folder
-              </button>
-            </div>
-            <div class="file-list-head">
-              <span>Name</span>
-              <span>Size</span>
-              <span>Date</span>
+              <div class="manager-toolbar-top">
+                <input
+                  type="text"
+                  class="manager-search"
+                  placeholder="Search files"
+                  bind:value={searchQuery}
+                  aria-label="Search files"
+                />
+                <div class="manager-view-switch" role="tablist" aria-label="File browser view">
+                  <button
+                    type="button"
+                    class="view-toggle"
+                    class:active={fileManagerViewMode === 'icons'}
+                    onclick={() => (fileManagerViewMode = 'icons')}
+                    aria-pressed={fileManagerViewMode === 'icons'}
+                    title="Icon view"
+                  >
+                    <LayoutGrid size={15} strokeWidth={2} />
+                  </button>
+                  <button
+                    type="button"
+                    class="view-toggle"
+                    class:active={fileManagerViewMode === 'details'}
+                    onclick={() => (fileManagerViewMode = 'details')}
+                    aria-pressed={fileManagerViewMode === 'details'}
+                    title="Details view"
+                  >
+                    <Rows3 size={15} strokeWidth={2} />
+                  </button>
+                </div>
+              </div>
+              <div class="manager-toolbar-bottom">
+                <div class="manager-filters">
+                  <select class="manager-sort" bind:value={sortBy} aria-label="Sort files">
+                    <option value="newest">Newest</option>
+                    <option value="oldest">Oldest</option>
+                    <option value="name">Name</option>
+                    <option value="size">Size</option>
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  class="manager-btn toolbar-btn"
+                  onclick={() => openPreviewPane()}
+                  disabled={!selectedFile}
+                >
+                  <Eye class="button-icon" size={15} strokeWidth={2} />
+                  {showPreviewPane ? 'Preview Open' : 'Open Preview'}
+                </button>
+              </div>
+              <div class="manager-summary">
+                <span>{visibleFiles.length} file{visibleFiles.length === 1 ? '' : 's'}</span>
+                <span>{selectedFile ? displayFileName(selectedFile) : 'No file selected'}</span>
+              </div>
             </div>
             {#if visibleFiles.length === 0}
               <div class="list-empty">No files match your search.</div>
             {:else}
-              <div class="file-list-scroll">
+              <div class="file-list-scroll" class:icons={fileManagerViewMode === 'icons'}>
+                {#if fileManagerViewMode === 'details'}
+                  <div class="file-list-head">
+                    <span>Name</span>
+                    <span>Size</span>
+                    <span>Updated</span>
+                  </div>
+                {/if}
                 {#each visibleFiles as file (file.blobHash)}
+                  {@const FileIcon = fileIconComponent(file)}
                   <div
-                    class="file-row"
+                    class:file-card={fileManagerViewMode === 'icons'}
+                    class:file-row={fileManagerViewMode === 'details'}
                     class:selected={selectedBlobHash === file.blobHash}
                     data-filename={file.filename}
                     draggable="true"
@@ -2584,14 +2590,42 @@
                     ondragstart={(event) => handleNearbytesFileDragStart(event, file)}
                     onkeydown={(e) => handleFileRowKeydown(e, file)}
                   >
-                    <span class="file-row-name" title={file.filename}>{displayFileName(file)}</span>
-                    <span class="file-row-size">{formatSize(file.size)}</span>
-                    <span class="file-row-date">{formatShortDate(file.createdAt)}</span>
+                    {#if fileManagerViewMode === 'icons'}
+                      <div class={`file-card-art ${fileAccentTone(file)}`}>
+                        <FileIcon size={28} strokeWidth={1.8} />
+                      </div>
+                      <div class="file-card-copy">
+                        <span class="file-card-name" title={file.filename}>{displayFileName(file)}</span>
+                      </div>
+                    {:else}
+                      <div class="file-row-main">
+                        <span class={`file-row-icon ${fileAccentTone(file)}`}>
+                          <FileIcon size={15} strokeWidth={2} />
+                        </span>
+                        <div class="file-row-copy">
+                          <span class="file-row-name" title={file.filename}>{displayFileName(file)}</span>
+                          <span class="file-row-path" title={file.filename}>{file.filename}</span>
+                        </div>
+                      </div>
+                      <span class="file-row-size">{formatSize(file.size)}</span>
+                      <span class="file-row-date">{formatRelativeDay(file.createdAt)}</span>
+                    {/if}
                   </div>
                 {/each}
               </div>
             {/if}
           </section>
+          {#if showPreviewPane}
+          <button
+            type="button"
+            class="file-manager-divider"
+            aria-label="Resize file manager panes"
+            onpointerdown={startFileManagerResize}
+          >
+            <span class="file-manager-divider-grip">
+              <GripVertical size={16} strokeWidth={1.8} />
+            </span>
+          </button>
           <section class="preview-pane">
             {#if selectedFile}
               <div class="preview-header">
@@ -2602,6 +2636,10 @@
                   </p>
                 </div>
                 <div class="preview-actions">
+                  <button type="button" class="manager-btn" onclick={closePreviewPane}>
+                    <X class="button-icon" size={15} strokeWidth={2} />
+                    Close
+                  </button>
                   <button type="button" class="manager-btn" onclick={() => openFileInViewer(selectedFile)}>
                     <Eye class="button-icon" size={15} strokeWidth={2} />
                     Open
@@ -2649,6 +2687,7 @@
               </div>
             {/if}
           </section>
+          {/if}
         </div>
       {/if}
       {/if}
@@ -3763,30 +3802,59 @@
 
   /* File manager */
   .file-manager {
-    flex: 0 0 auto;
-    min-height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
     display: grid;
-    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
-    gap: 1rem;
+    gap: 0;
+    align-items: stretch;
   }
 
-  .file-list-pane {
-    min-height: auto;
+  .file-list-pane,
+  .preview-pane {
+    min-height: 0;
     background:
       linear-gradient(180deg, rgba(9, 20, 39, 0.96), rgba(8, 18, 35, 0.9));
     border: 1px solid rgba(56, 189, 248, 0.16);
-    border-radius: 16px;
+    border-radius: 18px;
     display: flex;
     flex-direction: column;
-    overflow: visible;
+    overflow: hidden;
+    height: 100%;
+  }
+
+  .file-list-pane {
+    border-top-right-radius: 18px;
+    border-bottom-right-radius: 18px;
+  }
+
+  .file-list-pane.with-preview {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
   }
 
   .manager-toolbar {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.5rem;
-    padding: 0.75rem;
+    gap: 0.75rem;
+    padding: 0.9rem;
     border-bottom: 1px solid rgba(102, 126, 234, 0.18);
+    background:
+      radial-gradient(120% 120% at 0% 0%, rgba(34, 211, 238, 0.08), transparent 46%),
+      rgba(8, 18, 35, 0.72);
+  }
+
+  .manager-toolbar-top,
+  .manager-toolbar-bottom {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.6rem;
+    align-items: center;
+  }
+
+  .manager-filters {
+    display: flex;
+    gap: 0.55rem;
+    min-width: 0;
+    flex-wrap: wrap;
   }
 
   .manager-search,
@@ -3817,26 +3885,79 @@
     justify-self: end;
   }
 
+  .manager-view-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.32rem;
+    padding: 0.22rem;
+    border-radius: 14px;
+    border: 1px solid rgba(56, 189, 248, 0.18);
+    background: rgba(10, 18, 33, 0.72);
+  }
+
+  .view-toggle {
+    width: 34px;
+    height: 34px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: rgba(186, 230, 253, 0.72);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+  }
+
+  .view-toggle:hover {
+    color: rgba(236, 254, 255, 0.96);
+    background: rgba(14, 165, 233, 0.12);
+  }
+
+  .view-toggle.active {
+    color: #ecfeff;
+    background: linear-gradient(180deg, rgba(16, 66, 91, 0.96), rgba(10, 44, 66, 0.96));
+    box-shadow: 0 10px 24px rgba(6, 182, 212, 0.16);
+  }
+
+  .manager-summary {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    font-size: 0.74rem;
+    color: rgba(186, 230, 253, 0.72);
+    letter-spacing: 0.02em;
+  }
+
   .file-list-head {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 0.75rem;
-    padding: 0.5rem 0.75rem;
+    padding: 0 0.9rem 0.55rem;
     font-size: 0.75rem;
     letter-spacing: 0.02em;
     color: rgba(224, 224, 224, 0.56);
     border-bottom: 1px solid rgba(102, 126, 234, 0.12);
+    position: sticky;
+    top: 0;
+    background: linear-gradient(180deg, rgba(8, 18, 35, 0.98), rgba(8, 18, 35, 0.82));
+    z-index: 1;
   }
 
   .file-list-scroll {
-    flex: 0 0 auto;
-    min-height: auto;
-    overflow: visible;
-    scrollbar-width: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    scrollbar-width: thin;
+    padding: 0.2rem;
   }
 
-  .file-list-scroll::-webkit-scrollbar {
-    display: none;
+  .file-list-scroll.icons {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    align-content: start;
+    gap: 0.7rem;
+    padding: 0.9rem;
   }
 
   .file-row {
@@ -3844,10 +3965,10 @@
     grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 0.75rem;
     align-items: center;
-    padding: 0.6rem 0.75rem;
+    padding: 0.65rem 0.75rem;
     cursor: grab;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    transition: background 0.15s ease;
+    transition: background 0.15s ease, border-color 0.15s ease;
   }
 
   .file-row:hover {
@@ -3867,17 +3988,146 @@
     outline-offset: -2px;
   }
 
+  .file-row-main {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+  }
+
+  .file-row-icon {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(10, 18, 33, 0.84);
+  }
+
+  .file-row-copy {
+    min-width: 0;
+    display: grid;
+    gap: 0.08rem;
+  }
+
   .file-row-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     color: #e8e8e8;
+    font-size: 0.83rem;
+    font-weight: 600;
+  }
+
+  .file-row-path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: rgba(186, 230, 253, 0.45);
+    font-size: 0.72rem;
   }
 
   .file-row-size,
   .file-row-date {
     font-size: 0.75rem;
     color: rgba(224, 224, 224, 0.58);
+  }
+
+  .file-card {
+    min-height: 118px;
+    border-radius: 18px;
+    border: 1px solid rgba(56, 189, 248, 0.12);
+    background:
+      radial-gradient(120% 120% at 0% 0%, rgba(34, 211, 238, 0.1), transparent 48%),
+      linear-gradient(180deg, rgba(11, 22, 40, 0.98), rgba(7, 14, 27, 0.94));
+    padding: 0.9rem;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    justify-items: start;
+    align-content: start;
+    gap: 0.7rem;
+    cursor: grab;
+    transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 18px 38px rgba(2, 6, 23, 0.22);
+  }
+
+  .file-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(103, 232, 249, 0.28);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 22px 42px rgba(2, 6, 23, 0.28);
+  }
+
+  .file-card.selected {
+    border-color: rgba(103, 232, 249, 0.44);
+    box-shadow:
+      inset 0 0 0 1px rgba(103, 232, 249, 0.12),
+      0 26px 46px rgba(8, 47, 73, 0.28);
+  }
+
+  .file-card-art {
+    width: 58px;
+    height: 58px;
+    border-radius: 18px;
+    display: grid;
+    place-items: center;
+    position: relative;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+  }
+
+  .file-card-copy {
+    display: grid;
+    gap: 0.18rem;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .file-card-name {
+    font-size: 0.88rem;
+    font-weight: 650;
+    color: rgba(248, 250, 252, 0.98);
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .tone-default {
+    color: #dbeafe;
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.34), rgba(14, 116, 144, 0.18));
+  }
+
+  .tone-image {
+    color: #ecfeff;
+    background: linear-gradient(135deg, rgba(6, 182, 212, 0.42), rgba(59, 130, 246, 0.22));
+  }
+
+  .tone-video {
+    color: #fae8ff;
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.34), rgba(37, 99, 235, 0.18));
+  }
+
+  .tone-audio {
+    color: #ecfccb;
+    background: linear-gradient(135deg, rgba(101, 163, 13, 0.38), rgba(20, 83, 45, 0.22));
+  }
+
+  .tone-text {
+    color: #fef3c7;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.34), rgba(120, 53, 15, 0.16));
+  }
+
+  .tone-archive {
+    color: #fde68a;
+    background: linear-gradient(135deg, rgba(217, 119, 6, 0.34), rgba(120, 53, 15, 0.22));
   }
 
   .list-empty {
@@ -3887,14 +4137,8 @@
   }
 
   .preview-pane {
-    min-height: auto;
-    background:
-      linear-gradient(180deg, rgba(9, 20, 39, 0.96), rgba(8, 18, 35, 0.9));
-    border: 1px solid rgba(56, 189, 248, 0.16);
-    border-radius: 16px;
-    display: flex;
-    flex-direction: column;
-    overflow: visible;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
   }
 
   .preview-header {
@@ -3959,16 +4203,58 @@
     background: rgba(248, 113, 113, 0.16);
   }
 
-  .preview-body {
-    flex: 0 0 auto;
-    min-height: auto;
-    overflow: visible;
-    padding: 1rem;
-    scrollbar-width: none;
+  .file-manager-divider {
+    position: relative;
+    min-height: 0;
+    cursor: col-resize;
+    touch-action: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
   }
 
-  .preview-body::-webkit-scrollbar {
-    display: none;
+  .file-manager-divider::before {
+    content: '';
+    width: 1px;
+    height: 100%;
+    background: linear-gradient(180deg, rgba(34, 211, 238, 0), rgba(34, 211, 238, 0.1), rgba(34, 211, 238, 0));
+    transition: background 0.18s ease;
+  }
+
+  .file-manager-divider-grip {
+    position: absolute;
+    width: 6px;
+    height: 52px;
+    border-radius: 999px;
+    border: 0;
+    background: rgba(186, 230, 253, 0.06);
+    color: transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: none;
+    transition: background-color 0.18s ease;
+  }
+
+  .file-manager-divider:hover::before,
+  .file-manager-divider:focus-visible::before {
+    background: linear-gradient(180deg, rgba(34, 211, 238, 0), rgba(34, 211, 238, 0.18), rgba(34, 211, 238, 0));
+  }
+
+  .file-manager-divider:hover .file-manager-divider-grip,
+  .file-manager-divider:focus-visible .file-manager-divider-grip {
+    background: rgba(186, 230, 253, 0.14);
+  }
+
+  .preview-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 1rem;
+    scrollbar-width: thin;
   }
 
   .preview-image,
@@ -4014,7 +4300,7 @@
   }
 
   .preview-empty {
-    flex: 0 0 auto;
+    flex: 1 1 auto;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -4066,12 +4352,18 @@
     }
 
     .file-manager {
-      grid-template-columns: 1fr;
+      grid-template-columns: 1fr !important;
       gap: 0.75rem;
     }
 
-    .file-list-pane {
-      max-height: none;
+    .file-manager-divider {
+      display: none;
+    }
+
+    .file-list-pane,
+    .preview-pane {
+      border-radius: 18px;
+      min-height: 280px;
     }
 
     .preview-header {
@@ -4081,6 +4373,15 @@
 
     .preview-actions {
       justify-content: flex-start;
+    }
+
+    .manager-toolbar-top,
+    .manager-toolbar-bottom {
+      grid-template-columns: 1fr;
+    }
+
+    .toolbar-btn {
+      justify-self: stretch;
     }
   }
 

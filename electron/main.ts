@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell, type OpenDialogOptions } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell, type OpenDialogOptions } from 'electron';
 import { existsSync } from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -50,6 +50,7 @@ const sessionTtlMs = parsePositiveInt(
   process.env.NEARBYTES_DESKTOP_SESSION_TTL_MS,
   DEFAULT_DESKTOP_SESSION_TTL_MS
 );
+const desktopIconPath = resolveDesktopIconPath();
 
 app.on('window-all-closed', () => {
   app.quit();
@@ -71,6 +72,7 @@ app.whenReady().then(async () => {
 });
 
 async function startDesktop(): Promise<void> {
+  applyDesktopIcon();
   const runtimeModule = await loadRuntimeModule();
   const runtime = await runtimeModule.startApiRuntime({
     host: '127.0.0.1',
@@ -193,6 +195,7 @@ async function createWindow(apiBaseUrl: string): Promise<void> {
     height: 900,
     minWidth: 980,
     minHeight: 680,
+    icon: desktopIconPath ?? undefined,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -237,6 +240,28 @@ async function createWindow(apiBaseUrl: string): Promise<void> {
   if (enableAutoUpdater) {
     setupAutoUpdater(window, true);
   }
+}
+
+function applyDesktopIcon(): void {
+  if (!desktopIconPath) {
+    return;
+  }
+  const icon = nativeImage.createFromPath(desktopIconPath);
+  if (icon.isEmpty()) {
+    return;
+  }
+  if (process.platform === 'darwin') {
+    app.dock?.setIcon(icon);
+  }
+}
+
+function resolveDesktopIconPath(): string | null {
+  const iconName = process.platform === 'darwin' ? 'icon.icns' : process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+  return resolveExistingPath([
+    path.join(app.getAppPath(), 'build', 'icons', iconName),
+    path.join(process.resourcesPath, 'build', 'icons', iconName),
+    path.join(process.cwd(), 'build', 'icons', iconName),
+  ]) ?? null;
 }
 
 async function shutdown(): Promise<void> {
