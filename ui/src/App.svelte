@@ -12,6 +12,7 @@
     renameFile,
     watchVolume,
     type Auth,
+    type ChatAttachment,
     type FileMetadata,
     type SourceReferenceBundle,
     type TimelineEvent,
@@ -722,6 +723,7 @@
   let previewLoading = $state(false);
   let previewError = $state('');
   let showPreviewPane = $state(false);
+  let previewFileOverride = $state<FileMetadata | null>(null);
   let currentPreviewObjectUrl: string | null = null;
   const previewBlobCache = new Map<string, Blob>();
   const initialMounts = loadVolumeMounts();
@@ -1239,6 +1241,7 @@
   const selectedFile = $derived.by(
     () => visibleFiles.find((file) => file.filename === selectedFileName) ?? null
   );
+  const currentPreviewFile = $derived.by(() => previewFileOverride ?? selectedFile);
   const currentMountedVolumePresentation = $derived.by<MountedVolumePresentation | null>(() => {
     if (!activeMount || !volumeId) {
       return null;
@@ -1553,6 +1556,7 @@
       previewText = '';
       previewError = '';
       previewLoading = false;
+      previewFileOverride = null;
       previewBlobCache.clear();
       revokePreviewUrl();
       pendingMountId = null;
@@ -1610,6 +1614,7 @@
       effectiveSecret = openSecret;
       unlockedAddress = label;
       fileList = response.files;
+      previewFileOverride = null;
       previewBlobCache.clear();
       isVolumeTransitioning = false;
       pendingMountId = null;
@@ -1675,6 +1680,7 @@
       previewText = '';
       previewError = '';
       previewLoading = false;
+      previewFileOverride = null;
       previewBlobCache.clear();
       revokePreviewUrl();
     }
@@ -1950,7 +1956,9 @@
       selectedFileNames = [];
       selectionAnchorFileName = null;
       renamingFileName = null;
-      showPreviewPane = false;
+      if (!previewFileOverride) {
+        showPreviewPane = false;
+      }
       return;
     }
     const visibleFileNames = new Set(visibleFiles.map((file) => file.filename));
@@ -1972,7 +1980,7 @@
       renamingFileName = null;
       renameDraft = '';
     }
-    if ((nextSelected[0] ?? null) === null && selectedFileName === null) {
+    if ((nextSelected[0] ?? null) === null && selectedFileName === null && !previewFileOverride) {
       showPreviewPane = false;
     }
   });
@@ -2012,7 +2020,7 @@
 
   $effect(() => {
     let cancelled = false;
-    const file = selectedFile;
+    const file = currentPreviewFile;
 
     previewError = '';
     previewText = '';
@@ -2129,6 +2137,7 @@
   }
 
   function openPreviewPane(file?: FileMetadata) {
+    previewFileOverride = null;
     if (file) {
       if (!isFileSelected(file.filename)) {
         setSelection([file.filename], file.filename, file.filename);
@@ -2142,7 +2151,35 @@
   }
 
   function closePreviewPane() {
+    previewFileOverride = null;
     showPreviewPane = false;
+  }
+
+  function previewChatAttachment(attachment: ChatAttachment) {
+    const existingFile =
+      visibleFiles.find((file) => file.filename === attachment.name && file.blobHash === attachment.ref.c.h) ??
+      visibleFiles.find((file) => file.blobHash === attachment.ref.c.h) ??
+      null;
+    if (existingFile) {
+      openPreviewPane(existingFile);
+      return;
+    }
+
+    if (activeMount && !activeMount.showFilesPane) {
+      updateActiveMountWorkspace({
+        showFilesPane: true,
+        showChatPane: activeMount.showChatPane,
+      });
+    }
+
+    previewFileOverride = {
+      filename: attachment.name,
+      blobHash: attachment.ref.c.h,
+      size: attachment.ref.c.z,
+      mimeType: attachment.mime ?? '',
+      createdAt: attachment.createdAt ?? Date.now(),
+    };
+    showPreviewPane = true;
   }
 
   function updateActiveMountWorkspace(
@@ -3850,27 +3887,29 @@
                     </span>
                   </button>
                   <section class="preview-pane">
-                    {#if selectedFile}
+                    {#if currentPreviewFile}
                       <div class="preview-header">
                         <div>
-                          <h3 class="preview-title" title={selectedFile.filename}>{selectedFile.filename}</h3>
+                          <h3 class="preview-title" title={currentPreviewFile.filename}>{currentPreviewFile.filename}</h3>
                           <p class="preview-meta">
-                            {selectedFile.mimeType || 'Unknown type'} • {formatSize(selectedFile.size)} • {formatDate(selectedFile.createdAt)}
+                            {currentPreviewFile.mimeType || 'Unknown type'} • {formatSize(currentPreviewFile.size)} • {formatDate(currentPreviewFile.createdAt)}
                           </p>
                         </div>
                         <div class="preview-actions">
-                          <ArmedActionButton
-                            class="manager-btn danger"
-                            text="Delete"
-                            armed={true}
-                            armDelayMs={0}
-                            autoDisarmMs={3000}
-                            disabled={isHistoryMode}
-                            resetKey={`${selectedFile.blobHash}:${isHistoryMode}`}
-                            title={isHistoryMode ? 'Jump to Latest before deleting' : ''}
-                            onPress={() => handleDelete(selectedFile.filename)}
-                          />
-                          <button type="button" class="manager-btn" onclick={() => handleDownload(selectedFile)}>
+                          {#if !previewFileOverride && selectedFile}
+                            <ArmedActionButton
+                              class="manager-btn danger"
+                              text="Delete"
+                              armed={true}
+                              armDelayMs={0}
+                              autoDisarmMs={3000}
+                              disabled={isHistoryMode}
+                              resetKey={`${selectedFile.blobHash}:${isHistoryMode}`}
+                              title={isHistoryMode ? 'Jump to Latest before deleting' : ''}
+                              onPress={() => handleDelete(selectedFile.filename)}
+                            />
+                          {/if}
+                          <button type="button" class="manager-btn" onclick={() => handleDownload(currentPreviewFile)}>
                             <Download class="button-icon" size={15} strokeWidth={2} />
                             Download
                           </button>
@@ -3886,18 +3925,18 @@
                         {:else if previewError}
                           <p class="preview-message error">{previewError}</p>
                         {:else if previewKind === 'image' && previewUrl}
-                          <img class="preview-image" src={previewUrl} alt={"Preview of " + selectedFile.filename} />
+                          <img class="preview-image" src={previewUrl} alt={"Preview of " + currentPreviewFile.filename} />
                         {:else if previewKind === 'video' && previewUrl}
                           <!-- svelte-ignore a11y_media_has_caption -->
                           <video class="preview-media" controls src={previewUrl}></video>
                         {:else if previewKind === 'audio' && previewUrl}
                           <AudioPreview
                             src={previewUrl}
-                            title={displayFileName(selectedFile)}
-                            mimeType={selectedFile.mimeType}
+                            title={displayFileName(currentPreviewFile)}
+                            mimeType={currentPreviewFile.mimeType}
                           />
                         {:else if previewKind === 'pdf' && previewUrl}
-                          <iframe class="preview-pdf" src={previewUrl} title={"PDF preview: " + selectedFile.filename}></iframe>
+                          <iframe class="preview-pdf" src={previewUrl} title={"PDF preview: " + currentPreviewFile.filename}></iframe>
                         {:else if previewKind === 'text'}
                           <pre class="preview-text">{previewText}</pre>
                         {:else}
@@ -3939,6 +3978,7 @@
               activeIdentity={joinedChatIdentity}
               identityNeedsPublish={joinedChatIdentityNeedsPublish}
               onOpenIdentityManager={openIdentityManagerForChat}
+              onPreviewAttachment={previewChatAttachment}
               onChatMutated={handleChatMutated}
               externalRefreshVersion={chatRefreshVersion}
             />
@@ -5362,10 +5402,9 @@
   }
 
   .file-area.dragging {
-    background: rgba(102, 126, 234, 0.1);
-    border: 2px dashed #667eea;
-    border-radius: 12px;
-    margin: 1rem;
+    background:
+      radial-gradient(120% 120% at 0% 0%, rgba(34, 211, 238, 0.08), transparent 44%),
+      rgba(8, 18, 35, 0.2);
   }
 
   .empty-state {

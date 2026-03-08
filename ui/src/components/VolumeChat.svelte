@@ -1,6 +1,5 @@
 <script lang="ts">
   import {
-    downloadFile,
     listChat,
     sendChatMessage,
     type Auth,
@@ -18,12 +17,10 @@
     parseSourceReferenceBundleText,
   } from '../lib/nearbytesReferenceTransfer.js';
   import {
-    Info,
     MessageSquareText,
     Paperclip,
     RefreshCw,
     Send,
-    UserRound,
     X,
   } from 'lucide-svelte';
 
@@ -35,6 +32,7 @@
     activeIdentity = null,
     identityNeedsPublish = false,
     onOpenIdentityManager = undefined,
+    onPreviewAttachment = undefined,
     onChatMutated = undefined,
     externalRefreshVersion = 0,
   } = $props<{
@@ -45,6 +43,7 @@
     activeIdentity?: ConfiguredIdentity | null;
     identityNeedsPublish?: boolean;
     onOpenIdentityManager?: (() => void) | undefined;
+    onPreviewAttachment?: ((attachment: ChatAttachment) => void) | undefined;
     onChatMutated?: (() => Promise<void> | void) | undefined;
     externalRefreshVersion?: number;
   }>();
@@ -256,22 +255,9 @@
   }
 
   async function openAttachment(attachment: ChatAttachment) {
-    if (!auth) {
+    if (onPreviewAttachment) {
+      onPreviewAttachment(attachment);
       return;
-    }
-    try {
-      errorMessage = '';
-      const blob = await downloadFile(auth, attachment.ref.c.h);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = attachment.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Failed to open attachment';
     }
   }
 
@@ -288,11 +274,6 @@
 
   function shortPublicKey(value: string): string {
     return value.length <= 16 ? value : `${value.slice(0, 8)}...${value.slice(-6)}`;
-  }
-
-  function senderInitial(publicKey: string): string {
-    const label = senderLabel(publicKey).trim();
-    return label.charAt(0).toUpperCase() || '?';
   }
 
   function isOwnMessage(publicKey: string): boolean {
@@ -325,16 +306,22 @@
         <MessageSquareText size={16} strokeWidth={2} />
       </div>
       <div>
-        <p class="chat-eyebrow">Chat</p>
-        <h3>Messages</h3>
-        <p class="chat-subtitle">Signed messages inside this volume</p>
+        <h3>Chat</h3>
+        <p class="chat-subtitle">
+          {#if readonlyMode}
+            Timeline view
+          {:else if activeIdentity?.displayName}
+            Joined as {activeIdentity.displayName}
+          {:else}
+            Choose one identity to speak
+          {/if}
+        </p>
       </div>
     </div>
     <div class="chat-header-actions">
-      <div class="chat-identity-pill">
-        <UserRound size={14} strokeWidth={2} />
-        <span>{activeIdentity?.displayName ? `You: ${activeIdentity.displayName}` : 'Not joined'}</span>
-      </div>
+      {#if identityNeedsPublish && activeIdentity}
+        <span class="chat-status-pill">Update pending</span>
+      {/if}
       {#if !readonlyMode}
         <button type="button" class="chat-secondary-btn" onclick={() => onOpenIdentityManager?.()}>
           {activeIdentity ? 'Change' : 'Join'}
@@ -403,22 +390,20 @@
           {/if}
         </p>
       {:else}
-        {#each effectiveChatState.messages as entry (entry.eventHash)}
-          <article class="chat-message-card" class:own={isOwnMessage(entry.authorPublicKey)}>
-            <div class="chat-message-avatar">{senderInitial(entry.authorPublicKey)}</div>
-            <div class="chat-message-bubble">
-              <header class="chat-message-head">
-                <button
-                  type="button"
-                  class="chat-author-btn"
-                  onclick={() => openProfile(entry.authorPublicKey)}
-                  title="View profile"
-                >
-                  {senderLabel(entry.authorPublicKey)}
-                  <Info size={12} strokeWidth={2} />
-                </button>
-                <span>{formatTimestamp(entry.publishedAt)}</span>
-              </header>
+      {#each effectiveChatState.messages as entry (entry.eventHash)}
+        <article class="chat-message-card" class:own={isOwnMessage(entry.authorPublicKey)}>
+          <div class="chat-message-bubble">
+            <header class="chat-message-head">
+              <button
+                type="button"
+                class="chat-author-btn"
+                onclick={() => openProfile(entry.authorPublicKey)}
+                title="View profile"
+              >
+                {senderLabel(entry.authorPublicKey)}
+              </button>
+              <span>{formatTimestamp(entry.publishedAt)}</span>
+            </header>
               {#if entry.message.body}
                 <p class="chat-message-body">{entry.message.body}</p>
               {/if}
@@ -426,8 +411,8 @@
                 <button
                   type="button"
                   class="chat-attachment"
-                  onclick={() => void openAttachment(entry.message.attachment!)}
-                  title="Open attachment"
+                  ondblclick={() => void openAttachment(entry.message.attachment!)}
+                  title="Double-click to preview attachment"
                 >
                   <Paperclip size={13} strokeWidth={2} />
                   <span>{entry.message.attachment.name}</span>
@@ -465,23 +450,17 @@
       ondrop={(event) => void handleDrop(event)}
     >
       <div class="chat-composer-head">
-        <div>
-          <p class="chat-eyebrow">New message</p>
-          <h4>
-            {readonlyMode
-              ? 'Read-only right now'
-              : activeIdentity?.displayName
-                ? `As ${activeIdentity.displayName}`
-                : 'Join to send'}
-          </h4>
-        </div>
-        {#if identityNeedsPublish && activeIdentity}
-          <span class="chat-status-pill">Profile update pending</span>
-        {/if}
+        <p class="chat-composer-meta">
+          {readonlyMode
+            ? 'History mode'
+            : activeIdentity?.displayName
+              ? `Writing as ${activeIdentity.displayName}`
+              : 'Join this volume to send messages'}
+        </p>
       </div>
       <textarea
         class="chat-textarea"
-        placeholder={activeIdentity ? 'Write a message' : 'Join this volume with one identity to send'}
+        placeholder={activeIdentity ? 'Message' : 'Join this volume with one identity to send'}
         bind:value={draftBody}
         disabled={!auth || readonlyMode || !activeIdentity}
       ></textarea>
@@ -494,18 +473,8 @@
           </button>
         </div>
       {/if}
-      <p class="chat-drop-hint">
-        Drag or paste a Nearbytes file reference to attach it.
-      </p>
       <div class="chat-composer-actions">
-        <button
-          type="button"
-          class="chat-secondary-btn"
-          onclick={() => void refreshChat()}
-          disabled={!auth || refreshing || readonlyMode}
-        >
-          Refresh
-        </button>
+        <p class="chat-drop-hint">Drag or paste a Nearbytes file reference.</p>
         <button
           type="button"
           class="chat-primary-btn"
@@ -532,10 +501,14 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.72rem;
-    padding: 0.82rem;
+    gap: 0;
+    padding: 0;
     overflow: hidden;
     position: relative;
+    border: 1px solid rgba(56, 189, 248, 0.16);
+    border-radius: 18px;
+    background:
+      linear-gradient(180deg, rgba(9, 20, 39, 0.96), rgba(8, 18, 35, 0.9));
   }
 
   .chat-header,
@@ -551,12 +524,19 @@
 
   .chat-title-wrap,
   .chat-header-actions,
-  .chat-identity-pill,
   .chat-pending-attachment,
   .chat-attachment {
     display: inline-flex;
     align-items: center;
     gap: 0.55rem;
+  }
+
+  .chat-header {
+    padding: 0.95rem 1rem;
+    border-bottom: 1px solid rgba(102, 126, 234, 0.18);
+    background:
+      radial-gradient(120% 120% at 0% 0%, rgba(34, 211, 238, 0.08), transparent 46%),
+      rgba(8, 18, 35, 0.72);
   }
 
   .chat-title-mark {
@@ -570,33 +550,19 @@
     flex: 0 0 auto;
   }
 
-  .chat-eyebrow {
-    margin: 0 0 0.14rem;
-    font-size: 0.68rem;
-    letter-spacing: 0.11em;
-    text-transform: uppercase;
-    color: rgba(125, 211, 252, 0.68);
-  }
-
   .chat-subtitle {
-    margin-top: 0.1rem;
-    font-size: 0.78rem;
+    margin-top: 0.16rem;
+    font-size: 0.76rem;
     color: rgba(186, 230, 253, 0.64);
   }
 
   .chat-shell h3,
-  .chat-shell h4,
   .chat-shell p {
     margin: 0;
   }
 
   .chat-shell h3 {
-    font-size: 1.05rem;
-    line-height: 1.2;
-  }
-
-  .chat-shell h4 {
-    font-size: 0.92rem;
+    font-size: 0.96rem;
     line-height: 1.2;
   }
 
@@ -613,11 +579,11 @@
     border: 1px solid rgba(56, 189, 248, 0.18);
     background: rgba(8, 20, 38, 0.82);
     color: rgba(224, 242, 254, 0.94);
-    border-radius: 12px;
-    min-height: 34px;
-    padding: 0.52rem 0.78rem;
+    border-radius: 11px;
+    min-height: 32px;
+    padding: 0.42rem 0.72rem;
     font: inherit;
-    font-size: 0.84rem;
+    font-size: 0.8rem;
     cursor: pointer;
     transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
   }
@@ -638,18 +604,8 @@
   }
 
   .chat-icon-btn.compact {
-    min-height: 30px;
-    min-width: 30px;
-  }
-
-  .chat-identity-pill {
-    min-height: 34px;
-    padding: 0 0.72rem;
-    border-radius: 12px;
-    border: 1px solid rgba(56, 189, 248, 0.12);
-    background: rgba(8, 20, 38, 0.6);
-    color: rgba(224, 242, 254, 0.84);
-    font-size: 0.84rem;
+    min-height: 28px;
+    min-width: 28px;
   }
 
   .chat-primary-btn {
@@ -660,8 +616,8 @@
   .chat-status-pill,
   .chat-banner {
     border-radius: 999px;
-    padding: 0.36rem 0.7rem;
-    font-size: 0.78rem;
+    padding: 0.28rem 0.62rem;
+    font-size: 0.72rem;
   }
 
   .chat-status-pill {
@@ -671,6 +627,7 @@
 
   .chat-banner {
     align-self: flex-start;
+    margin: 0.72rem 1rem 0;
   }
 
   .chat-banner.error {
@@ -683,66 +640,42 @@
     min-height: 0;
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
-    gap: 0.72rem;
-  }
-
-  .chat-feed,
-  .chat-composer {
-    min-height: 0;
-    border-radius: 18px;
-    border: 1px solid rgba(56, 189, 248, 0.1);
-    background: linear-gradient(180deg, rgba(5, 16, 29, 0.78), rgba(4, 11, 22, 0.86));
+    gap: 0;
   }
 
   .chat-feed {
+    min-height: 0;
     overflow: auto;
-    padding: 0.8rem;
+    padding: 0.85rem 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.62rem;
+    gap: 0.48rem;
   }
 
   .chat-empty {
     color: rgba(191, 219, 254, 0.66);
-    padding: 0.8rem 0.1rem;
-    font-size: 0.86rem;
+    padding: 0.6rem 0.1rem;
+    font-size: 0.82rem;
   }
 
   .chat-message-card {
     display: flex;
-    align-items: flex-end;
-    gap: 0.52rem;
-    max-width: min(82%, 720px);
+    max-width: min(78%, 620px);
   }
 
   .chat-message-card.own {
     align-self: flex-end;
-    flex-direction: row-reverse;
-  }
-
-  .chat-message-avatar {
-    width: 28px;
-    height: 28px;
-    border-radius: 999px;
-    display: grid;
-    place-items: center;
-    background: rgba(19, 62, 89, 0.88);
-    color: rgba(224, 242, 254, 0.92);
-    font-size: 0.76rem;
-    font-weight: 700;
-    flex: 0 0 auto;
-    margin-top: 0.1rem;
   }
 
   .chat-message-bubble {
     min-width: 0;
-    padding: 0.72rem 0.82rem;
-    border-radius: 16px;
+    padding: 0.58rem 0.72rem;
+    border-radius: 14px;
     background: rgba(9, 24, 42, 0.86);
     border: 1px solid rgba(56, 189, 248, 0.08);
     display: flex;
     flex-direction: column;
-    gap: 0.48rem;
+    gap: 0.34rem;
   }
 
   .chat-message-card.own .chat-message-bubble {
@@ -752,7 +685,7 @@
 
   .chat-message-head {
     color: rgba(186, 230, 253, 0.76);
-    font-size: 0.74rem;
+    font-size: 0.7rem;
     gap: 0.65rem;
   }
 
@@ -763,10 +696,9 @@
     color: rgba(224, 242, 254, 0.96);
     padding: 0;
     font: inherit;
-    font-weight: 700;
+    font-weight: 600;
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
     cursor: pointer;
   }
 
@@ -776,16 +708,20 @@
 
   .chat-message-body {
     color: rgba(239, 246, 255, 0.94);
-    line-height: 1.45;
+    line-height: 1.42;
     white-space: pre-wrap;
-    font-size: 0.92rem;
+    font-size: 0.84rem;
   }
 
   .chat-composer {
-    padding: 0.82rem;
+    border-top: 1px solid rgba(102, 126, 234, 0.16);
+    background:
+      radial-gradient(120% 120% at 0% 100%, rgba(34, 211, 238, 0.06), transparent 44%),
+      rgba(8, 18, 35, 0.74);
+    padding: 0.82rem 1rem 0.95rem;
     display: flex;
     flex-direction: column;
-    gap: 0.66rem;
+    gap: 0.56rem;
     overflow: visible;
   }
 
@@ -806,13 +742,13 @@
   }
 
   .chat-textarea {
-    min-height: 90px;
+    min-height: 78px;
     resize: vertical;
   }
 
   .chat-drop-hint {
     color: rgba(147, 197, 253, 0.66);
-    font-size: 0.78rem;
+    font-size: 0.74rem;
   }
 
   .chat-pending-attachment {
@@ -822,6 +758,19 @@
     border: 1px solid rgba(56, 189, 248, 0.14);
     justify-content: space-between;
     font-size: 0.82rem;
+  }
+
+  .chat-composer-meta {
+    color: rgba(191, 219, 254, 0.7);
+    font-size: 0.74rem;
+  }
+
+  .chat-composer-actions {
+    align-items: center;
+  }
+
+  .chat-composer-actions .chat-drop-hint {
+    margin-right: auto;
   }
 
   .chat-profile-popover {
