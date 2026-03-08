@@ -1,6 +1,6 @@
 # NearBytes v1.0
 
-A cryptographic protocol for storing and sharing immutable data collections with end-to-end encryption.
+A cryptographic protocol for storing and sharing immutable data collections with end-to-end encryption. See https://github.com/nearbytes/community for a quick introduction and more pointers to the initiative.
 
 ## Overview
 
