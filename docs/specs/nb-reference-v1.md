@@ -10,12 +10,14 @@ This specification defines:
 2. Recipient binding and capsule cryptography.
 3. Import behavior that appends a valid `CREATE_FILE` event.
 4. Descriptor targets for single-block and multi-block files.
+5. A single-file capsule format intended to be embedded in richer transport wrappers.
 
 This specification does not define:
 
 1. Cross-user identity discovery.
 2. Redundancy and repair semantics.
 3. CBOR/COSE wire formats.
+4. Logical filename transport for clipboard-oriented multi-file workflows.
 
 ## 2. Terms
 
@@ -70,6 +72,11 @@ Field requirements:
 8. `k.w` MUST be wrapped FEK ciphertext+tag.
 
 No signature field is defined in v1.
+
+Filename note:
+
+1. `nb.ref.v1` intentionally does not carry a logical filename.
+2. Clipboard or messaging workflows that need filenames or multiple files SHOULD wrap one or more `nb.ref.v1` objects inside `nb.refs.v1`.
 
 ## 6. Capsule Cryptography
 

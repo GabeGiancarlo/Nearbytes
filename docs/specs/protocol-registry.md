@@ -28,6 +28,7 @@ Examples:
 | Protocol ID | Scope | Version | Status |
 | --- | --- | --- | --- |
 | `nb.ref.v1` | Encrypted file reference object | `v1` | Draft |
+| `nb.refs.v1` | Encrypted file reference bundle | `v1` | Draft |
 | `nb.manifest.v1` | Plaintext chunk manifest schema (encrypted at rest) | `v1` | Draft |
 | `nb.content.single.v1` | Single-block encrypted file descriptor | `v1` | Draft |
 | `nb.content.manifest.v1` | Encrypted-manifest file descriptor | `v1` | Draft |
