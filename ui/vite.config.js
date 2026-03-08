@@ -124,7 +124,8 @@ export default defineConfig({
     nearbytesDevApiProxy(),
     svelte({
       dynamicCompileOptions({ filename }) {
-        if (filename.includes('node_modules/lucide-svelte/')) {
+        const normalizedFilename = filename.replace(/\\/g, '/');
+        if (normalizedFilename.includes('/node_modules/lucide-svelte/')) {
           return { runes: false };
         }
       },

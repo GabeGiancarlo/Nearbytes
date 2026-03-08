@@ -1,7 +1,11 @@
 {
   "name": "nearbytes-crypto",
   "version": "0.5.1",
+  "private": true,
   "description": "NearBytes cryptographic storage protocol - immutable data collections with end-to-end encryption",
+  "workspaces": [
+    "ui"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -9,7 +13,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "build:ui": "npm --prefix ui run build",
+    "build:ui": "yarn --cwd ui build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -21,12 +25,12 @@
     "server": "node dist/server/index.js",
     "type-check": "tsc --noEmit",
     "dev:server": "npm run build --silent && npm run server",
-    "dev:ui": "npm --prefix ui run dev",
+    "dev:ui": "yarn --cwd ui dev",
     "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:ui\"",
     "mega": "bash scripts/run-mega-dev.sh",
     "desktop": "electron dist-electron/electron/main.js",
     "desktop:run": "npm run build --silent && npm run build:electron --silent && wait-on http-get://127.0.0.1:5173 && cross-env NODE_ENV=development NEARBYTES_ELECTRON_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist-electron/electron/main.js",
-    "dev-run": "concurrently -k \"npm --prefix ui run dev -- --host 127.0.0.1 --port 5173 --strictPort\" \"npm run desktop:run\"",
+    "dev-run": "concurrently -k \"yarn --cwd ui dev --host 127.0.0.1 --port 5173 --strictPort\" \"npm run desktop:run\"",
     "dev-test": "npm run type-check && npm run test && npm run build:electron && node scripts/desktop-smoke.mjs",
     "dev-build": "npm run build && npm run build:ui && npm run build:electron",
     "production-build": "npm run dev-build && node scripts/run-electron-builder.mjs --publish never",
