@@ -21,6 +21,57 @@
   let spectrumData: Uint8Array | null = null;
   let playing = $state(false);
 
+  function clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function frequencyToBin(frequency: number, sampleRate: number, binCount: number): number {
+    const nyquist = sampleRate / 2;
+    const normalized = clamp(frequency / nyquist, 0, 1);
+    return Math.floor(normalized * Math.max(0, binCount - 1));
+  }
+
+  function sampleBandLevel(
+    index: number,
+    barCount: number,
+    spectrum: Uint8Array,
+    sampleRate: number
+  ): number {
+    const minFrequency = 34;
+    const maxFrequency = Math.min(18000, sampleRate / 2);
+    const startFrequency =
+      minFrequency * Math.pow(maxFrequency / minFrequency, index / barCount);
+    const endFrequency =
+      minFrequency * Math.pow(maxFrequency / minFrequency, (index + 1) / barCount);
+    const startBin = frequencyToBin(startFrequency, sampleRate, spectrum.length);
+    const endBin = Math.max(
+      startBin + 1,
+      frequencyToBin(endFrequency, sampleRate, spectrum.length)
+    );
+
+    let peak = 0;
+    let sumSquares = 0;
+    let count = 0;
+    for (let bin = startBin; bin <= endBin && bin < spectrum.length; bin += 1) {
+      const value = spectrum[bin] / 255;
+      peak = Math.max(peak, value);
+      sumSquares += value * value;
+      count += 1;
+    }
+
+    const rms = count > 0 ? Math.sqrt(sumSquares / count) : 0;
+    const blended = rms * 0.72 + peak * 0.28;
+    const progress = barCount <= 1 ? 0 : index / (barCount - 1);
+
+    // Gentle tilt compensation so the top end reads closer to perceptual loudness.
+    const tiltCompensation = 0.8 + Math.pow(progress, 0.78) * 0.95;
+    const presenceLift = progress > 0.58 ? (progress - 0.58) * 0.32 : 0;
+    const leveled = clamp(blended * tiltCompensation + presenceLift, 0, 1);
+
+    // Slight compression avoids the low-end columns dwarfing everything else.
+    return Math.pow(leveled, 0.82);
+  }
+
   function cancelLoop() {
     if (animationFrame) {
       cancelAnimationFrame(animationFrame);
@@ -66,14 +117,16 @@
       analyser.getByteFrequencyData(spectrum);
     }
 
+    const sampleRate = audioContext?.sampleRate ?? 44100;
+
     for (let index = 0; index < barCount; index += 1) {
       const x = index * (barWidth + gap);
       const base =
         spectrum && spectrum.length > 0
-          ? spectrum[Math.floor((index / barCount) * spectrum.length)] / 255
+          ? sampleBandLevel(index, barCount, spectrum, sampleRate)
           : 0;
-      const idleWave = 0.18 + 0.14 * Math.sin((Date.now() / 320) + index * 0.55);
-      const level = playing ? Math.max(0.08, base) : Math.max(0.06, idleWave);
+      const idleLevel = 0.045;
+      const level = playing ? Math.max(0.08, base) : idleLevel;
       const barHeight = Math.max(10, level * (height - 12));
       const y = height - barHeight;
       context.fillStyle = gradient;
@@ -97,8 +150,10 @@
     }
     if (!analyser) {
       analyser = audioContext.createAnalyser();
-      analyser.fftSize = 128;
-      analyser.smoothingTimeConstant = 0.84;
+      analyser.fftSize = 2048;
+      analyser.minDecibels = -96;
+      analyser.maxDecibels = -18;
+      analyser.smoothingTimeConstant = 0.78;
       spectrumData = new Uint8Array(analyser.frequencyBinCount);
     }
     if (!mediaSource) {

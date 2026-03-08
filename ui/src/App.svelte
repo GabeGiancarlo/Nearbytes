@@ -1461,9 +1461,6 @@
 
   function collapseExpandedMountFromOutside(target: EventTarget | null) {
     if (!(target instanceof Element)) {
-      if (showSourcesPanel) {
-        showSourcesPanel = false;
-      }
       if (activeMountId) {
         const activeMount = mounts.find((mount) => mount.id === activeMountId);
         if (activeMount && !activeMount.collapsed) {
@@ -1471,14 +1468,6 @@
         }
       }
       return;
-    }
-
-    if (
-      showSourcesPanel &&
-      !target.closest('.sources-flyout') &&
-      !target.closest('.sources-launcher')
-    ) {
-      showSourcesPanel = false;
     }
 
     if (!activeMountId) return;
@@ -2408,50 +2397,25 @@
                     title="Remove volume"
                     ariaLabel="Remove volume"
                   />
-                  <div class="header-dock-actions-main">
-                    <button
-                      type="button"
-                      class="workspace-toggle"
-                      class:active={showStatusPanel}
-                      onclick={(event) => {
-                        event.stopPropagation();
-                        showStatusPanel = !showStatusPanel;
-                      }}
-                    >
-                      <Activity class="button-icon" size={15} strokeWidth={2} />
-                      <span>Status</span>
-                    </button>
-                    <button
-                      type="button"
-                      class="workspace-toggle"
-                      class:active={showTimeMachinePanel}
-                      onclick={(event) => {
-                        event.stopPropagation();
-                        showTimeMachinePanel = !showTimeMachinePanel;
-                      }}
-                    >
-                      <History class="button-icon" size={15} strokeWidth={2} />
-                      <span>Timeline</span>
-                    </button>
-                    <button
-                      type="button"
-                      class="workspace-toggle"
-                      class:active={showVolumeStoragePanel}
-                      onclick={(event) => {
-                        event.stopPropagation();
-                        toggleVolumeStoragePanel();
-                      }}
-                    >
-                      <HardDrive class="button-icon" size={15} strokeWidth={2} />
-                      <span>Keep</span>
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    class="workspace-toggle"
+                    class:active={showVolumeStoragePanel}
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      toggleVolumeStoragePanel();
+                    }}
+                  >
+                    <HardDrive class="button-icon" size={15} strokeWidth={2} />
+                    <span>Keep</span>
+                  </button>
                 </div>
               </div>
             </div>
           {:else}
             <div
               class="volume-chip collapsed-shell"
+              class:parked={!isHeaderHovering && !isSecretDropTarget}
               class:selected={mount.id === activeMountId && mount.collapsed}
               data-mount-id={mount.id}
             >
@@ -2498,7 +2462,49 @@
             </div>
           {/if}
         {/each}
-        <div class="mounts-actions">
+        <div
+          class="mounts-actions"
+          class:visible={isHeaderHovering || isSecretDropTarget || showStatusPanel || showTimeMachinePanel || showSourcesPanel || showVolumeStoragePanel}
+        >
+          <button
+            type="button"
+            class="header-tool-btn"
+            class:active={showStatusPanel}
+            aria-label="Status"
+            title="Status"
+            onclick={(event) => {
+              event.stopPropagation();
+              showStatusPanel = !showStatusPanel;
+            }}
+          >
+            <Activity class="button-icon" size={14} strokeWidth={2} />
+          </button>
+          <button
+            type="button"
+            class="header-tool-btn"
+            class:active={showTimeMachinePanel}
+            aria-label="Timeline"
+            title="Timeline"
+            onclick={(event) => {
+              event.stopPropagation();
+              showTimeMachinePanel = !showTimeMachinePanel;
+            }}
+          >
+            <History class="button-icon" size={14} strokeWidth={2} />
+          </button>
+          <button
+            type="button"
+            class="header-tool-btn"
+            class:active={showSourcesPanel}
+            aria-label="Storage"
+            title="Storage"
+            onclick={(event) => {
+              event.stopPropagation();
+              toggleSourcesPanel();
+            }}
+          >
+            <HardDrive class="button-icon" size={14} strokeWidth={2} />
+          </button>
           <button
             type="button"
             class="mount-add-btn"
@@ -2509,32 +2515,8 @@
           >
             <Plus size={15} strokeWidth={2.2} />
           </button>
-          <div class="sources-launcher">
-            <button
-              type="button"
-              class="sources-launcher-btn"
-              class:active={showSourcesPanel}
-              aria-label="Sources"
-              title="Sources"
-              onclick={(event) => {
-                event.stopPropagation();
-                toggleSourcesPanel();
-              }}
-            >
-              <HardDrive class="button-icon" size={14} strokeWidth={2} />
-            </button>
-          </div>
         </div>
       </div>
-      {#if showSourcesPanel}
-        <div class="sources-flyout">
-          <StoragePanel
-            mode="global"
-            {volumeId}
-            currentVolumePresentation={currentMountedVolumePresentation}
-          />
-        </div>
-      {/if}
     </div>
   </header>
 
@@ -2608,15 +2590,23 @@
     ondragleave={handleDragLeave}
     ondrop={handleDrop}
   >
-    {#if showVolumeStoragePanel}
-      <StoragePanel
-        mode="volume"
-        {volumeId}
-        currentVolumePresentation={currentMountedVolumePresentation}
-      />
-    {/if}
-
-    {#if address.trim() === ''}
+    {#if showSourcesPanel}
+      <div class="workspace-panel-view">
+        <StoragePanel
+          mode="global"
+          {volumeId}
+          currentVolumePresentation={currentMountedVolumePresentation}
+        />
+      </div>
+    {:else if showVolumeStoragePanel}
+      <div class="workspace-panel-view">
+        <StoragePanel
+          mode="volume"
+          {volumeId}
+          currentVolumePresentation={currentMountedVolumePresentation}
+        />
+      </div>
+    {:else if address.trim() === ''}
       <!-- Initial state -->
       <div class="empty-state">
         <div class="empty-content">
@@ -3074,6 +3064,16 @@
     display: inline-flex;
     align-items: center;
     gap: 0.38rem;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-3px);
+    transition: opacity 0.18s ease, transform 0.22s ease;
+  }
+
+  .mounts-actions.visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
   }
 
   .volume-chip {
@@ -3100,6 +3100,22 @@
     display: flex;
     align-items: stretch;
     gap: 0;
+    transition:
+      max-width 0.22s ease,
+      opacity 0.18s ease,
+      transform 0.22s ease,
+      margin 0.22s ease,
+      border-color 0.18s ease;
+  }
+
+  .volume-chip.collapsed-shell.parked {
+    max-width: 0;
+    opacity: 0;
+    transform: translateX(-6px) scale(0.96);
+    pointer-events: none;
+    overflow: hidden;
+    margin: 0;
+    border-color: transparent;
   }
 
   .volume-chip.expanded {
@@ -3390,15 +3406,6 @@
     width: 100%;
   }
 
-  .header-dock-actions-main {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 0.45rem;
-    flex-wrap: wrap;
-    margin-left: auto;
-  }
-
   .workspace-toggle {
     border: 1px solid rgba(56, 189, 248, 0.24);
     background: rgba(12, 24, 43, 0.82);
@@ -3651,7 +3658,7 @@
   }
 
   .mount-add-btn,
-  .sources-launcher-btn {
+  .header-tool-btn {
     border: 1px solid rgba(56, 189, 248, 0.14);
     background: rgba(10, 19, 34, 0.52);
     color: rgba(191, 219, 254, 0.78);
@@ -3677,7 +3684,7 @@
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   }
 
-  .sources-launcher-btn {
+  .header-tool-btn {
     opacity: 1;
     pointer-events: auto;
     transform: none;
@@ -3696,11 +3703,18 @@
   }
 
   .mount-add-btn:hover,
-  .sources-launcher-btn:hover {
+  .header-tool-btn:hover {
     background: rgba(16, 32, 56, 0.88);
     border-color: rgba(96, 165, 250, 0.28);
     color: rgba(224, 242, 254, 0.96);
     transform: translateY(-1px);
+  }
+
+  .header-tool-btn.active {
+    border-color: rgba(34, 211, 238, 0.42);
+    background: linear-gradient(180deg, rgba(16, 66, 91, 0.92), rgba(10, 44, 66, 0.94));
+    color: rgba(236, 254, 255, 0.98);
+    box-shadow: 0 10px 24px rgba(6, 182, 212, 0.16);
   }
 
   :global(.button-icon) {
@@ -3817,25 +3831,12 @@
     gap: 1rem;
   }
 
-  .sources-launcher {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .sources-launcher-btn.active {
-    border-color: rgba(34, 211, 238, 0.42);
-    background: linear-gradient(180deg, rgba(16, 66, 91, 0.92), rgba(10, 44, 66, 0.94));
-    color: rgba(236, 254, 255, 0.98);
-  }
-
-  .sources-flyout {
-    width: min(1040px, 100%);
-    align-self: flex-end;
-  }
-
-  .sources-flyout :global(.storage-panel.global-mode) {
+  .workspace-panel-view {
+    flex: 1 1 auto;
+    min-height: 0;
     width: 100%;
+    overflow: auto;
+    scrollbar-width: thin;
   }
 
   .volume-workspace {
@@ -4682,11 +4683,6 @@
       justify-content: flex-start;
     }
 
-    .header-dock-actions-main {
-      justify-content: flex-start;
-      margin-left: 0;
-    }
-
     .secret-input-wrapper {
       grid-template-columns: 1fr 1fr auto;
     }
@@ -4746,10 +4742,24 @@
   }
 
   @media (hover: none) {
+    .mounts-actions {
+      opacity: 1;
+      pointer-events: auto;
+      transform: none;
+    }
+
     .mount-add-btn {
       opacity: 1;
       pointer-events: auto;
       transform: none;
+    }
+
+    .volume-chip.collapsed-shell.parked {
+      max-width: min(72vw, 420px);
+      opacity: 1;
+      transform: none;
+      pointer-events: auto;
+      border-color: rgba(56, 189, 248, 0.22);
     }
   }
 
@@ -4766,7 +4776,7 @@
     }
 
     .mount-add-btn,
-    .sources-launcher-btn {
+    .header-tool-btn {
       width: 30px;
       height: 30px;
     }
@@ -4795,10 +4805,6 @@
     .header-dock-actions {
       flex-direction: column;
       align-items: stretch;
-    }
-
-    .header-dock-actions-main {
-      width: 100%;
     }
 
     .time-machine-head {

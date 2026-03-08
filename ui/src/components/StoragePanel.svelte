@@ -1365,6 +1365,8 @@
     display: grid;
     gap: 1rem;
     padding: 1rem;
+    width: 100%;
+    min-height: 0;
     border: 1px solid rgba(56, 189, 248, 0.18);
     border-radius: 20px;
     background:
@@ -1373,6 +1375,12 @@
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.04),
       0 20px 44px rgba(2, 6, 23, 0.2);
+  }
+
+  .storage-panel.global-mode,
+  .storage-panel.volume-mode {
+    overflow: auto;
+    scrollbar-width: thin;
   }
 
   .panel-head,
