@@ -12,8 +12,9 @@ import { getDefaultStorageDir } from '../storagePath.js';
 import { defaultPathMapper } from '../types/storage.js';
 import { serializeEventPayload } from '../storage/serialization.js';
 import { openVolume, loadEventLog, verifyEventLog } from './volume.js';
-import type { FileEvent, FileMetadata } from './fileEvents.js';
+import type { FileMetadata } from './fileEvents.js';
 import type { EventLogEntry } from '../types/volume.js';
+import { parseChatMessageJson, parseIdentityRecordJson } from './chatCodec.js';
 import {
   createRecipientKeyCapsule,
   decryptFileForVolume,
@@ -71,7 +72,7 @@ export interface RecipientImportResult {
 
 export interface TimelineEvent {
   eventHash: string;
-  type: FileEvent['type'];
+  type: EventType;
   filename: string;
   timestamp: number;
   toFilename?: string;
@@ -82,6 +83,12 @@ export interface TimelineEvent {
   createdAt?: number;
   deletedAt?: number;
   renamedAt?: number;
+  publishedAt?: number;
+  authorPublicKey?: string;
+  displayName?: string;
+  body?: string;
+  attachmentName?: string;
+  summary?: string;
 }
 
 export interface RenameFolderSummary {
@@ -149,7 +156,7 @@ interface StoredFileRecord extends FileMetadata {
 
 interface StoredTimelineRow {
   eventHash: string;
-  type: FileEvent['type'];
+  type: EventType;
   filename: string;
   timestamp: number;
   hasExplicitTimestamp: boolean;
@@ -163,6 +170,12 @@ interface StoredTimelineRow {
   createdAt?: number;
   deletedAt?: number;
   renamedAt?: number;
+  publishedAt?: number;
+  authorPublicKey?: string;
+  displayName?: string;
+  body?: string;
+  attachmentName?: string;
+  summary?: string;
 }
 
 /**
@@ -369,7 +382,7 @@ export async function computeSnapshot(secret: string): Promise<SnapshotSummary> 
 }
 
 /**
- * Returns a deterministic, chronological timeline of file events for a volume.
+ * Returns a deterministic, chronological timeline of all volume events.
  */
 export async function getTimeline(secret: string): Promise<TimelineEvent[]> {
   const service = getDefaultFileService();
@@ -977,6 +990,12 @@ function mapEntriesToTimeline(entries: EventLogEntry[]): TimelineEvent[] {
     createdAt: row.createdAt,
     deletedAt: row.deletedAt,
     renamedAt: row.renamedAt,
+    publishedAt: row.publishedAt,
+    authorPublicKey: row.authorPublicKey,
+    displayName: row.displayName,
+    body: row.body,
+    attachmentName: row.attachmentName,
+    summary: row.summary,
   }));
 }
 
@@ -1042,7 +1061,7 @@ function buildTimelineRows(entries: EventLogEntry[]): StoredTimelineRow[] {
       const inferredTimestamp = payload.createdAt ?? sequence;
       rows.push({
         eventHash: entry.eventHash,
-        type: 'CREATE_FILE',
+        type: EventType.CREATE_FILE,
         filename: payload.fileName,
         timestamp: inferredTimestamp,
         hasExplicitTimestamp: payload.createdAt !== undefined,
@@ -1061,7 +1080,7 @@ function buildTimelineRows(entries: EventLogEntry[]): StoredTimelineRow[] {
       const inferredTimestamp = payload.deletedAt ?? sequence;
       rows.push({
         eventHash: entry.eventHash,
-        type: 'DELETE_FILE',
+        type: EventType.DELETE_FILE,
         filename: payload.fileName,
         timestamp: inferredTimestamp,
         hasExplicitTimestamp: payload.deletedAt !== undefined,
@@ -1075,13 +1094,53 @@ function buildTimelineRows(entries: EventLogEntry[]): StoredTimelineRow[] {
       const inferredTimestamp = payload.renamedAt ?? sequence;
       rows.push({
         eventHash: entry.eventHash,
-        type: 'RENAME_FILE',
+        type: EventType.RENAME_FILE,
         filename: payload.fileName,
         timestamp: inferredTimestamp,
         hasExplicitTimestamp: payload.renamedAt !== undefined,
         sequence,
         toFilename: payload.toFileName,
         renamedAt: inferredTimestamp,
+      });
+      continue;
+    }
+
+    if (payload.type === EventType.DECLARE_IDENTITY) {
+      const inferredTimestamp = payload.publishedAt ?? sequence;
+      const identityRecord = payload.record ? parseIdentityRecordJson(payload.record) : null;
+      const displayName = identityRecord?.profile.displayName;
+      rows.push({
+        eventHash: entry.eventHash,
+        type: EventType.DECLARE_IDENTITY,
+        filename: '',
+        timestamp: inferredTimestamp,
+        hasExplicitTimestamp: payload.publishedAt !== undefined,
+        sequence,
+        publishedAt: inferredTimestamp,
+        authorPublicKey: payload.authorPublicKey,
+        displayName,
+        summary: displayName ? `Published ${displayName}` : 'Published identity',
+      });
+      continue;
+    }
+
+    if (payload.type === EventType.CHAT_MESSAGE) {
+      const inferredTimestamp = payload.publishedAt ?? sequence;
+      const chatMessage = payload.message ? parseChatMessageJson(payload.message) : null;
+      const body = timelineSnippet(chatMessage?.body);
+      const attachmentName = chatMessage?.attachment?.name;
+      rows.push({
+        eventHash: entry.eventHash,
+        type: EventType.CHAT_MESSAGE,
+        filename: '',
+        timestamp: inferredTimestamp,
+        hasExplicitTimestamp: payload.publishedAt !== undefined,
+        sequence,
+        publishedAt: inferredTimestamp,
+        authorPublicKey: payload.authorPublicKey,
+        body,
+        attachmentName,
+        summary: body ?? attachmentName ?? 'Attachment message',
       });
     }
   }
@@ -1252,19 +1311,38 @@ function compareTimelineRows(
       ? `C:${left.blobHash ?? ''}`
       : left.type === 'RENAME_FILE'
         ? `R:${left.toFilename ?? ''}`
-        : 'D';
+        : left.type === 'DELETE_FILE'
+          ? 'D'
+          : left.type === EventType.DECLARE_IDENTITY
+            ? `I:${left.displayName ?? left.authorPublicKey ?? ''}`
+            : `M:${left.body ?? left.attachmentName ?? left.authorPublicKey ?? ''}`;
   const rightTie =
     right.type === 'CREATE_FILE'
       ? `C:${right.blobHash ?? ''}`
       : right.type === 'RENAME_FILE'
         ? `R:${right.toFilename ?? ''}`
-        : 'D';
+        : right.type === 'DELETE_FILE'
+          ? 'D'
+          : right.type === EventType.DECLARE_IDENTITY
+            ? `I:${right.displayName ?? right.authorPublicKey ?? ''}`
+            : `M:${right.body ?? right.attachmentName ?? right.authorPublicKey ?? ''}`;
   if (leftTie < rightTie) return -1;
   if (leftTie > rightTie) return 1;
 
   if (left.eventHash < right.eventHash) return -1;
   if (left.eventHash > right.eventHash) return 1;
   return 0;
+}
+
+function timelineSnippet(value: string | undefined, limit = 72): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized === '') {
+    return undefined;
+  }
+  return normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
 }
 
 function assertNonEmptyFilename(filename: string): void {

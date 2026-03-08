@@ -875,13 +875,63 @@
 
   const isHistoryMode = $derived.by(() => timelinePosition < timelineEvents.length);
 
+  function timelineKindLabel(event: TimelineEvent): string {
+    switch (event.type) {
+      case 'CREATE_FILE':
+        return 'Create';
+      case 'DELETE_FILE':
+        return 'Delete';
+      case 'RENAME_FILE':
+        return 'Rename';
+      case 'DECLARE_IDENTITY':
+        return 'Identity';
+      case 'CHAT_MESSAGE':
+        return 'Chat';
+    }
+  }
+
+  function timelineHeadline(event: TimelineEvent): string {
+    switch (event.type) {
+      case 'CREATE_FILE':
+      case 'DELETE_FILE':
+        return fileBaseName(event.filename);
+      case 'RENAME_FILE': {
+        const fromName = fileBaseName(event.filename);
+        const toName = fileBaseName(event.toFilename ?? '');
+        return toName ? `${fromName} -> ${toName}` : fromName;
+      }
+      case 'DECLARE_IDENTITY':
+        return event.displayName ? `Publish ${event.displayName}` : 'Publish identity';
+      case 'CHAT_MESSAGE':
+        return event.summary ?? 'Chat message';
+    }
+  }
+
+  function timelineMarkerText(event: TimelineEvent, position: number, total: number): string {
+    switch (event.type) {
+      case 'CREATE_FILE':
+        return `${position}/${total} • ${fileBaseName(event.filename)} created`;
+      case 'DELETE_FILE':
+        return `${position}/${total} • ${fileBaseName(event.filename)} deleted`;
+      case 'RENAME_FILE':
+        return `${position}/${total} • ${fileBaseName(event.filename)} renamed`;
+      case 'DECLARE_IDENTITY':
+        return `${position}/${total} • ${event.displayName ? `${event.displayName} published identity` : 'Identity published'}`;
+      case 'CHAT_MESSAGE':
+        return `${position}/${total} • ${event.summary ?? 'Chat message'}`;
+    }
+  }
+
+  function timelineTitle(event: TimelineEvent): string {
+    return `${timelineKindLabel(event)} ${timelineHeadline(event)} • ${formatDate(event.timestamp)}`;
+  }
+
   const timelineMarker = $derived.by(() => {
     if (timelineEvents.length === 0) return 'No history yet';
     if (timelinePosition === timelineEvents.length) return 'Live view';
     if (timelinePosition === 0) return `Genesis • 0/${timelineEvents.length}`;
     const event = timelineEvents[timelinePosition - 1];
-    const verb = event.type === 'CREATE_FILE' ? 'created' : 'deleted';
-    return `${timelinePosition}/${timelineEvents.length} • ${event.filename} ${verb}`;
+    return timelineMarkerText(event, timelinePosition, timelineEvents.length);
   });
 
   const viewFiles = $derived.by(() => {
@@ -906,8 +956,22 @@
           mimeType: event.mimeType,
           createdAt: event.createdAt,
         });
-      } else {
+        continue;
+      }
+      if (event.type === 'DELETE_FILE') {
         files.delete(event.filename);
+        continue;
+      }
+      if (event.type === 'RENAME_FILE' && event.toFilename) {
+        const existing = files.get(event.filename);
+        if (!existing) {
+          continue;
+        }
+        files.delete(event.filename);
+        files.set(event.toFilename, {
+          ...existing,
+          filename: event.toFilename,
+        });
       }
     }
 
@@ -2825,11 +2889,14 @@
                 class:current={index === timelinePosition - 1}
                 class:create={event.type === 'CREATE_FILE'}
                 class:delete={event.type === 'DELETE_FILE'}
+                class:rename={event.type === 'RENAME_FILE'}
+                class:identity={event.type === 'DECLARE_IDENTITY'}
+                class:chat={event.type === 'CHAT_MESSAGE'}
                 onclick={() => jumpToEvent(index)}
-                title={`${event.type === 'CREATE_FILE' ? 'Create' : 'Delete'} ${event.filename} • ${formatDate(event.timestamp)}`}
+                title={timelineTitle(event)}
               >
-                <span class="tm-event-kind">{event.type === 'CREATE_FILE' ? 'Create' : 'Delete'}</span>
-                <span class="tm-event-name">{event.filename}</span>
+                <span class="tm-event-kind">{timelineKindLabel(event)}</span>
+                <span class="tm-event-name">{timelineHeadline(event)}</span>
                 <span class="tm-event-time">{formatShortDate(event.timestamp)}</span>
               </button>
             {/each}
@@ -4109,11 +4176,12 @@
     align-items: center;
     gap: 0.55rem;
     align-self: flex-start;
-    padding: 0.35rem;
+    padding: 0.28rem;
     border-radius: 16px;
     border: 1px solid rgba(56, 189, 248, 0.14);
     background: rgba(7, 16, 30, 0.76);
     backdrop-filter: blur(18px);
+    flex: 0 0 auto;
   }
 
   .workspace-mode-btn {
@@ -4122,13 +4190,13 @@
     background: transparent;
     color: rgba(191, 219, 254, 0.72);
     border-radius: 12px;
-    min-height: 38px;
-    padding: 0 0.9rem;
+    min-height: 34px;
+    padding: 0 0.82rem;
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
     font: inherit;
-    font-size: 0.84rem;
+    font-size: 0.8rem;
     font-weight: 600;
     cursor: pointer;
     transition:
@@ -4217,15 +4285,16 @@
   }
 
   .time-machine {
+    flex: 0 0 auto;
     border: 1px solid rgba(56, 189, 248, 0.18);
     border-radius: 16px;
     background:
       radial-gradient(140% 120% at 0% 0%, rgba(34, 211, 238, 0.08), transparent 44%),
       linear-gradient(180deg, rgba(9, 20, 39, 0.96), rgba(8, 18, 35, 0.9));
-    padding: 0.9rem;
+    padding: 0.75rem;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.6rem;
     min-height: auto;
     overflow: hidden;
   }
@@ -4303,8 +4372,8 @@
   .tm-events {
     display: grid;
     grid-auto-flow: column;
-    grid-auto-columns: minmax(150px, 180px);
-    gap: 0.5rem;
+    grid-auto-columns: minmax(132px, 162px);
+    gap: 0.42rem;
     overflow-x: auto;
     overflow-y: hidden;
     padding: 0.15rem 0.35rem 0.2rem 0;
@@ -4318,12 +4387,12 @@
 
   .tm-event {
     border: 1px solid rgba(148, 163, 184, 0.22);
-    border-radius: 10px;
+    border-radius: 9px;
     background: rgba(15, 23, 42, 0.35);
     color: #e2e8f0;
     display: grid;
     gap: 0.15rem;
-    padding: 0.5rem 0.58rem;
+    padding: 0.42rem 0.5rem;
     text-align: left;
     cursor: pointer;
     transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
@@ -4357,22 +4426,37 @@
     color: #fca5a5;
   }
 
+  .tm-event.rename .tm-event-kind {
+    color: #c4b5fd;
+  }
+
+  .tm-event.identity .tm-event-kind {
+    color: #fcd34d;
+  }
+
+  .tm-event.chat .tm-event-kind {
+    color: #7dd3fc;
+  }
+
   .tm-event-kind {
-    font-size: 0.68rem;
+    font-size: 0.64rem;
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
 
   .tm-event-name {
-    font-size: 0.8125rem;
-    display: block;
+    font-size: 0.77rem;
+    display: -webkit-box;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-height: 1.25;
+    min-height: calc(1.25em * 2);
   }
 
   .tm-event-time {
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     color: rgba(191, 219, 254, 0.85);
   }
 

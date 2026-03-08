@@ -165,14 +165,22 @@ export interface SnapshotResponse {
 
 export interface TimelineEvent {
   eventHash: string;
-  type: 'CREATE_FILE' | 'DELETE_FILE';
+  type: 'CREATE_FILE' | 'DELETE_FILE' | 'RENAME_FILE' | 'DECLARE_IDENTITY' | 'CHAT_MESSAGE';
   filename: string;
   timestamp: number;
   blobHash?: string;
+  toFilename?: string;
   size?: number;
   mimeType?: string;
   createdAt?: number;
   deletedAt?: number;
+  renamedAt?: number;
+  publishedAt?: number;
+  authorPublicKey?: string;
+  displayName?: string;
+  body?: string;
+  attachmentName?: string;
+  summary?: string;
 }
 
 export interface TimelineResponse {
@@ -607,7 +615,7 @@ export async function listFiles(auth: Auth): Promise<ListFilesResponse> {
 }
 
 /**
- * Returns a deterministic timeline of file events for the current volume.
+ * Returns a deterministic timeline of all events for the current volume.
  */
 export async function getTimeline(auth: Auth): Promise<TimelineResponse> {
   return apiRequest<TimelineResponse>('/timeline', {

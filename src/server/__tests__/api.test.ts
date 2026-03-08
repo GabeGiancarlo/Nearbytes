@@ -486,5 +486,13 @@ describe('Nearbytes API', () => {
     expect(chatRes.body.identities).toHaveLength(1);
     expect(chatRes.body.messages).toHaveLength(1);
     expect(chatRes.body.messages[0].message.attachment.name).toBe('chat.txt');
+
+    const timelineRes = await request(app)
+      .get('/timeline')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(timelineRes.body.events.some((event: { type: string }) => event.type === 'DECLARE_IDENTITY')).toBe(true);
+    expect(timelineRes.body.events.some((event: { type: string }) => event.type === 'CHAT_MESSAGE')).toBe(true);
   });
 });
