@@ -97,11 +97,29 @@
     latestResult: ReconcileSourcesResponse | null;
   };
 
+  type DesktopUpdaterState = {
+    phase: 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'error';
+    version: string;
+    message: string;
+    detail: string;
+    progressPercent: number | null;
+    transferredBytes: number;
+    totalBytes: number;
+    bytesPerSecond: number;
+    canInstall: boolean;
+    releaseUrl: string;
+    assetName: string;
+  };
+
   type NearbytesDesktopBridge = {
     fetchRemoteFile?: (url: string) => Promise<DesktopRemoteFile>;
     getClipboardImageStatus?: () => Promise<{ hasImage: boolean }>;
     readClipboardImage?: () => Promise<DesktopRemoteFile | null>;
     loadUiState?: () => Promise<PersistedUiState>;
+    getUpdaterState?: () => Promise<DesktopUpdaterState | null>;
+    installDownloadedUpdate?: () => Promise<boolean>;
+    openUpdateReleasePage?: () => Promise<boolean>;
+    onUpdaterState?: (listener: (state: DesktopUpdaterState) => void) => (() => void) | void;
     saveUiState?: (state: PersistedUiState) => Promise<unknown>;
   };
 
@@ -152,6 +170,60 @@
     runKey: string;
     message: string;
   };
+
+  function normalizeDesktopUpdaterState(input: unknown): DesktopUpdaterState | null {
+    if (!input || typeof input !== 'object') {
+      return null;
+    }
+    const candidate = input as Partial<DesktopUpdaterState>;
+    if (typeof candidate.phase !== 'string') {
+      return null;
+    }
+    return {
+      phase: candidate.phase as DesktopUpdaterState['phase'],
+      version: typeof candidate.version === 'string' ? candidate.version : '',
+      message: typeof candidate.message === 'string' ? candidate.message : '',
+      detail: typeof candidate.detail === 'string' ? candidate.detail : '',
+      progressPercent: typeof candidate.progressPercent === 'number' ? candidate.progressPercent : null,
+      transferredBytes: typeof candidate.transferredBytes === 'number' ? candidate.transferredBytes : 0,
+      totalBytes: typeof candidate.totalBytes === 'number' ? candidate.totalBytes : 0,
+      bytesPerSecond: typeof candidate.bytesPerSecond === 'number' ? candidate.bytesPerSecond : 0,
+      canInstall: candidate.canInstall === true,
+      releaseUrl: typeof candidate.releaseUrl === 'string' ? candidate.releaseUrl : '',
+      assetName: typeof candidate.assetName === 'string' ? candidate.assetName : '',
+    };
+  }
+
+  function formatByteCount(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes <= 0) {
+      return '0 B';
+    }
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    const digits = value >= 10 || unitIndex === 0 ? 0 : 1;
+    return `${value.toFixed(digits)} ${units[unitIndex]}`;
+  }
+
+  function desktopUpdaterProgressSummary(state: DesktopUpdaterState): string {
+    const transferred = formatByteCount(state.transferredBytes);
+    const total = state.totalBytes > 0 ? formatByteCount(state.totalBytes) : '';
+    const rate = state.bytesPerSecond > 0 ? `${formatByteCount(state.bytesPerSecond)}/s` : '';
+    const percent =
+      typeof state.progressPercent === 'number' ? `${Math.round(Math.max(0, Math.min(100, state.progressPercent)))}%` : '';
+    return [percent, total ? `${transferred} of ${total}` : transferred, rate].filter(Boolean).join(' • ');
+  }
+
+  function desktopUpdaterPrimaryActionLabel(state: DesktopUpdaterState): string {
+    if (state.canInstall) {
+      return 'Restart now';
+    }
+    return 'Open release';
+  }
 
   function createMount(overrides: Partial<VolumeMount> = {}): VolumeMount {
     return {
@@ -799,6 +871,32 @@
     return globalWindow.nearbytesDesktop ?? null;
   }
 
+  function shouldShowDesktopUpdaterToast(state: DesktopUpdaterState | null): boolean {
+    return state !== null && state.phase !== 'idle' && state.message.trim().length > 0;
+  }
+
+  async function handleDesktopUpdaterPrimaryAction(): Promise<void> {
+    const bridge = getDesktopBridge();
+    if (!bridge || !desktopUpdaterState) {
+      return;
+    }
+    if (desktopUpdaterState.canInstall && typeof bridge.installDownloadedUpdate === 'function') {
+      await bridge.installDownloadedUpdate();
+      return;
+    }
+    if (typeof bridge.openUpdateReleasePage === 'function') {
+      await bridge.openUpdateReleasePage();
+    }
+  }
+
+  async function openDesktopUpdaterReleasePage(): Promise<void> {
+    const bridge = getDesktopBridge();
+    if (!bridge || typeof bridge.openUpdateReleasePage !== 'function') {
+      return;
+    }
+    await bridge.openUpdateReleasePage();
+  }
+
   function base64ToBytes(value: string): Uint8Array {
     const binary = atob(value);
     const bytes = new Uint8Array(binary.length);
@@ -999,6 +1097,7 @@
   let latestSourceDiscoveryRunKey = $state('');
   let lastAcknowledgedSourceDiscoveryRunKey = $state('');
   let sourceDiscoveryToast = $state<DiscoveryToastState | null>(null);
+  let desktopUpdaterState = $state<DesktopUpdaterState | null>(null);
   let sourceDiscoveryRefreshToken = $state(0);
   let sourceDiscoveryPanelFocus = $state<'discovery' | 'defaults' | null>(null);
   let sourceDiscoveryInFlight = false;
@@ -1022,9 +1121,38 @@
     lastAcknowledgedSourceDiscoveryRunKey = localDiscoveryState.lastAcknowledgedRunKey;
 
     const bridge = getDesktopBridge();
+    let cancelUpdaterSubscription: (() => void) | null = null;
+    if (bridge) {
+      if (typeof bridge.getUpdaterState === 'function') {
+        void bridge
+          .getUpdaterState()
+          .then((nextState) => {
+            const normalized = normalizeDesktopUpdaterState(nextState);
+            if (normalized) {
+              desktopUpdaterState = normalized;
+            }
+          })
+          .catch((error) => {
+            console.warn('Failed to read desktop updater state:', error);
+          });
+      }
+      if (typeof bridge.onUpdaterState === 'function') {
+        const unsubscribe = bridge.onUpdaterState((nextState) => {
+          const normalized = normalizeDesktopUpdaterState(nextState);
+          if (normalized) {
+            desktopUpdaterState = normalized;
+          }
+        });
+        if (typeof unsubscribe === 'function') {
+          cancelUpdaterSubscription = unsubscribe;
+        }
+      }
+    }
     if (!bridge || typeof bridge.loadUiState !== 'function') {
       persistedUiStateReady = true;
-      return;
+      return () => {
+        cancelUpdaterSubscription?.();
+      };
     }
 
     void (async () => {
@@ -1046,6 +1174,10 @@
         persistedUiStateReady = true;
       }
     })();
+
+    return () => {
+      cancelUpdaterSubscription?.();
+    };
   });
 
   $effect(() => {
@@ -4349,31 +4481,82 @@
     {/if}
   </main>
 
-  {#if sourceDiscoveryToast}
-    <aside class="discovery-toast panel-surface" role="status" aria-live="polite">
-      <div class="discovery-toast-copy">
-        <p class="discovery-toast-title">Storage locations updated</p>
-        <p>{sourceDiscoveryToast.message}</p>
-      </div>
-      <div class="discovery-toast-actions">
-        <button type="button" class="discovery-toast-btn" onclick={openSourceDiscoveryDetails}>
-          <Search class="button-icon" size={15} strokeWidth={2} />
-          <span>Details</span>
-        </button>
-        <button type="button" class="discovery-toast-btn" onclick={openSourceDiscoveryDefaults}>
-          <Settings2 class="button-icon" size={15} strokeWidth={2} />
-          <span>Edit rules</span>
-        </button>
-      </div>
-      <button
-        type="button"
-        class="discovery-toast-close"
-        aria-label="Dismiss discovery notice"
-        onclick={() => acknowledgeSourceDiscovery(sourceDiscoveryToast?.runKey ?? '')}
-      >
-        <X size={15} strokeWidth={2} />
-      </button>
-    </aside>
+  {#if shouldShowDesktopUpdaterToast(desktopUpdaterState) || sourceDiscoveryToast}
+    <div class="toast-stack">
+      {#if shouldShowDesktopUpdaterToast(desktopUpdaterState) && desktopUpdaterState}
+        <aside class="update-toast panel-surface" role="status" aria-live="polite">
+          <div class="update-toast-copy">
+            <p class="update-toast-title">{desktopUpdaterState.message}</p>
+            <p>{desktopUpdaterState.detail}</p>
+          </div>
+          {#if desktopUpdaterState.phase === 'downloading'}
+            <div class="update-toast-progress" aria-hidden="true">
+              <span
+                class="update-toast-progress-bar"
+                style={`width: ${Math.max(0, Math.min(100, desktopUpdaterState.progressPercent ?? 0))}%`}
+              ></span>
+            </div>
+            <p class="update-toast-meta">{desktopUpdaterProgressSummary(desktopUpdaterState)}</p>
+          {/if}
+          {#if desktopUpdaterState.phase === 'ready' || desktopUpdaterState.phase === 'error'}
+            <div class="update-toast-actions">
+              {#if desktopUpdaterState.phase === 'ready'}
+                <button type="button" class="update-toast-btn" onclick={handleDesktopUpdaterPrimaryAction}>
+                  {#if desktopUpdaterState.canInstall}
+                    <RefreshCw class="button-icon" size={15} strokeWidth={2} />
+                  {:else}
+                    <Download class="button-icon" size={15} strokeWidth={2} />
+                  {/if}
+                  <span>{desktopUpdaterPrimaryActionLabel(desktopUpdaterState)}</span>
+                </button>
+              {:else}
+                <button type="button" class="update-toast-btn" onclick={openDesktopUpdaterReleasePage}>
+                  <Download class="button-icon" size={15} strokeWidth={2} />
+                  <span>Open release</span>
+                </button>
+              {/if}
+            </div>
+            <button
+              type="button"
+              class="discovery-toast-close"
+              aria-label="Dismiss update notice"
+              onclick={() => {
+                desktopUpdaterState = null;
+              }}
+            >
+              <X size={15} strokeWidth={2} />
+            </button>
+          {/if}
+        </aside>
+      {/if}
+
+      {#if sourceDiscoveryToast}
+        <aside class="discovery-toast panel-surface" role="status" aria-live="polite">
+          <div class="discovery-toast-copy">
+            <p class="discovery-toast-title">Storage locations updated</p>
+            <p>{sourceDiscoveryToast.message}</p>
+          </div>
+          <div class="discovery-toast-actions">
+            <button type="button" class="discovery-toast-btn" onclick={openSourceDiscoveryDetails}>
+              <Search class="button-icon" size={15} strokeWidth={2} />
+              <span>Details</span>
+            </button>
+            <button type="button" class="discovery-toast-btn" onclick={openSourceDiscoveryDefaults}>
+              <Settings2 class="button-icon" size={15} strokeWidth={2} />
+              <span>Edit rules</span>
+            </button>
+          </div>
+          <button
+            type="button"
+            class="discovery-toast-close"
+            aria-label="Dismiss discovery notice"
+            onclick={() => acknowledgeSourceDiscovery(sourceDiscoveryToast?.runKey ?? '')}
+          >
+            <X size={15} strokeWidth={2} />
+          </button>
+        </aside>
+      {/if}
+    </div>
   {/if}
 
 </div>
@@ -5474,11 +5657,18 @@
     scrollbar-width: thin;
   }
 
-  .discovery-toast {
+  .toast-stack {
     position: fixed;
     right: 1.25rem;
     bottom: 1.25rem;
     z-index: 40;
+    display: grid;
+    gap: 0.85rem;
+    width: min(420px, calc(100vw - 2rem));
+  }
+
+  .update-toast,
+  .discovery-toast {
     width: min(420px, calc(100vw - 2rem));
     display: grid;
     gap: 0.9rem;
@@ -5492,34 +5682,68 @@
       inset 0 1px 0 rgba(255, 255, 255, 0.03);
   }
 
+  .update-toast {
+    position: relative;
+    border-color: rgba(96, 165, 250, 0.28);
+  }
+
+  .update-toast-copy,
   .discovery-toast-copy {
     display: grid;
     gap: 0.32rem;
     padding-right: 2rem;
   }
 
+  .update-toast-copy p,
   .discovery-toast-copy p {
     margin: 0;
   }
 
+  .update-toast-title,
   .discovery-toast-title {
     font-size: 0.84rem;
     font-weight: 700;
     color: rgba(236, 254, 255, 0.98);
   }
 
+  .update-toast-copy :not(.update-toast-title),
   .discovery-toast-copy :not(.discovery-toast-title) {
     font-size: 0.79rem;
     line-height: 1.45;
     color: rgba(191, 219, 254, 0.82);
   }
 
+  .update-toast-progress {
+    position: relative;
+    width: 100%;
+    height: 0.44rem;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(30, 41, 59, 0.88);
+  }
+
+  .update-toast-progress-bar {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.92), rgba(14, 165, 233, 0.72));
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.28);
+  }
+
+  .update-toast-meta {
+    margin: -0.2rem 0 0;
+    font-size: 0.74rem;
+    color: rgba(191, 219, 254, 0.72);
+  }
+
+  .update-toast-actions,
   .discovery-toast-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 0.6rem;
   }
 
+  .update-toast-btn,
   .discovery-toast-btn {
     appearance: none;
     border: 1px solid rgba(56, 189, 248, 0.24);
@@ -5541,6 +5765,7 @@
       transform 0.18s ease;
   }
 
+  .update-toast-btn:hover,
   .discovery-toast-btn:hover {
     background: rgba(16, 32, 56, 0.96);
     border-color: rgba(96, 165, 250, 0.34);
@@ -6597,7 +6822,7 @@
       justify-self: stretch;
     }
 
-    .discovery-toast {
+    .toast-stack {
       right: 1rem;
       bottom: 1rem;
       width: min(100%, calc(100vw - 1.5rem));
