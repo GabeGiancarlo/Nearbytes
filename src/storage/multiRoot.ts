@@ -150,7 +150,7 @@ export class MultiRootStorageBackend implements StorageBackend {
 
   async reconcileConfiguredVolumes(): Promise<void> {
     for (const volume of this.config.volumes) {
-      await this.reconcileVolumeBlocks(volume.volumeId);
+      await this.reconcileVolumeData(volume.volumeId);
     }
   }
 
@@ -682,6 +682,60 @@ export class MultiRootStorageBackend implements StorageBackend {
     throw new StorageError(
       `Destination ${target.state.config.id} does not have enough free space for volume ${channelKeyHex}`
     );
+  }
+
+  private async reconcileVolumeData(volumeId: string): Promise<void> {
+    await this.reconcileVolumeEvents(volumeId);
+    await this.reconcileVolumeBlocks(volumeId);
+  }
+
+  private async reconcileVolumeEvents(volumeId: string): Promise<void> {
+    const eventTargets = this.getWritableVolumeDestinationTargets(volumeId, { requireBlocks: false });
+    if (eventTargets.length === 0) {
+      return;
+    }
+
+    const directory = `channels/${volumeId}`;
+    const eventFiles = await this.listFilesAcrossRoots(directory);
+    if (eventFiles.length === 0) {
+      return;
+    }
+
+    for (const target of eventTargets) {
+      for (const eventFile of eventFiles) {
+        if (!eventFile.endsWith('.bin')) {
+          continue;
+        }
+
+        const relativePath = `${directory}/${eventFile}`;
+        try {
+          if (await target.state.backend.exists(relativePath)) {
+            continue;
+          }
+        } catch {
+          // Continue into read/write path and let it record a concrete failure if needed.
+        }
+
+        let data: Uint8Array;
+        try {
+          data = await this.readFileFromRoots(relativePath, this.prioritizeRootsForChannel(volumeId));
+        } catch {
+          continue;
+        }
+
+        try {
+          await this.prepareDestinationWrite(target, data.byteLength, volumeId);
+          await target.state.backend.writeFile(relativePath, data);
+          this.lastWriteFailures.delete(target.state.config.id);
+        } catch (error) {
+          this.lastWriteFailures.set(
+            target.state.config.id,
+            this.toWriteFailure(target.state.config.id, relativePath, error, volumeId)
+          );
+          break;
+        }
+      }
+    }
   }
 
   private async reconcileVolumeBlocks(volumeId: string): Promise<void> {

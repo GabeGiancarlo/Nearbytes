@@ -348,4 +348,91 @@ describe('MultiRootStorageBackend', () => {
 
     await rm(dir, { recursive: true, force: true });
   });
+
+  it('backfills historical events and referenced blocks when a new destination is added', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'nearbytes-mr-'));
+    const mainRoot = join(dir, 'main');
+    const backupRoot = join(dir, 'backup');
+    await mkdir(mainRoot, { recursive: true });
+    await mkdir(backupRoot, { recursive: true });
+
+    const keyHex = 'e'.repeat(130);
+    const blockHash = 'f'.repeat(64);
+    const config = createConfig({
+      mainPath: mainRoot,
+      sources: [
+        {
+          id: 'src-main',
+          provider: 'local',
+          path: mainRoot,
+          enabled: true,
+          writable: true,
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
+        },
+        {
+          id: 'src-backup',
+          provider: 'dropbox',
+          path: backupRoot,
+          enabled: true,
+          writable: true,
+          reservePercent: 10,
+          opportunisticPolicy: 'drop-older-blocks',
+        },
+      ],
+      volumes: [],
+    });
+
+    await mkdir(join(mainRoot, 'blocks'), { recursive: true });
+    await writeFile(join(mainRoot, 'blocks', `${blockHash}.bin`), 'block-data', 'utf8');
+    await mkdir(join(mainRoot, 'channels', keyHex), { recursive: true });
+    await writeFile(
+      join(mainRoot, 'channels', keyHex, 'event-a.bin'),
+      JSON.stringify({
+        payload: {
+          type: 'CREATE_FILE',
+          hash: blockHash,
+        },
+      }),
+      'utf8'
+    );
+    await writeFile(
+      join(mainRoot, 'channels', keyHex, 'event-b.bin'),
+      JSON.stringify({
+        payload: {
+          type: 'DELETE_FILE',
+        },
+      }),
+      'utf8'
+    );
+
+    const storage = new MultiRootStorageBackend(config);
+    storage.updateRootsConfig({
+      ...config,
+      volumes: [
+        {
+          volumeId: keyHex,
+          destinations: [
+            {
+              sourceId: 'src-backup',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 10,
+              fullPolicy: 'block-writes',
+            },
+          ],
+        },
+      ],
+    });
+
+    await storage.reconcileConfiguredVolumes();
+
+    expect(await readFile(join(backupRoot, 'blocks', `${blockHash}.bin`), 'utf8')).toBe('block-data');
+    expect(await readFile(join(backupRoot, 'channels', keyHex, 'event-a.bin'), 'utf8')).toContain(blockHash);
+    expect(await readFile(join(backupRoot, 'channels', keyHex, 'event-b.bin'), 'utf8')).toContain('DELETE_FILE');
+
+    await rm(dir, { recursive: true, force: true });
+  });
 });

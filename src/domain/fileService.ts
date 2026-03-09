@@ -817,6 +817,7 @@ async function importSourceReferencesWithDeps(
     destinationKeyPair,
     sourceKeyPair,
     crypto,
+    storage,
     channelStorage,
     now
   );
@@ -941,6 +942,7 @@ async function importRecipientReferencesWithDeps(
       descriptor,
       item.ref.k
     );
+    await ensureDestinationBlockAvailable(storage, channelStorage, descriptor.h, destinationKeyPair.publicKey);
     const encryptedKey = await wrapFileKeyForVolume(crypto, destinationKeyPair.privateKey, fileKey);
     const createdAt = resolveImportedCreatedAt(item.createdAt, nextTimestamp);
 
@@ -1301,6 +1303,7 @@ async function importSourceBundleItems(
   destinationKeyPair: KeyPair,
   sourceKeyPair: KeyPair,
   crypto: CryptoOperations,
+  storage: StorageBackend,
   channelStorage: ChannelStorage,
   now: () => number
 ): Promise<FileMetadata[]> {
@@ -1317,6 +1320,7 @@ async function importSourceBundleItems(
       sourceKeyPair.privateKey,
       decodeWrappedKey(item.ref.x, 'Source reference wrapped key')
     );
+    await ensureDestinationBlockAvailable(storage, channelStorage, item.ref.c.h, destinationKeyPair.publicKey);
     const encryptedKey = await wrapFileKeyForVolume(crypto, destinationKeyPair.privateKey, fileKey);
     const createdAt = resolveImportedCreatedAt(item.createdAt, nextTimestamp);
 
@@ -1342,6 +1346,17 @@ async function importSourceBundleItems(
   }
 
   return imported;
+}
+
+async function ensureDestinationBlockAvailable(
+  storage: StorageBackend,
+  channelStorage: ChannelStorage,
+  blobHash: string,
+  destinationPublicKey: KeyPair['publicKey']
+): Promise<void> {
+  const dataPath = `blocks/${blobHash}.bin`;
+  const encryptedData = await storage.readFile(dataPath);
+  await channelStorage.storeEncryptedData(blobHash as Hash, encryptedData as EncryptedData, false, destinationPublicKey);
 }
 
 function nextCreateTimestamp(entries: readonly EventLogEntry[], fallbackNow: number): number {

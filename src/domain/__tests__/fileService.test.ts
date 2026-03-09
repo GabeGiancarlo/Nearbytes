@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtemp, readFile, rm } from 'fs/promises';
+import { mkdtemp, mkdir, readFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createCryptoOperations } from '../../crypto/index.js';
+import type { RootsConfig } from '../../config/roots.js';
 import { storeData } from '../../domain/operations.js';
 import { serializeEventPayload } from '../../storage/serialization.js';
 import { ChannelStorage } from '../../storage/channel.js';
 import { FilesystemStorageBackend } from '../../storage/filesystem.js';
+import { MultiRootStorageBackend } from '../../storage/multiRoot.js';
 import { loadEventLog, openVolume } from '../../domain/volume.js';
 import { createEncryptedData, EventType } from '../../types/events.js';
 import { createSecret } from '../../types/keys.js';
@@ -301,6 +303,35 @@ describe('FileService', () => {
     await cleanup();
   });
 
+  it('copies referenced encrypted blocks into new destination locations during source-reference import', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'nearbytes-file-service-mr-'));
+    const mainRoot = join(dir, 'main');
+    const backupRoot = join(dir, 'backup');
+    await mkdir(mainRoot, { recursive: true });
+    await mkdir(backupRoot, { recursive: true });
+
+    const sourceSecret = 'test:secret:source-mr-copy';
+    const destinationSecret = 'test:secret:destination-mr-copy';
+    const crypto = createCryptoOperations();
+    const now = createNow(START_TIME);
+
+    const destinationKeyPair = await crypto.deriveKeys(createSecret(destinationSecret));
+    const destinationVolumeId = Buffer.from(destinationKeyPair.publicKey).toString('hex');
+    const storage = new MultiRootStorageBackend(
+      createMultiRootConfig(mainRoot, backupRoot, [destinationVolumeId])
+    );
+    const service = createFileService({ crypto, storage, now });
+
+    const created = await service.addFile(sourceSecret, 'share.txt', Buffer.from('shared payload'));
+    const exported = await service.exportSourceReferences(sourceSecret, ['share.txt']);
+    await service.importSourceReferences(destinationSecret, exported.bundle, sourceSecret);
+
+    expect(await readFile(join(backupRoot, 'blocks', `${created.blobHash}.bin`))).toBeDefined();
+    expect((await service.getFile(destinationSecret, created.blobHash)).toString('utf8')).toBe('shared payload');
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
   it('auto-renames conflicting pasted files with Finder-style copy suffixes', async () => {
     const { service, cleanup } = await createTestService(START_TIME);
     const sourceSecret = 'test:secret:source-conflict';
@@ -421,4 +452,57 @@ async function appendLegacyVolumeKeyFile(
   } as const;
   const signature = await crypto.signPR(serializeEventPayload(payload), keyPair.privateKey);
   await channelStorage.storeEvent(volume.publicKey, { payload, signature });
+}
+
+function createMultiRootConfig(mainRoot: string, backupRoot: string, volumeIds: readonly string[]): RootsConfig {
+  return {
+    version: 2,
+    sources: [
+      {
+        id: 'src-main',
+        provider: 'local',
+        path: mainRoot,
+        enabled: true,
+        writable: true,
+        reservePercent: 5,
+        opportunisticPolicy: 'drop-older-blocks',
+      },
+      {
+        id: 'src-backup',
+        provider: 'dropbox',
+        path: backupRoot,
+        enabled: true,
+        writable: true,
+        reservePercent: 5,
+        opportunisticPolicy: 'drop-older-blocks',
+      },
+    ],
+    defaultVolume: {
+      destinations: [
+        {
+          sourceId: 'src-main',
+          enabled: true,
+          storeEvents: true,
+          storeBlocks: true,
+          copySourceBlocks: true,
+          reservePercent: 5,
+          fullPolicy: 'block-writes',
+        },
+      ],
+    },
+    volumes: volumeIds.map((volumeId) => ({
+      volumeId,
+      destinations: [
+        {
+          sourceId: 'src-backup',
+          enabled: true,
+          storeEvents: true,
+          storeBlocks: true,
+          copySourceBlocks: true,
+          reservePercent: 5,
+          fullPolicy: 'block-writes',
+        },
+      ],
+    })),
+  };
 }
