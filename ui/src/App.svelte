@@ -75,6 +75,7 @@
 
   const VOLUME_MOUNTS_KEY = 'nearbytes-volume-mounts-v1';
   const SOURCE_DISCOVERY_UI_KEY = 'nearbytes-source-discovery-ui-v1';
+  const UI_STATE_SHADOW_KEY = 'nearbytes-ui-state-shadow-v1';
   const FILE_SECRET_PREFIX = 'nb-file-secret:v1:';
   const WORKSPACE_DIVIDER_WIDTH = 14;
   const WORKSPACE_FILE_PANE_MIN_WIDTH = 360;
@@ -90,6 +91,7 @@
   type PersistedUiState = {
     volumeMounts?: unknown;
     sourceDiscovery?: unknown;
+    savedAt?: unknown;
   };
 
   type PersistedSourceDiscoveryUiState = {
@@ -284,6 +286,13 @@
 
   function loadVolumeMounts(): VolumeMount[] {
     try {
+      const shadowState = loadPersistedUiStateLocally();
+      if (Array.isArray(shadowState.volumeMounts)) {
+        const shadowMounts = normalizeMounts(shadowState.volumeMounts);
+        if (shadowMounts.length > 0) {
+          return shadowMounts;
+        }
+      }
       const raw = localStorage.getItem(VOLUME_MOUNTS_KEY);
       if (!raw) return [createMount()];
       const mounts = normalizeMounts(JSON.parse(raw));
@@ -499,6 +508,10 @@
 
   function loadPersistedSourceDiscovery(): PersistedSourceDiscoveryUiState {
     try {
+      const shadowState = loadPersistedUiStateLocally();
+      if (shadowState.sourceDiscovery !== undefined) {
+        return normalizePersistedSourceDiscovery(shadowState.sourceDiscovery);
+      }
       const raw = localStorage.getItem(SOURCE_DISCOVERY_UI_KEY);
       if (!raw) {
         return {
@@ -522,6 +535,60 @@
       localStorage.setItem(SOURCE_DISCOVERY_UI_KEY, JSON.stringify(state));
     } catch {
       // ignore
+    }
+  }
+
+  function normalizePersistedUiState(input: unknown): PersistedUiState {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      return {};
+    }
+    const candidate = input as PersistedUiState;
+    return {
+      volumeMounts: candidate.volumeMounts,
+      sourceDiscovery: candidate.sourceDiscovery,
+      savedAt: typeof candidate.savedAt === 'number' && Number.isFinite(candidate.savedAt) ? candidate.savedAt : 0,
+    };
+  }
+
+  function loadPersistedUiStateLocally(): PersistedUiState {
+    try {
+      const raw = localStorage.getItem(UI_STATE_SHADOW_KEY);
+      if (!raw) {
+        return {};
+      }
+      return normalizePersistedUiState(JSON.parse(raw));
+    } catch {
+      return {};
+    }
+  }
+
+  function persistedUiStateTimestamp(input: PersistedUiState | null | undefined): number {
+    return typeof input?.savedAt === 'number' && Number.isFinite(input.savedAt) ? input.savedAt : 0;
+  }
+
+  function choosePreferredPersistedUiState(
+    desktopState: PersistedUiState | null | undefined,
+    localState: PersistedUiState | null | undefined
+  ): PersistedUiState {
+    const normalizedDesktop = normalizePersistedUiState(desktopState);
+    const normalizedLocal = normalizePersistedUiState(localState);
+    if (persistedUiStateTimestamp(normalizedLocal) > persistedUiStateTimestamp(normalizedDesktop)) {
+      return normalizedLocal;
+    }
+    return normalizedDesktop;
+  }
+
+  function persistUiStateLocally(state: PersistedUiState): void {
+    try {
+      localStorage.setItem(UI_STATE_SHADOW_KEY, JSON.stringify(state));
+    } catch {
+      // ignore
+    }
+    if (state.volumeMounts !== undefined) {
+      persistVolumeMounts(normalizeMounts(state.volumeMounts));
+    }
+    if (state.sourceDiscovery !== undefined) {
+      persistSourceDiscoveryLocally(normalizePersistedSourceDiscovery(state.sourceDiscovery));
     }
   }
 
@@ -1130,7 +1197,11 @@
     activeChatIdentityId = loadActiveIdentityId();
     volumeChatIdentityAssignments = loadVolumeIdentityAssignments();
     identityHydrated = true;
-    const localDiscoveryState = loadPersistedSourceDiscovery();
+    const localUiState = loadPersistedUiStateLocally();
+    const localDiscoveryState =
+      localUiState.sourceDiscovery !== undefined
+        ? normalizePersistedSourceDiscovery(localUiState.sourceDiscovery)
+        : loadPersistedSourceDiscovery();
     latestSourceDiscovery = localDiscoveryState.latestResult;
     latestSourceDiscoveryRunKey = localDiscoveryState.latestRunKey;
     lastAcknowledgedSourceDiscoveryRunKey = localDiscoveryState.lastAcknowledgedRunKey;
@@ -1172,14 +1243,14 @@
 
     void (async () => {
       try {
-        const nextState = await bridge.loadUiState();
+        const nextState = choosePreferredPersistedUiState(await bridge.loadUiState(), loadPersistedUiStateLocally());
         const hasPersistedMounts = Object.prototype.hasOwnProperty.call(nextState ?? {}, 'volumeMounts');
-        const nextMounts = normalizeMounts(nextState?.volumeMounts);
+        const nextMounts = normalizeMounts(nextState.volumeMounts);
         if (hasPersistedMounts) {
           mounts = nextMounts.length > 0 ? nextMounts : [createMount()];
           activeMountId = preferredActiveMountId(mounts);
         }
-        const discoveryState = normalizePersistedSourceDiscovery(nextState?.sourceDiscovery);
+        const discoveryState = normalizePersistedSourceDiscovery(nextState.sourceDiscovery);
         latestSourceDiscovery = discoveryState.latestResult;
         latestSourceDiscoveryRunKey = discoveryState.latestRunKey;
         lastAcknowledgedSourceDiscoveryRunKey = discoveryState.lastAcknowledgedRunKey;
@@ -1354,7 +1425,9 @@
     const payload: PersistedUiState = {
       volumeMounts: snapshotVolumeMounts(mounts),
       sourceDiscovery: sourceDiscoveryState,
+      savedAt: Date.now(),
     };
+    persistUiStateLocally(payload);
     const bridge = getDesktopBridge();
     const persistTimer = setTimeout(() => {
       if (bridge && typeof bridge.saveUiState === 'function') {
@@ -1363,12 +1436,42 @@
         });
         return;
       }
-      persistVolumeMounts(mounts);
-      persistSourceDiscoveryLocally(sourceDiscoveryState);
+      persistUiStateLocally(payload);
     }, 120);
 
     return () => {
       clearTimeout(persistTimer);
+    };
+  });
+
+  onMount(() => {
+    const flushPersistedUiState = () => {
+      if (!persistedUiStateReady) {
+        return;
+      }
+      const payload: PersistedUiState = {
+        volumeMounts: snapshotVolumeMounts(mounts),
+        sourceDiscovery: {
+          lastAcknowledgedRunKey: lastAcknowledgedSourceDiscoveryRunKey,
+          latestRunKey: latestSourceDiscoveryRunKey,
+          latestResult: latestSourceDiscovery,
+        },
+        savedAt: Date.now(),
+      };
+      persistUiStateLocally(payload);
+      const bridge = getDesktopBridge();
+      if (bridge && typeof bridge.saveUiState === 'function') {
+        void bridge.saveUiState(payload).catch((error) => {
+          console.warn('Failed to flush desktop UI state:', error);
+        });
+      }
+    };
+
+    window.addEventListener('beforeunload', flushPersistedUiState);
+    window.addEventListener('pagehide', flushPersistedUiState);
+    return () => {
+      window.removeEventListener('beforeunload', flushPersistedUiState);
+      window.removeEventListener('pagehide', flushPersistedUiState);
     };
   });
 
