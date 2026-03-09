@@ -36,9 +36,14 @@ export async function readDesktopUiState(): Promise<DesktopUiState> {
 }
 
 export async function writeDesktopUiState(nextState: DesktopUiState): Promise<void> {
+  const currentState = await readDesktopUiState();
+  const mergedState: DesktopUiState = {
+    ...currentState,
+    ...nextState,
+  };
   const filePath = uiStatePath();
   const tempPath = `${filePath}.tmp`;
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(tempPath, JSON.stringify(nextState, null, 2), 'utf8');
+  await writeFile(tempPath, JSON.stringify(mergedState, null, 2), 'utf8');
   await rename(tempPath, filePath);
 }

@@ -100,6 +100,8 @@
     latestResult: ReconcileSourcesResponse | null;
   };
 
+  type PersistedDiscoveryResult = Pick<ReconcileSourcesResponse, 'runKey' | 'changed' | 'summary' | 'items'>;
+
   type DesktopUpdaterState = {
     phase: 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'error';
     version: string;
@@ -481,6 +483,18 @@
     return candidate as ReconcileSourcesResponse;
   }
 
+  function compactDiscoveryResult(value: ReconcileSourcesResponse | null): PersistedDiscoveryResult | null {
+    if (!value) {
+      return null;
+    }
+    return {
+      runKey: value.runKey,
+      changed: value.changed,
+      summary: value.summary,
+      items: value.items,
+    };
+  }
+
   function normalizePersistedSourceDiscovery(input: unknown): PersistedSourceDiscoveryUiState {
     if (!input || typeof input !== 'object' || Array.isArray(input)) {
       return {
@@ -579,16 +593,20 @@
   }
 
   function persistUiStateLocally(state: PersistedUiState): void {
+    const mergedState = {
+      ...loadPersistedUiStateLocally(),
+      ...state,
+    };
     try {
-      localStorage.setItem(UI_STATE_SHADOW_KEY, JSON.stringify(state));
+      localStorage.setItem(UI_STATE_SHADOW_KEY, JSON.stringify(mergedState));
     } catch {
       // ignore
     }
-    if (state.volumeMounts !== undefined) {
-      persistVolumeMounts(normalizeMounts(state.volumeMounts));
+    if (mergedState.volumeMounts !== undefined) {
+      persistVolumeMounts(normalizeMounts(mergedState.volumeMounts));
     }
-    if (state.sourceDiscovery !== undefined) {
-      persistSourceDiscoveryLocally(normalizePersistedSourceDiscovery(state.sourceDiscovery));
+    if (mergedState.sourceDiscovery !== undefined) {
+      persistSourceDiscoveryLocally(normalizePersistedSourceDiscovery(mergedState.sourceDiscovery));
     }
   }
 
@@ -1417,14 +1435,8 @@
       return;
     }
 
-    const sourceDiscoveryState: PersistedSourceDiscoveryUiState = {
-      lastAcknowledgedRunKey: lastAcknowledgedSourceDiscoveryRunKey,
-      latestRunKey: latestSourceDiscoveryRunKey,
-      latestResult: latestSourceDiscovery,
-    };
     const payload: PersistedUiState = {
       volumeMounts: snapshotVolumeMounts(mounts),
-      sourceDiscovery: sourceDiscoveryState,
       savedAt: Date.now(),
     };
     persistUiStateLocally(payload);
@@ -1432,7 +1444,42 @@
     const persistTimer = setTimeout(() => {
       if (bridge && typeof bridge.saveUiState === 'function') {
         void bridge.saveUiState(payload).catch((error) => {
-          console.warn('Failed to persist desktop UI state:', error);
+          console.warn('Failed to persist desktop volume mounts:', error);
+        });
+        return;
+      }
+      persistUiStateLocally(payload);
+    }, 120);
+
+    return () => {
+      clearTimeout(persistTimer);
+    };
+  });
+
+  $effect(() => {
+    if (!persistedUiStateReady) {
+      return;
+    }
+
+    const sourceDiscoveryState: PersistedSourceDiscoveryUiState = {
+      lastAcknowledgedRunKey: lastAcknowledgedSourceDiscoveryRunKey,
+      latestRunKey: latestSourceDiscoveryRunKey,
+      latestResult: latestSourceDiscovery,
+    };
+    const payload: PersistedUiState = {
+      sourceDiscovery: {
+        lastAcknowledgedRunKey: sourceDiscoveryState.lastAcknowledgedRunKey,
+        latestRunKey: sourceDiscoveryState.latestRunKey,
+        latestResult: compactDiscoveryResult(sourceDiscoveryState.latestResult),
+      },
+      savedAt: Date.now(),
+    };
+    persistUiStateLocally(payload);
+    const bridge = getDesktopBridge();
+    const persistTimer = setTimeout(() => {
+      if (bridge && typeof bridge.saveUiState === 'function') {
+        void bridge.saveUiState(payload).catch((error) => {
+          console.warn('Failed to persist desktop source discovery state:', error);
         });
         return;
       }
@@ -1454,7 +1501,7 @@
         sourceDiscovery: {
           lastAcknowledgedRunKey: lastAcknowledgedSourceDiscoveryRunKey,
           latestRunKey: latestSourceDiscoveryRunKey,
-          latestResult: latestSourceDiscovery,
+          latestResult: compactDiscoveryResult(latestSourceDiscovery),
         },
         savedAt: Date.now(),
       };
