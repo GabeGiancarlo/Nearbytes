@@ -201,6 +201,17 @@
     }
   }
 
+  function handleComposerKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Enter') {
+      return;
+    }
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    void handleSendMessage();
+  }
+
   async function publishIdentityFromChat(identity: ConfiguredIdentity): Promise<boolean> {
     if (!auth) {
       return false;
@@ -490,6 +501,7 @@
         placeholder={activeIdentity ? 'Message' : 'Join this space with one identity to send'}
         bind:value={draftBody}
         disabled={!auth || readonlyMode || !activeIdentity}
+        onkeydown={handleComposerKeydown}
       ></textarea>
       {#if pendingAttachment}
         <div class="chat-pending-attachment">
