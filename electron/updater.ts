@@ -62,15 +62,20 @@ type StagedUpdate =
 const DESKTOP_UPDATER_EVENT = 'nearbytes-desktop:update-state';
 const DEFAULT_RELEASE_OWNER = 'GabeGiancarlo';
 const DEFAULT_RELEASE_REPO = 'Nearbytes';
+const UPDATE_RECHECK_INTERVAL_MS = 15 * 60 * 1000;
+const UPDATE_FOCUS_RECHECK_DEBOUNCE_MS = 15 * 1000;
 
 const trackedWindows = new Set<BrowserWindow>();
 
 let currentState: DesktopUpdaterState = createIdleState();
 let checkStarted = false;
+let checkInFlight = false;
 let quitListenerRegistered = false;
 let stagedUpdate: StagedUpdate | null = null;
 let relaunchAfterInstall = false;
 let installerLaunchStarted = false;
+let recheckInterval: ReturnType<typeof setInterval> | null = null;
+let lastCheckAt = 0;
 
 function createIdleState(): DesktopUpdaterState {
   return {
@@ -597,6 +602,15 @@ async function stageReleaseForCurrentPlatform(release: GithubLatestRelease): Pro
 }
 
 async function checkForUpdates(): Promise<void> {
+  if (checkInFlight) {
+    return;
+  }
+  if (stagedUpdate || currentState.phase === 'downloading' || currentState.phase === 'installing') {
+    return;
+  }
+
+  checkInFlight = true;
+  lastCheckAt = Date.now();
   emitState({
     phase: 'checking',
     version: '',
@@ -635,7 +649,19 @@ async function checkForUpdates(): Promise<void> {
       releaseUrl: latestReleasePageUrl(),
       assetName: '',
     });
+  } finally {
+    checkInFlight = false;
   }
+}
+
+function maybeCheckForUpdates(reason: 'startup' | 'focus' | 'interval'): void {
+  if (checkInFlight) {
+    return;
+  }
+  if (reason !== 'startup' && Date.now() - lastCheckAt < UPDATE_FOCUS_RECHECK_DEBOUNCE_MS) {
+    return;
+  }
+  void checkForUpdates();
 }
 
 function spawnInstallerHelper(update: StagedUpdate, relaunch: boolean): void {
@@ -681,6 +707,9 @@ export function setupAutoUpdater(window: BrowserWindow, enabled: boolean): void 
   window.on('closed', () => {
     trackedWindows.delete(window);
   });
+  window.on('focus', () => {
+    maybeCheckForUpdates('focus');
+  });
   window.webContents.once('did-finish-load', () => {
     if (!window.isDestroyed()) {
       window.webContents.send(DESKTOP_UPDATER_EVENT, currentState);
@@ -694,7 +723,12 @@ export function setupAutoUpdater(window: BrowserWindow, enabled: boolean): void 
 
   if (!checkStarted) {
     checkStarted = true;
-    void checkForUpdates();
+    if (!recheckInterval) {
+      recheckInterval = setInterval(() => {
+        maybeCheckForUpdates('interval');
+      }, UPDATE_RECHECK_INTERVAL_MS);
+    }
+    maybeCheckForUpdates('startup');
   }
 }
 
