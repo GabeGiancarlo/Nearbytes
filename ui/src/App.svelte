@@ -610,6 +610,10 @@
     }
   }
 
+  function clonePersistedUiStateForBridge(state: PersistedUiState): PersistedUiState {
+    return JSON.parse(JSON.stringify(state)) as PersistedUiState;
+  }
+
   function trimSecretPart(value: string): string {
     return value.trim();
   }
@@ -1439,11 +1443,12 @@
       volumeMounts: snapshotVolumeMounts(mounts),
       savedAt: Date.now(),
     };
+    const desktopPayload = clonePersistedUiStateForBridge(payload);
     persistUiStateLocally(payload);
     const bridge = getDesktopBridge();
     const persistTimer = setTimeout(() => {
       if (bridge && typeof bridge.saveUiState === 'function') {
-        void bridge.saveUiState(payload).catch((error) => {
+        void bridge.saveUiState(desktopPayload).catch((error) => {
           console.warn('Failed to persist desktop volume mounts:', error);
         });
         return;
@@ -1474,11 +1479,12 @@
       },
       savedAt: Date.now(),
     };
+    const desktopPayload = clonePersistedUiStateForBridge(payload);
     persistUiStateLocally(payload);
     const bridge = getDesktopBridge();
     const persistTimer = setTimeout(() => {
       if (bridge && typeof bridge.saveUiState === 'function') {
-        void bridge.saveUiState(payload).catch((error) => {
+        void bridge.saveUiState(desktopPayload).catch((error) => {
           console.warn('Failed to persist desktop source discovery state:', error);
         });
         return;
@@ -1505,10 +1511,11 @@
         },
         savedAt: Date.now(),
       };
+      const desktopPayload = clonePersistedUiStateForBridge(payload);
       persistUiStateLocally(payload);
       const bridge = getDesktopBridge();
       if (bridge && typeof bridge.saveUiState === 'function') {
-        void bridge.saveUiState(payload).catch((error) => {
+        void bridge.saveUiState(desktopPayload).catch((error) => {
           console.warn('Failed to flush desktop UI state:', error);
         });
       }

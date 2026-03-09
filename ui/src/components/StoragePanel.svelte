@@ -757,7 +757,7 @@
       return 'This rule is saved, but Nearbytes cannot write to this folder right now.';
     }
     if (canReuseOtherGuaranteedCopies(destination)) {
-      return 'This is a spare full copy. If space runs low, Nearbytes may reuse it only after another protected copy exists.';
+      return 'If space runs low, Nearbytes may delete blocks from this location, but only after another protected location already has them.';
     }
     return 'This location keeps a protected full copy.';
   }
@@ -979,10 +979,6 @@
           </p>
         </div>
         <div class="hero-actions">
-          <button type="button" class="panel-btn subtle" onclick={toggleDiscovery} disabled={discoveryLoading}>
-            <Search size={14} strokeWidth={2} />
-            <span>{discoveryOpen ? 'Hide scan' : 'Scan for folders'}</span>
-          </button>
           <button type="button" class="panel-btn primary" onclick={addSourceCard}>
             <Plus size={14} strokeWidth={2} />
             <span>Add folder</span>
@@ -1073,18 +1069,22 @@
         </section>
       {/if}
 
-      <section class="panel-section">
+      <section class="panel-section" bind:this={defaultsSectionElement}>
         <div class="section-head">
           <div>
             <p class="section-step">1. Saved storage locations</p>
-            <h3>Add folders and decide whether Nearbytes may use them</h3>
-            <p class="section-copy">
-              Nearbytes reads from every location that is turned on. A writable location may also receive new encrypted data.
-            </p>
+            <h3>One card per storage location</h3>
+            <p class="section-copy">Read incoming data, write fresh data, and choose whether new spaces keep a full copy here.</p>
           </div>
           <div class="section-metrics">
             <span class="summary-pill">{countLabel(configDraft.sources.length, 'location')} saved</span>
+            <span class="summary-pill" class:warning={!hasDurableDestination(null)}>{protectionSummary(null)}</span>
           </div>
+        </div>
+
+        <div class="protection-banner" class:warning={!hasDurableDestination(null)}>
+          <Shield size={15} strokeWidth={2} />
+          <span>{protectionHint(null)}</span>
         </div>
 
         <div class="card-grid">
@@ -1092,7 +1092,8 @@
             {@const status = sourceStatus(source.id)}
             {@const availability = locationAvailability(source)}
             {@const writeState = locationWriteState(source)}
-            <article class="location-card">
+            {@const defaultDestination = destinationFor(null, source.id)}
+            <article class="location-card" class:active={protectionTone(defaultDestination, source.id) === 'durable'}>
               <div class="card-head">
                 <div class="card-title">
                   <div class="card-icon">
@@ -1101,26 +1102,29 @@
                   <div>
                     <p class="provider-label">{formatProvider(source.provider)}</p>
                     <h4>{compactPath(source.path)}</h4>
-                    <p class="path-copy">{source.path || 'No folder selected yet'}</p>
                   </div>
                 </div>
                 <div class="card-status">
                   <span class={`status-pill tone-${availability.tone}`}>{availability.label}</span>
                   <span class={`status-pill tone-${writeState.tone}`}>{writeState.label}</span>
+                  <span class={`status-pill tone-${protectionTone(defaultDestination, source.id)}`}>{protectionLabel(defaultDestination, source.id)}</span>
                 </div>
               </div>
 
               <p class="card-copy">{locationSummary(source)}</p>
 
               <div class="button-row">
-                <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
-                  <Search size={14} strokeWidth={2} />
-                  <span>{hasSourcePath(source) ? 'Change folder' : 'Choose folder'}</span>
-                </button>
-                <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)} disabled={!hasSourcePath(source)}>
-                  <FolderOpen size={14} strokeWidth={2} />
-                  <span>Open folder</span>
-                </button>
+                {#if hasSourcePath(source)}
+                  <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
+                    <FolderOpen size={14} strokeWidth={2} />
+                    <span>Open folder</span>
+                  </button>
+                {:else}
+                  <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
+                    <Search size={14} strokeWidth={2} />
+                    <span>Choose folder</span>
+                  </button>
+                {/if}
               </div>
 
               <div class="toggle-list">
@@ -1131,8 +1135,8 @@
                     onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)}
                   />
                   <div>
-                    <span class="toggle-title">Use this location</span>
-                    <span class="toggle-copy">Nearbytes can read existing data here.</span>
+                    <span class="toggle-title">Read incoming data</span>
+                    <span class="toggle-copy">Nearbytes can read data that appears in this folder.</span>
                   </div>
                 </label>
                 <label class="toggle-row">
@@ -1142,11 +1146,54 @@
                     onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)}
                   />
                   <div>
-                    <span class="toggle-title">Allow new data here</span>
+                    <span class="toggle-title">Write fresh data</span>
                     <span class="toggle-copy">Nearbytes may save new encrypted data to this location.</span>
                   </div>
                 </label>
+                <label class="toggle-row large-toggle">
+                  <input
+                    type="checkbox"
+                    checked={keepsFullCopy(defaultDestination)}
+                    onchange={(event) => setKeepFullCopy(null, source.id, (event.currentTarget as HTMLInputElement).checked)}
+                  />
+                  <div>
+                    <span class="toggle-title">Keep new spaces here</span>
+                    <span class="toggle-copy">Full history and file data.</span>
+                  </div>
+                </label>
               </div>
+
+              <p class="card-copy">{copyHelpText(null, source)}</p>
+
+              {#if keepsFullCopy(defaultDestination)}
+                <div class="field-grid">
+                  <label class="field-block">
+                    <span>Keep free</span>
+                    <select
+                      class="panel-input"
+                      value={String(destinationReservePercent(defaultDestination))}
+                      onchange={(event) =>
+                        updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
+                    >
+                      {#each RESERVE_OPTIONS as option}
+                        <option value={option}>{formatPercent(option)}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label class="field-block">
+                    <span>If space runs low</span>
+                    <select
+                      class="panel-input"
+                      value={defaultDestination?.fullPolicy ?? 'block-writes'}
+                      onchange={(event) =>
+                        updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
+                    >
+                      <option value="block-writes">Never delete this protected copy</option>
+                      <option value="drop-older-blocks">Delete blocks here after another protected copy exists</option>
+                    </select>
+                  </label>
+                </div>
+              {/if}
 
               <div class="fact-row">
                 <span>{status?.availableBytes !== undefined ? `${formatSize(status.availableBytes)} free` : 'Free space unknown'}</span>
@@ -1159,9 +1206,19 @@
 
               <details class="details-card">
                 <summary>Advanced location settings</summary>
+                {#if hasSourcePath(source)}
+                  <div class="button-row">
+                    <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
+                      <Search size={14} strokeWidth={2} />
+                      <span>Use different folder</span>
+                    </button>
+                  </div>
+                  <p class="muted-copy compact-note">This does not move data already stored here.</p>
+                  <p class="mono-copy">{source.path}</p>
+                {/if}
                 <div class="field-grid">
                   <label class="field-block">
-                    <span>Keep this much free space</span>
+                    <span>Keep free</span>
                     <select
                       class="panel-input"
                       value={String(sourceReservePercent(source))}
@@ -1174,15 +1231,15 @@
                     </select>
                   </label>
                   <label class="field-block">
-                    <span>If the drive still fills up</span>
+                    <span>If this location fills up</span>
                     <select
                       class="panel-input"
                       value={source.opportunisticPolicy}
                       onchange={(event) =>
                         updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
                     >
-                      <option value="block-writes">Stop saving new data here</option>
-                      <option value="drop-older-blocks">Reuse copies protected elsewhere</option>
+                      <option value="block-writes">Stop writing new data here</option>
+                      <option value="drop-older-blocks">Delete blocks already protected somewhere else</option>
                     </select>
                   </label>
                 </div>
@@ -1278,92 +1335,10 @@
         </div>
       </section>
 
-      <section class="panel-section" bind:this={defaultsSectionElement}>
-        <div class="section-head">
-          <div>
-            <p class="section-step">2. Default protection for new spaces</p>
-            <h3>Choose which locations keep a protected copy by default</h3>
-            <p class="section-copy">
-              These rules apply when you open a new space. You can still save different rules for a specific space later.
-            </p>
-          </div>
-          <div class="section-metrics">
-            <span class="summary-pill" class:warning={!hasDurableDestination(null)}>{protectionSummary(null)}</span>
-          </div>
-        </div>
-
-        <div class="protection-banner" class:warning={!hasDurableDestination(null)}>
-          <Shield size={15} strokeWidth={2} />
-          <span>{protectionHint(null)}</span>
-        </div>
-
-        <div class="rule-grid">
-          {#each configDraft.sources as source (source.id)}
-            {@const destination = destinationFor(null, source.id)}
-            <article class="rule-card" class:active={protectionTone(destination, source.id) === 'durable'}>
-              <div class="card-head">
-                <div class="card-title">
-                  <div>
-                    <p class="provider-label">{formatProvider(source.provider)}</p>
-                    <h4>{compactPath(source.path)}</h4>
-                    <p class="path-copy">{source.path || 'No folder selected yet'}</p>
-                  </div>
-                </div>
-                <span class={`status-pill tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
-              </div>
-
-              <label class="toggle-row large-toggle">
-                <input
-                  type="checkbox"
-                  checked={keepsFullCopy(destination)}
-                  onchange={(event) => setKeepFullCopy(null, source.id, (event.currentTarget as HTMLInputElement).checked)}
-                />
-                <div>
-                  <span class="toggle-title">Keep a full copy of new spaces here</span>
-                  <span class="toggle-copy">This includes encrypted history and file data for new spaces.</span>
-                </div>
-              </label>
-
-              <p class="card-copy">{copyHelpText(null, source)}</p>
-
-              {#if keepsFullCopy(destination)}
-                <div class="field-grid">
-                  <label class="field-block">
-                    <span>Keep this much free space</span>
-                    <select
-                      class="panel-input"
-                      value={String(destinationReservePercent(destination))}
-                      onchange={(event) =>
-                        updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
-                    >
-                      {#each RESERVE_OPTIONS as option}
-                        <option value={option}>{formatPercent(option)}</option>
-                      {/each}
-                    </select>
-                  </label>
-                  <label class="field-block">
-                    <span>If this protected copy is taking too much space</span>
-                    <select
-                      class="panel-input"
-                      value={destination?.fullPolicy ?? 'block-writes'}
-                      onchange={(event) =>
-                        updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
-                    >
-                      <option value="block-writes">Keep this copy</option>
-                      <option value="drop-older-blocks">Use another protected copy first</option>
-                    </select>
-                  </label>
-                </div>
-              {/if}
-            </article>
-          {/each}
-        </div>
-      </section>
-
       <section class="panel-section" bind:this={manualDiscoverySectionElement}>
         <div class="section-head">
           <div>
-            <p class="section-step">3. Find existing Nearbytes folders</p>
+            <p class="section-step">2. Find existing Nearbytes folders</p>
             <h3>Scan Dropbox, iCloud, OneDrive, and other folders for Nearbytes data</h3>
             <p class="section-copy">
               Use this when you already have Nearbytes data somewhere else and want to add it to your saved locations.
@@ -1427,10 +1402,6 @@
           </p>
         </div>
         <div class="hero-actions">
-          <button type="button" class="panel-btn subtle" onclick={toggleDiscovery} disabled={discoveryLoading}>
-            <Search size={14} strokeWidth={2} />
-            <span>{discoveryOpen ? 'Hide scan' : 'Scan for folders'}</span>
-          </button>
           <button type="button" class="panel-btn primary" onclick={addSourceCard}>
             <Plus size={14} strokeWidth={2} />
             <span>Add folder</span>
@@ -1493,7 +1464,6 @@
                     <div>
                       <p class="provider-label">{formatProvider(source.provider)}</p>
                       <h4>{compactPath(source.path)}</h4>
-                      <p class="path-copy">{source.path || 'No folder selected yet'}</p>
                     </div>
                   </div>
                   <div class="card-status">
@@ -1510,8 +1480,8 @@
                     onchange={(event) => setKeepFullCopy(volumeId, source.id, (event.currentTarget as HTMLInputElement).checked)}
                   />
                   <div>
-                    <span class="toggle-title">Keep a full copy of this space here</span>
-                    <span class="toggle-copy">This includes encrypted history and file data for the current space.</span>
+                    <span class="toggle-title">Keep this space here</span>
+                    <span class="toggle-copy">Full history and file data.</span>
                   </div>
                 </label>
 
@@ -1520,7 +1490,7 @@
                 {#if keepsFullCopy(destination)}
                   <div class="field-grid">
                     <label class="field-block">
-                      <span>Keep this much free space</span>
+                      <span>Keep free</span>
                       <select
                         class="panel-input"
                         value={String(destinationReservePercent(destination))}
@@ -1533,34 +1503,38 @@
                       </select>
                     </label>
                     <label class="field-block">
-                      <span>If this protected copy is taking too much space</span>
+                      <span>If space runs low</span>
                       <select
                         class="panel-input"
                         value={destination?.fullPolicy ?? 'block-writes'}
                         onchange={(event) =>
                           updateDestinationField(volumeId, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
                       >
-                        <option value="block-writes">Keep this copy</option>
-                        <option value="drop-older-blocks">Use another protected copy first</option>
+                        <option value="block-writes">Never delete this protected copy</option>
+                        <option value="drop-older-blocks">Delete blocks here after another protected copy exists</option>
                       </select>
                     </label>
                   </div>
                 {/if}
 
                 <details class="details-card">
-                  <summary>Manage this storage location</summary>
+                  <summary>Location settings</summary>
                   <p class="muted-copy">These settings apply to all spaces, not just the one currently open.</p>
 
                   <div class="button-row">
-                    <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
-                      <Search size={14} strokeWidth={2} />
-                      <span>{hasSourcePath(source) ? 'Change folder' : 'Choose folder'}</span>
-                    </button>
                     <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)} disabled={!hasSourcePath(source)}>
                       <FolderOpen size={14} strokeWidth={2} />
                       <span>Open folder</span>
                     </button>
+                    <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
+                      <Search size={14} strokeWidth={2} />
+                      <span>{hasSourcePath(source) ? 'Use different folder' : 'Choose folder'}</span>
+                    </button>
                   </div>
+                  {#if hasSourcePath(source)}
+                    <p class="muted-copy compact-note">Using a different folder does not move data already stored here.</p>
+                    <p class="mono-copy">{source.path}</p>
+                  {/if}
 
                   <div class="toggle-list">
                     <label class="toggle-row">
@@ -1570,8 +1544,8 @@
                         onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)}
                       />
                       <div>
-                        <span class="toggle-title">Use this location</span>
-                        <span class="toggle-copy">Nearbytes can read existing data here.</span>
+                        <span class="toggle-title">Read incoming data</span>
+                        <span class="toggle-copy">Nearbytes can read data that appears in this folder.</span>
                       </div>
                     </label>
                     <label class="toggle-row">
@@ -1581,7 +1555,7 @@
                         onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)}
                       />
                       <div>
-                        <span class="toggle-title">Allow new data here</span>
+                        <span class="toggle-title">Write fresh data</span>
                         <span class="toggle-copy">Nearbytes may save new encrypted data to this location.</span>
                       </div>
                     </label>
@@ -1589,7 +1563,7 @@
 
                   <div class="field-grid">
                     <label class="field-block">
-                      <span>Keep this much free space</span>
+                      <span>Keep free</span>
                       <select
                         class="panel-input"
                         value={String(sourceReservePercent(source))}
@@ -1602,15 +1576,15 @@
                       </select>
                     </label>
                     <label class="field-block">
-                      <span>If the drive still fills up</span>
+                      <span>If this location fills up</span>
                       <select
                         class="panel-input"
                         value={source.opportunisticPolicy}
                         onchange={(event) =>
                           updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
                       >
-                        <option value="block-writes">Stop saving new data here</option>
-                        <option value="drop-older-blocks">Reuse copies protected elsewhere</option>
+                        <option value="block-writes">Stop writing new data here</option>
+                        <option value="drop-older-blocks">Delete blocks already protected somewhere else</option>
                       </select>
                     </label>
                   </div>
@@ -1631,17 +1605,23 @@
           </div>
         </section>
 
-        {#if discoveryOpen}
-          <section class="panel-section" bind:this={manualDiscoverySectionElement}>
-            <div class="section-head">
-              <div>
-                <p class="section-step">Scan for folders</p>
-                <h3>Add an existing Nearbytes folder to this space</h3>
-                <p class="section-copy">
-                  If this space already exists in another synced folder, you can add that location here.
-                </p>
-              </div>
+        <section class="panel-section" bind:this={manualDiscoverySectionElement}>
+          <div class="section-head">
+            <div>
+              <p class="section-step">Scan for folders</p>
+              <h3>Add an existing Nearbytes folder to this space</h3>
+              <p class="section-copy">
+                If this space already exists in another synced folder, you can add that location here.
+              </p>
             </div>
+            <div class="section-metrics">
+              <button type="button" class="panel-btn subtle compact" onclick={toggleDiscovery} disabled={discoveryLoading}>
+                <Search size={14} strokeWidth={2} />
+                <span>{discoveryOpen ? 'Hide results' : 'Scan now'}</span>
+              </button>
+            </div>
+          </div>
+          {#if discoveryOpen}
             {#if discoveryLoading}
               <p class="muted-copy">Scanning folders...</p>
             {:else if sourceSuggestionRows().length === 0}
@@ -1667,8 +1647,8 @@
                 {/each}
               </div>
             {/if}
-          </section>
-        {/if}
+          {/if}
+        </section>
       {/if}
     {/if}
   </section>
@@ -1690,10 +1670,10 @@
     --warn: rgba(254, 240, 138, 0.96);
     --danger: rgba(254, 202, 202, 0.96);
     display: grid;
-    gap: 1rem;
+    gap: 0.85rem;
     width: 100%;
     min-height: 0;
-    padding: 1rem;
+    padding: 0.9rem;
     overflow: auto;
     border: 1px solid var(--panel-border);
     border-radius: 22px;
@@ -1728,8 +1708,8 @@
   }
 
   .hero {
-    gap: 1rem;
-    padding: 1rem;
+    gap: 0.85rem;
+    padding: 0.9rem;
     border-radius: 20px;
     border: 1px solid var(--panel-soft-border);
     background: rgba(8, 18, 34, 0.72);
@@ -1740,7 +1720,7 @@
   .scan-copy,
   .usage-main {
     display: grid;
-    gap: 0.35rem;
+    gap: 0.28rem;
   }
 
   .eyebrow,
@@ -1777,17 +1757,17 @@
   }
 
   h2 {
-    font-size: 1.32rem;
+    font-size: 1.22rem;
     line-height: 1.25;
   }
 
   h3 {
-    font-size: 1rem;
+    font-size: 0.96rem;
     line-height: 1.35;
   }
 
   h4 {
-    font-size: 0.96rem;
+    font-size: 0.92rem;
   }
 
   .hero-text,
@@ -1799,8 +1779,8 @@
   .scan-path,
   .muted-copy {
     color: var(--text-soft);
-    font-size: 0.84rem;
-    line-height: 1.45;
+    font-size: 0.8rem;
+    line-height: 1.4;
   }
 
   .warning-copy {
@@ -1823,22 +1803,23 @@
   .scan-card,
   .scan-group {
     display: grid;
-    gap: 0.9rem;
-    border-radius: 18px;
+    gap: 0.75rem;
+    min-width: 0;
+    border-radius: 16px;
     border: 1px solid var(--panel-soft-border);
     background: rgba(7, 15, 29, 0.56);
   }
 
   .panel-section,
   .details-card {
-    padding: 0.95rem;
+    padding: 0.82rem;
   }
 
   .location-card,
   .rule-card,
   .scan-card,
   .scan-group {
-    padding: 1rem;
+    padding: 0.85rem;
   }
 
   .card-grid,
@@ -1846,7 +1827,7 @@
   .scan-card-list,
   .scan-group-list {
     display: grid;
-    gap: 0.9rem;
+    gap: 0.75rem;
   }
 
   .card-grid,
@@ -1859,6 +1840,7 @@
     background: var(--card-bg);
   }
 
+  .location-card.active,
   .rule-card.active {
     border-color: rgba(45, 212, 191, 0.26);
     background:
@@ -1868,8 +1850,19 @@
 
   .card-title {
     display: flex;
+    flex: 1 1 0;
     gap: 0.8rem;
     align-items: flex-start;
+    min-width: 0;
+  }
+
+  .card-title > div,
+  .card-head,
+  .card-status,
+  .toggle-row > div,
+  .usage-main,
+  .field-block {
+    min-width: 0;
   }
 
   .card-icon {
@@ -1890,13 +1883,14 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 28px;
-    padding: 0 0.78rem;
+    min-height: 26px;
+    max-width: 100%;
+    padding: 0 0.68rem;
     border-radius: 999px;
     border: 1px solid rgba(96, 165, 250, 0.18);
     background: rgba(12, 23, 41, 0.84);
     color: rgba(219, 234, 254, 0.92);
-    font-size: 0.73rem;
+    font-size: 0.7rem;
     font-weight: 600;
     white-space: nowrap;
   }
@@ -1926,17 +1920,17 @@
 
   .panel-btn,
   :global(.panel-btn) {
-    min-height: 36px;
+    min-height: 34px;
     border-radius: 12px;
     border: 1px solid rgba(96, 165, 250, 0.22);
     background: rgba(12, 24, 43, 0.84);
     color: rgba(241, 245, 249, 0.94);
-    padding: 0 0.92rem;
+    padding: 0 0.82rem;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 0.48rem;
-    font-size: 0.82rem;
+    font-size: 0.79rem;
     font-weight: 600;
     cursor: pointer;
     transition:
@@ -1971,8 +1965,8 @@
 
   .panel-btn.compact,
   :global(.panel-btn.compact) {
-    min-height: 32px;
-    padding: 0 0.72rem;
+    min-height: 30px;
+    padding: 0 0.66rem;
   }
 
   .panel-btn.danger,
@@ -1988,10 +1982,10 @@
     display: flex;
     gap: 0.6rem;
     align-items: flex-start;
-    border-radius: 14px;
-    padding: 0.82rem 0.94rem;
-    font-size: 0.84rem;
-    line-height: 1.45;
+    border-radius: 12px;
+    padding: 0.72rem 0.84rem;
+    font-size: 0.8rem;
+    line-height: 1.4;
   }
 
   .panel-error {
@@ -2022,16 +2016,16 @@
   .usage-list,
   .danger-block {
     display: grid;
-    gap: 0.8rem;
+    gap: 0.68rem;
   }
 
   .toggle-row {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 0.75rem;
+    gap: 0.65rem;
     align-items: start;
-    padding: 0.85rem 0.9rem;
-    border-radius: 14px;
+    padding: 0.72rem 0.78rem;
+    border-radius: 12px;
     border: 1px solid rgba(96, 165, 250, 0.14);
     background: rgba(12, 23, 41, 0.54);
   }
@@ -2049,12 +2043,12 @@
 
   .toggle-row > div {
     display: grid;
-    gap: 0.18rem;
+    gap: 0.12rem;
   }
 
   .toggle-title {
     color: var(--text-main);
-    font-size: 0.86rem;
+    font-size: 0.82rem;
     font-weight: 600;
   }
 
@@ -2063,8 +2057,8 @@
   .usage-meta,
   .subheading {
     color: var(--text-soft);
-    font-size: 0.8rem;
-    line-height: 1.45;
+    font-size: 0.77rem;
+    line-height: 1.35;
   }
 
   .fact-row {
@@ -2086,29 +2080,29 @@
 
   .field-grid {
     display: grid;
-    gap: 0.8rem;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.65rem;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   }
 
   .field-block {
     display: grid;
-    gap: 0.4rem;
+    gap: 0.3rem;
   }
 
   .field-block > span {
     color: rgba(224, 242, 254, 0.92);
-    font-size: 0.79rem;
+    font-size: 0.75rem;
     font-weight: 600;
   }
 
   .panel-input {
-    min-height: 38px;
-    border-radius: 12px;
+    min-height: 34px;
+    border-radius: 10px;
     border: 1px solid rgba(96, 165, 250, 0.18);
     background: rgba(10, 18, 31, 0.92);
     color: var(--text-main);
-    padding: 0 0.8rem;
-    font-size: 0.83rem;
+    padding: 0 0.68rem;
+    font-size: 0.78rem;
   }
 
   .panel-input:disabled {
@@ -2160,11 +2154,22 @@
 
   .merge-box {
     display: grid;
-    gap: 0.8rem;
-    padding: 0.9rem;
-    border-radius: 14px;
+    gap: 0.7rem;
+    padding: 0.78rem;
+    border-radius: 12px;
     border: 1px solid rgba(96, 165, 250, 0.14);
     background: rgba(12, 23, 41, 0.54);
+  }
+
+  .path-copy,
+  .scan-path {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .compact-note {
+    font-size: 0.76rem;
+    margin-top: -0.12rem;
   }
 
   .minor-details {
