@@ -3379,7 +3379,7 @@
             Joining is an explicit per-volume local choice.
           </p>
           <p class="identity-row-note">
-            Publish writes a signed <code>DECLARE_IDENTITY</code> event into the current volume log.
+            Publish writes the signed public profile into the identity channel and syncs the latest snapshot into this volume.
           </p>
 
           {#if identityManagerError}
@@ -4202,12 +4202,6 @@
     margin: 0;
     font-size: 0.78rem;
     color: rgba(186, 230, 253, 0.68);
-  }
-
-  .identity-row-note code {
-    font-family: 'Monaco', 'Menlo', monospace;
-    font-size: 0.74rem;
-    color: rgba(224, 242, 254, 0.9);
   }
 
   .identity-row-banner {

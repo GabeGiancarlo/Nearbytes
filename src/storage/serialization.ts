@@ -323,6 +323,7 @@ export function deserializeEventPayload(data: Uint8Array): EventPayload {
     toFileName: metadata.toFileName,
     renamedAt: metadata.renamedAt,
     authorPublicKey: metadata.authorPublicKey,
+    protocol: metadata.protocol,
     record: metadata.record,
     message: metadata.message,
     publishedAt: metadata.publishedAt,
@@ -455,6 +456,49 @@ function serializeMetadata(payload: EventPayload): Uint8Array {
     return metadata;
   }
 
+  if (payload.type === EventType.APP_RECORD) {
+    const metadataVersion = 1;
+    if (!payload.authorPublicKey || payload.authorPublicKey.trim().length === 0) {
+      throw new Error('Missing authorPublicKey for APP_RECORD metadata');
+    }
+    if (!payload.protocol || payload.protocol.trim().length === 0) {
+      throw new Error('Missing protocol for APP_RECORD metadata');
+    }
+    if (!payload.record || payload.record.trim().length === 0) {
+      throw new Error('Missing record for APP_RECORD metadata');
+    }
+    if (payload.publishedAt === undefined) {
+      throw new Error('Missing publishedAt for APP_RECORD metadata');
+    }
+    assertFiniteUint(payload.publishedAt, 'publishedAt');
+
+    const authorBytes = new TextEncoder().encode(payload.authorPublicKey);
+    const protocolBytes = new TextEncoder().encode(payload.protocol);
+    const recordBytes = new TextEncoder().encode(payload.record);
+    const authorLength = new Uint8Array(4);
+    const protocolLength = new Uint8Array(4);
+    const recordLength = new Uint8Array(4);
+    new DataView(authorLength.buffer).setUint32(0, authorBytes.length, false);
+    new DataView(protocolLength.buffer).setUint32(0, protocolBytes.length, false);
+    new DataView(recordLength.buffer).setUint32(0, recordBytes.length, false);
+
+    const metadata = new Uint8Array(
+      1 + 8 + 4 + authorBytes.length + 4 + protocolBytes.length + 4 + recordBytes.length
+    );
+    const view = new DataView(metadata.buffer, metadata.byteOffset, metadata.byteLength);
+    metadata[0] = metadataVersion;
+    writeUint64(view, 1, payload.publishedAt);
+    metadata.set(authorLength, 1 + 8);
+    metadata.set(authorBytes, 1 + 8 + 4);
+    const protocolOffset = 1 + 8 + 4 + authorBytes.length;
+    metadata.set(protocolLength, protocolOffset);
+    metadata.set(protocolBytes, protocolOffset + 4);
+    const recordOffset = protocolOffset + 4 + protocolBytes.length;
+    metadata.set(recordLength, recordOffset);
+    metadata.set(recordBytes, recordOffset + 4);
+    return metadata;
+  }
+
   return new Uint8Array(0);
 }
 
@@ -471,6 +515,7 @@ function deserializeMetadata(
   toFileName?: string;
   renamedAt?: number;
   authorPublicKey?: string;
+  protocol?: string;
   record?: string;
   message?: string;
   publishedAt?: number;
@@ -619,6 +664,43 @@ function deserializeMetadata(
       message: type === EventType.CHAT_MESSAGE ? nestedPayload : undefined,
       publishedAt,
       bytesConsumed: 1 + 8 + 4 + authorLength + 4 + nestedLength,
+    };
+  }
+
+  if (type === EventType.APP_RECORD) {
+    if (data.length < offset + 1 + 8 + 4) {
+      throw new Error('Invalid event payload: APP_RECORD metadata too short');
+    }
+    const publishedAt = readUint64(
+      new DataView(data.buffer, data.byteOffset + offset + 1, 8),
+      0,
+      'publishedAt'
+    );
+    const authorLength = new DataView(data.buffer, data.byteOffset + offset + 1 + 8, 4).getUint32(0, false);
+    const authorOffset = offset + 1 + 8 + 4;
+    if (data.length < authorOffset + authorLength + 4) {
+      throw new Error('Invalid event payload: APP_RECORD authorPublicKey length mismatch');
+    }
+    const authorBytes = data.slice(authorOffset, authorOffset + authorLength);
+    const protocolLengthOffset = authorOffset + authorLength;
+    const protocolLength = new DataView(data.buffer, data.byteOffset + protocolLengthOffset, 4).getUint32(0, false);
+    const protocolOffset = protocolLengthOffset + 4;
+    if (data.length < protocolOffset + protocolLength + 4) {
+      throw new Error('Invalid event payload: APP_RECORD protocol length mismatch');
+    }
+    const protocolBytes = data.slice(protocolOffset, protocolOffset + protocolLength);
+    const recordLengthOffset = protocolOffset + protocolLength;
+    const recordLength = new DataView(data.buffer, data.byteOffset + recordLengthOffset, 4).getUint32(0, false);
+    const recordOffset = recordLengthOffset + 4;
+    if (data.length < recordOffset + recordLength) {
+      throw new Error('Invalid event payload: APP_RECORD record length mismatch');
+    }
+    return {
+      authorPublicKey: new TextDecoder().decode(authorBytes),
+      protocol: new TextDecoder().decode(protocolBytes),
+      record: new TextDecoder().decode(data.slice(recordOffset, recordOffset + recordLength)),
+      publishedAt,
+      bytesConsumed: 1 + 8 + 4 + authorLength + 4 + protocolLength + 4 + recordLength,
     };
   }
 

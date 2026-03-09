@@ -1,7 +1,7 @@
 import type { CryptoOperations } from '../crypto/index.js';
 import type { KeyPair, PublicKey } from '../types/keys.js';
 import { createPublicKey } from '../types/keys.js';
-import { createSignature } from '../types/events.js';
+import { createHash, createSignature } from '../types/events.js';
 import { base64UrlToBytes, bytesToBase64Url, bytesToHex, hexToBytes } from '../utils/encoding.js';
 import {
   canonicalJsonBytes,
@@ -20,6 +20,18 @@ export interface IdentityRecord {
   readonly k: string;
   readonly ts: number;
   readonly profile: IdentityProfile;
+  readonly sig: string;
+}
+
+export interface IdentitySnapshot {
+  readonly p: 'nb.identity.snapshot.v1';
+  readonly k: string;
+  readonly ts: number;
+  readonly ref: {
+    readonly channel: string;
+    readonly eventHash: string;
+  };
+  readonly record: IdentityRecord;
   readonly sig: string;
 }
 
@@ -105,8 +117,48 @@ export async function verifyChatMessage(
   );
 }
 
+export async function createIdentitySnapshot(
+  crypto: CryptoOperations,
+  keyPair: KeyPair,
+  input: {
+    record: IdentityRecord;
+    ref: {
+      channel: string;
+      eventHash: string;
+    };
+    timestamp: number;
+  }
+): Promise<IdentitySnapshot> {
+  const unsigned = canonicalIdentitySnapshot(keyPair.publicKey, input.record, input.ref, input.timestamp);
+  const signature = await crypto.signPR(canonicalJsonBytes(unsigned as unknown as JsonValue), keyPair.privateKey);
+  return {
+    ...unsigned,
+    sig: bytesToBase64Url(signature),
+  };
+}
+
+export async function verifyIdentitySnapshot(
+  crypto: CryptoOperations,
+  snapshot: IdentitySnapshot
+): Promise<boolean> {
+  const publicKey = publicKeyFromHex(snapshot.k);
+  if (!(await verifyIdentityRecord(crypto, snapshot.record))) {
+    return false;
+  }
+  const unsigned = canonicalIdentitySnapshot(publicKey, snapshot.record, snapshot.ref, snapshot.ts);
+  return crypto.verifyPU(
+    canonicalJsonBytes(unsigned as unknown as JsonValue),
+    createSignature(base64UrlToBytes(snapshot.sig)),
+    publicKey
+  );
+}
+
 export function serializeIdentityRecord(record: IdentityRecord): string {
   return canonicalJsonString(record as unknown as JsonValue);
+}
+
+export function serializeIdentitySnapshot(snapshot: IdentitySnapshot): string {
+  return canonicalJsonString(snapshot as unknown as JsonValue);
 }
 
 export function serializeChatMessage(message: ChatMessage): string {
@@ -137,6 +189,40 @@ export function parseIdentityRecordJson(text: string): IdentityRecord | null {
     return null;
   }
   return parseIdentityRecord(parsed);
+}
+
+export function parseIdentitySnapshot(value: unknown): IdentitySnapshot {
+  const object = asObject(value, 'Identity snapshot must be an object');
+  if (object.p !== 'nb.identity.snapshot.v1') {
+    throw new Error('Unsupported identity snapshot protocol');
+  }
+  const publicKey = parsePublicKeyHex(object.k, 'Identity snapshot public key is invalid');
+  const ts = parseTimestamp(object.ts, 'Identity snapshot timestamp is invalid');
+  const ref = parseIdentitySnapshotRef(object.ref);
+  const record = parseIdentityRecord(object.record);
+  if (record.k !== publicKey) {
+    throw new Error('Identity snapshot record key does not match snapshot public key');
+  }
+  if (ref.channel !== publicKey) {
+    throw new Error('Identity snapshot channel does not match snapshot public key');
+  }
+  const sig = parseBase64UrlString(object.sig, 'Identity snapshot signature is invalid');
+  return {
+    p: 'nb.identity.snapshot.v1',
+    k: publicKey,
+    ts,
+    ref,
+    record,
+    sig,
+  };
+}
+
+export function parseIdentitySnapshotJson(text: string): IdentitySnapshot | null {
+  const parsed = parseJsonProtocol(text);
+  if (!parsed || parsed.p !== 'nb.identity.snapshot.v1') {
+    return null;
+  }
+  return parseIdentitySnapshot(parsed);
 }
 
 export function parseChatMessage(value: unknown): ChatMessage {
@@ -184,6 +270,36 @@ function canonicalIdentityRecord(
     k: bytesToHex(publicKey),
     ts: timestamp,
     profile: normalizeIdentityProfile(profile),
+  };
+}
+
+function canonicalIdentitySnapshot(
+  publicKey: PublicKey,
+  record: IdentityRecord,
+  ref: {
+    channel: string;
+    eventHash: string;
+  },
+  timestamp: number
+): Omit<IdentitySnapshot, 'sig'> {
+  const normalizedRecord = parseIdentityRecord(record);
+  const snapshotPublicKey = bytesToHex(publicKey);
+  if (normalizedRecord.k !== snapshotPublicKey) {
+    throw new Error('Identity snapshot record key does not match signer key');
+  }
+  const channel = parsePublicKeyHex(ref.channel, 'Identity snapshot channel is invalid');
+  if (channel !== snapshotPublicKey) {
+    throw new Error('Identity snapshot channel does not match signer key');
+  }
+  return {
+    p: 'nb.identity.snapshot.v1',
+    k: snapshotPublicKey,
+    ts: timestamp,
+    ref: {
+      channel,
+      eventHash: parseEventHashHex(ref.eventHash, 'Identity snapshot event hash is invalid'),
+    },
+    record: normalizedRecord,
   };
 }
 
@@ -261,6 +377,19 @@ function parseChatAttachment(value: unknown): ChatAttachment {
   });
 }
 
+function parseIdentitySnapshotRef(
+  value: unknown
+): {
+  channel: string;
+  eventHash: string;
+} {
+  const object = asObject(value, 'Identity snapshot ref must be an object');
+  return {
+    channel: parsePublicKeyHex(object.channel, 'Identity snapshot channel is invalid'),
+    eventHash: parseEventHashHex(object.eventHash, 'Identity snapshot event hash is invalid'),
+  };
+}
+
 function normalizeOptionalString(value: string | undefined): string | undefined {
   if (value === undefined) {
     return undefined;
@@ -276,7 +405,14 @@ function parsePublicKeyHex(value: unknown, message: string): string {
   return bytesToHex(publicKeyFromHex(value));
 }
 
-function publicKeyFromHex(value: string): PublicKey {
+function parseEventHashHex(value: unknown, message: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(message);
+  }
+  return createHash(value);
+}
+
+export function publicKeyFromHex(value: string): PublicKey {
   const bytes = hexToBytes(value.toLowerCase());
   if (bytes.length !== 65) {
     throw new Error('Identity public key must be 65 bytes');

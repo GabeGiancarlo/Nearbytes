@@ -17,6 +17,7 @@ import type { EventLogEntry } from '../types/volume.js';
 import {
   parseChatMessageJson,
   parseIdentityRecordJson,
+  parseIdentitySnapshotJson,
   type ChatMessage,
   type IdentityRecord,
 } from './chatCodec.js';
@@ -1155,6 +1156,76 @@ function buildTimelineRows(entries: EventLogEntry[]): StoredTimelineRow[] {
         summary: body ?? attachmentName ?? 'Attachment message',
         message: chatMessage ?? undefined,
       });
+      continue;
+    }
+
+    if (
+      payload.type === EventType.APP_RECORD &&
+      payload.authorPublicKey &&
+      payload.publishedAt !== undefined &&
+      payload.protocol &&
+      payload.record
+    ) {
+      const inferredTimestamp = payload.publishedAt ?? sequence;
+
+      if (payload.protocol === 'nb.identity.record.v1') {
+        const identityRecord = parseIdentityRecordJson(payload.record);
+        const displayName = identityRecord?.profile.displayName;
+        rows.push({
+          eventHash: entry.eventHash,
+          type: EventType.DECLARE_IDENTITY,
+          filename: '',
+          timestamp: inferredTimestamp,
+          hasExplicitTimestamp: true,
+          sequence,
+          publishedAt: inferredTimestamp,
+          authorPublicKey: payload.authorPublicKey,
+          displayName,
+          summary: displayName ? `Published ${displayName}` : 'Published identity',
+          record: identityRecord ?? undefined,
+        });
+        continue;
+      }
+
+      if (payload.protocol === 'nb.identity.snapshot.v1') {
+        const snapshot = parseIdentitySnapshotJson(payload.record);
+        const identityRecord = snapshot?.record;
+        const displayName = identityRecord?.profile.displayName;
+        rows.push({
+          eventHash: entry.eventHash,
+          type: EventType.DECLARE_IDENTITY,
+          filename: '',
+          timestamp: inferredTimestamp,
+          hasExplicitTimestamp: true,
+          sequence,
+          publishedAt: inferredTimestamp,
+          authorPublicKey: payload.authorPublicKey,
+          displayName,
+          summary: displayName ? `Synced ${displayName}` : 'Synced identity',
+          record: identityRecord ?? undefined,
+        });
+        continue;
+      }
+
+      if (payload.protocol === 'nb.chat.message.v1') {
+        const chatMessage = parseChatMessageJson(payload.record);
+        const body = timelineSnippet(chatMessage?.body);
+        const attachmentName = chatMessage?.attachment?.name;
+        rows.push({
+          eventHash: entry.eventHash,
+          type: EventType.CHAT_MESSAGE,
+          filename: '',
+          timestamp: inferredTimestamp,
+          hasExplicitTimestamp: true,
+          sequence,
+          publishedAt: inferredTimestamp,
+          authorPublicKey: payload.authorPublicKey,
+          body,
+          attachmentName,
+          summary: body ?? attachmentName ?? 'Attachment message',
+          message: chatMessage ?? undefined,
+        });
+      }
     }
   }
 
