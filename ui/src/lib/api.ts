@@ -223,6 +223,7 @@ export interface SourceConfigEntry {
   writable: boolean;
   reservePercent: number;
   opportunisticPolicy: StorageFullPolicy;
+  moveFromSourceId?: string;
 }
 
 export interface VolumeDestinationConfig {

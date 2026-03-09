@@ -6,7 +6,7 @@ import { createCryptoOperations } from '../crypto/index.js';
 import { createChatService } from '../domain/chatService.js';
 import { createFileService } from '../domain/fileService.js';
 import { getDefaultStorageDir } from '../storagePath.js';
-import { loadOrCreateRootsConfig } from '../config/roots.js';
+import { loadOrCreateRootsConfig, saveRootsConfig, type RootsConfig } from '../config/roots.js';
 import { ensureNearbytesMarkers } from '../config/sourceDiscovery.js';
 import { MultiRootStorageBackend } from '../storage/multiRoot.js';
 import { createApp } from './app.js';
@@ -78,11 +78,14 @@ export async function startApiRuntime(options: ApiRuntimeOptions = {}): Promise<
   }
 
   const storage = new MultiRootStorageBackend(loaded.config);
+  await resumePendingSourceMoves(storage, loaded.configPath, logger);
   const fileService = createFileService({ crypto, storage });
   const chatService = createChatService({ crypto, storage });
   const primaryMainRoot =
-    loaded.config.defaultVolume.destinations
-      .map((destination) => loaded.config.sources.find((source) => source.id === destination.sourceId))
+    storage
+      .getRootsConfig()
+      .defaultVolume.destinations
+      .map((destination) => storage.getRootsConfig().sources.find((source) => source.id === destination.sourceId))
       .find((source) => source?.enabled)?.path ?? defaultStorageDir;
 
   await storage.createDirectory('channels');
@@ -118,6 +121,63 @@ export async function startApiRuntime(options: ApiRuntimeOptions = {}): Promise<
     rootsConfigPath: loaded.configPath,
     primaryMainRoot,
     stop,
+  };
+}
+
+async function resumePendingSourceMoves(
+  storage: MultiRootStorageBackend,
+  rootsConfigPath: string,
+  logger: RuntimeLogger
+): Promise<void> {
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    const config = storage.getRootsConfig();
+    const pendingTargets = config.sources.filter(
+      (source) => typeof source.moveFromSourceId === 'string' && source.moveFromSourceId.trim().length > 0
+    );
+    if (pendingTargets.length === 0) {
+      return;
+    }
+
+    for (const target of pendingTargets) {
+      const sourceId = target.moveFromSourceId!;
+      const source = config.sources.find((entry) => entry.id === sourceId);
+      if (!source) {
+        const cleared = clearPendingMoveMarker(config, target.id);
+        storage.updateRootsConfig(cleared);
+        await saveRootsConfig(rootsConfigPath, cleared);
+        logger.warn(`Cleared stale pending storage move marker on ${target.id}; source ${sourceId} no longer exists.`);
+        progressed = true;
+        break;
+      }
+
+      try {
+        const consolidated = await storage.consolidateRoot(source.id, target.id);
+        storage.updateRootsConfig(consolidated.config);
+        await saveRootsConfig(rootsConfigPath, consolidated.config);
+        logger.log(`Resumed pending storage move from ${source.id} to ${target.id}.`);
+        progressed = true;
+        break;
+      } catch (error) {
+        logger.warn(
+          `Warning: failed to resume pending storage move from ${source.id} to ${target.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
+}
+
+function clearPendingMoveMarker(config: RootsConfig, targetSourceId: string): RootsConfig {
+  return {
+    version: config.version,
+    sources: config.sources.map((source) =>
+      source.id === targetSourceId ? { ...source, moveFromSourceId: undefined } : source
+    ),
+    defaultVolume: config.defaultVolume,
+    volumes: config.volumes,
   };
 }
 

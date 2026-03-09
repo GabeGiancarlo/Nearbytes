@@ -308,7 +308,13 @@ export class MultiRootStorageBackend implements StorageBackend {
 
     const nextConfig: RootsConfig = {
       version: this.config.version,
-      sources: this.config.sources.filter((entry) => entry.id !== source.config.id),
+      sources: this.config.sources
+        .filter((entry) => entry.id !== source.config.id)
+        .map((entry) =>
+          entry.id === target.config.id && entry.moveFromSourceId === source.config.id
+            ? { ...entry, moveFromSourceId: undefined }
+            : entry
+        ),
       defaultVolume: this.config.defaultVolume,
       volumes: this.config.volumes.map((volume) => ({
         volumeId: volume.volumeId,

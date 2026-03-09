@@ -189,6 +189,124 @@ describe('roots config', () => {
     ).toThrow(/durable default storage location/i);
   });
 
+  it('preserves a valid pending move marker', () => {
+    const parsed = parseRootsConfig({
+      version: 2,
+      sources: [
+        {
+          id: 'src-main',
+          provider: 'local',
+          path: '/tmp/source-main',
+          enabled: true,
+          writable: true,
+          reservePercent: 5,
+          opportunisticPolicy: 'drop-older-blocks',
+        },
+        {
+          id: 'src-move-target',
+          provider: 'local',
+          path: '/tmp/source-target',
+          enabled: true,
+          writable: true,
+          reservePercent: 5,
+          opportunisticPolicy: 'drop-older-blocks',
+          moveFromSourceId: 'src-main',
+        },
+      ],
+      defaultVolume: {
+        destinations: [
+          {
+            sourceId: 'src-main',
+            enabled: true,
+            storeEvents: true,
+            storeBlocks: true,
+            copySourceBlocks: true,
+            reservePercent: 5,
+            fullPolicy: 'block-writes',
+          },
+        ],
+      },
+      volumes: [],
+    });
+
+    expect(parsed.sources.find((source) => source.id === 'src-move-target')?.moveFromSourceId).toBe('src-main');
+  });
+
+  it('rejects invalid pending move markers', () => {
+    expect(() =>
+      parseRootsConfig({
+        version: 2,
+        sources: [
+          {
+            id: 'src-main',
+            provider: 'local',
+            path: '/tmp/source-main',
+            enabled: true,
+            writable: true,
+            reservePercent: 5,
+            opportunisticPolicy: 'drop-older-blocks',
+          },
+          {
+            id: 'src-move-target',
+            provider: 'local',
+            path: '/tmp/source-target',
+            enabled: true,
+            writable: true,
+            reservePercent: 5,
+            opportunisticPolicy: 'drop-older-blocks',
+            moveFromSourceId: 'src-missing',
+          },
+        ],
+        defaultVolume: {
+          destinations: [
+            {
+              sourceId: 'src-main',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 5,
+              fullPolicy: 'block-writes',
+            },
+          ],
+        },
+        volumes: [],
+      })
+    ).toThrow(/Pending move source not found/i);
+
+    expect(() =>
+      parseRootsConfig({
+        version: 2,
+        sources: [
+          {
+            id: 'src-main',
+            provider: 'local',
+            path: '/tmp/source-main',
+            enabled: true,
+            writable: true,
+            reservePercent: 5,
+            opportunisticPolicy: 'drop-older-blocks',
+            moveFromSourceId: 'src-main',
+          },
+        ],
+        defaultVolume: {
+          destinations: [
+            {
+              sourceId: 'src-main',
+              enabled: true,
+              storeEvents: true,
+              storeBlocks: true,
+              copySourceBlocks: true,
+              reservePercent: 5,
+              fullPolicy: 'block-writes',
+            },
+          ],
+        },
+        volumes: [],
+      })
+    ).toThrow(/cannot move from itself/i);
+  });
+
   it('self-heals existing configs by restoring the home Nearbytes location as a default route', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nearbytes-roots-config-'));
     const configPath = join(dir, 'roots.json');

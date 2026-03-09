@@ -84,6 +84,23 @@ function typedBody<T>(response: Response): T {
   return response.body as unknown as T;
 }
 
+function createWritableSource(
+  id: string,
+  rootPath: string,
+  overrides: Partial<RootsConfig['sources'][number]> = {}
+): RootsConfig['sources'][number] {
+  return {
+    id,
+    provider: 'local',
+    path: rootPath,
+    enabled: true,
+    writable: true,
+    reservePercent: 5,
+    opportunisticPolicy: 'drop-older-blocks',
+    ...overrides,
+  };
+}
+
 describe('Nearbytes API (multi-root)', () => {
   let tempDir: string;
   let app: ReturnType<typeof createApp>;
@@ -241,6 +258,78 @@ describe('Nearbytes API (multi-root)', () => {
     const diskConfig = JSON.parse(diskConfigRaw) as { sources: Array<{ id: string; writable: boolean }> };
     const persistedBackup = diskConfig.sources.find((source) => source.id === 'src-backup-1');
     expect(persistedBackup?.writable).toBe(false);
+  });
+
+  it('rejects invalid pending move markers in the roots config api', async () => {
+    const invalidTargetRoot = path.join(tempDir, 'invalid-move-target');
+    await fs.mkdir(invalidTargetRoot, { recursive: true });
+
+    const current = await request(app).get('/config/roots').expect(200);
+    const currentBody = typedBody<ConfigRootsResponseBody>(current);
+    const invalidConfig = {
+      ...currentBody.config,
+      sources: [
+        ...currentBody.config.sources,
+        createWritableSource('src-invalid-move-target', invalidTargetRoot, {
+          moveFromSourceId: 'src-missing-source',
+        }),
+      ],
+    };
+
+    const invalidRes = await request(app)
+      .put('/config/roots')
+      .send({ config: invalidConfig })
+      .expect(400);
+
+    expect((invalidRes.body as { error?: { message?: string } }).error?.message).toMatch(
+      /Pending move source not found/i
+    );
+  });
+
+  it('clears the pending move marker after consolidation through the api', async () => {
+    const moveSourceRoot = path.join(tempDir, 'move-source-root');
+    const moveTargetRoot = path.join(tempDir, 'move-target-root');
+    await fs.mkdir(path.join(moveSourceRoot, 'blocks'), { recursive: true });
+    await fs.mkdir(moveTargetRoot, { recursive: true });
+    await fs.writeFile(path.join(moveSourceRoot, 'blocks', 'move.bin'), 'move-data', 'utf8');
+
+    const current = await request(app).get('/config/roots').expect(200);
+    const currentBody = typedBody<ConfigRootsResponseBody>(current);
+    const nextConfig = {
+      ...currentBody.config,
+      sources: [
+        ...currentBody.config.sources.filter(
+          (source) => source.id !== 'src-move-source' && source.id !== 'src-move-target'
+        ),
+        createWritableSource('src-move-source', moveSourceRoot),
+        createWritableSource('src-move-target', moveTargetRoot, {
+          moveFromSourceId: 'src-move-source',
+        }),
+      ],
+    };
+
+    const updateRes = await request(app)
+      .put('/config/roots')
+      .send({ config: nextConfig })
+      .expect(200);
+    const updatedBody = typedBody<ConfigRootsResponseBody>(updateRes);
+    expect(updatedBody.config.sources.find((source) => source.id === 'src-move-target')?.moveFromSourceId).toBe(
+      'src-move-source'
+    );
+
+    const consolidateRes = await request(app)
+      .post('/config/roots/consolidate')
+      .send({ sourceId: 'src-move-source', targetId: 'src-move-target' })
+      .expect(200);
+    const consolidateBody = typedBody<ConsolidationResponseBody>(consolidateRes);
+
+    expect(consolidateBody.config.sources.some((source) => source.id === 'src-move-source')).toBe(false);
+    expect(consolidateBody.config.sources.find((source) => source.id === 'src-move-target')?.moveFromSourceId).toBeUndefined();
+    expect(await fs.readFile(path.join(moveTargetRoot, 'blocks', 'move.bin'), 'utf8')).toBe('move-data');
+
+    const persistedConfig = JSON.parse(await fs.readFile(rootsConfigPath, 'utf8')) as ConfigRootsResponseBody['config'];
+    expect(persistedConfig.sources.some((source) => source.id === 'src-move-source')).toBe(false);
+    expect(persistedConfig.sources.find((source) => source.id === 'src-move-target')?.moveFromSourceId).toBeUndefined();
   });
 
   it('reads event logs across sources and retrieves blocks when key data is split', async () => {

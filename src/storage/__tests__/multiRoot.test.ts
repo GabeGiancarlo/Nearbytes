@@ -238,6 +238,7 @@ describe('MultiRootStorageBackend', () => {
           writable: true,
           reservePercent: 10,
           opportunisticPolicy: 'drop-older-blocks',
+          moveFromSourceId: 'src-source',
         },
       ],
       volumes: [
@@ -283,6 +284,7 @@ describe('MultiRootStorageBackend', () => {
     expect(consolidated.config.volumes[0].destinations.some((destination) => destination.sourceId === 'src-source')).toBe(
       false
     );
+    expect(consolidated.config.sources.find((source) => source.id === 'src-target')?.moveFromSourceId).toBeUndefined();
 
     const movedBlock = await readFile(join(targetPath, 'blocks', 'x.bin'), 'utf8');
     const movedEvent = await readFile(join(targetPath, 'channels', keyHex, 'event.bin'), 'utf8');

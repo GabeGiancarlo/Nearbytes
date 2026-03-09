@@ -1,17 +1,14 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
   import {
     chooseDirectoryPath,
     consolidateRoot,
     discoverSources,
-    getRootConsolidationPlan,
     getRootsConfig,
     hasDesktopDirectoryPicker,
     openRootInFileManager,
-    type DiscoveryAction,
     type DiscoveredNearbytesSource,
     type ReconcileSourcesResponse,
-    type RootConsolidationCandidate,
     type RootsConfig,
     type RootsRuntimeSnapshot,
     type SourceConfigEntry,
@@ -22,8 +19,18 @@
     updateRootsConfig,
   } from '../lib/api.js';
   import ArmedActionButton from './ArmedActionButton.svelte';
-  import VolumeIdentity from './VolumeIdentity.svelte';
-  import { ArrowRightLeft, FolderOpen, HardDrive, Plus, Search, Shield, Trash2 } from 'lucide-svelte';
+  import {
+    ArrowDownToLine,
+    ArrowRightLeft,
+    ArrowUpToLine,
+    FolderOpen,
+    HardDrive,
+    Plus,
+    RefreshCw,
+    Search,
+    Shield,
+    Trash2,
+  } from 'lucide-svelte';
 
   let {
     mode = 'volume',
@@ -68,23 +75,15 @@
   let loading = $state(true);
   let errorMessage = $state('');
   let successMessage = $state('');
-  let discoveryOpen = $state(false);
   let discoveryLoading = $state(false);
+  let discoveryError = $state('');
   let discoveredSources = $state<DiscoveredNearbytesSource[]>([]);
   let dismissedDiscoveries = $state<string[]>(loadDismissedDiscoveries());
-  let mergeSourceId = $state<string | null>(null);
-  let mergeCandidates = $state<RootConsolidationCandidate[]>([]);
-  let mergeTargetId = $state('');
-  let mergeLoading = $state(false);
-  let mergeApplying = $state(false);
-  let mergeMessage = $state('');
+  let movingSourceId = $state<string | null>(null);
   let autosaveStatus = $state<'idle' | 'pending' | 'saving' | 'saved' | 'error'>('idle');
   let lastSavedSignature = $state('');
   let lastRefreshToken = $state(0);
-  let lastFocusSection = $state<'discovery' | 'defaults' | null>(null);
-  let latestDiscoverySectionElement = $state<HTMLElement | null>(null);
-  let manualDiscoverySectionElement = $state<HTMLElement | null>(null);
-  let defaultsSectionElement = $state<HTMLElement | null>(null);
+  let discoveryRunId = 0;
 
   onMount(() => {
     void loadPanel();
@@ -94,18 +93,6 @@
     if (refreshToken === 0 || refreshToken === lastRefreshToken) return;
     lastRefreshToken = refreshToken;
     void loadPanel();
-  });
-
-  $effect(() => {
-    if (!focusSection || focusSection === lastFocusSection) return;
-    lastFocusSection = focusSection;
-    void tick().then(() => {
-      const target =
-        focusSection === 'discovery'
-          ? latestDiscoverySectionElement ?? manualDiscoverySectionElement
-          : defaultsSectionElement;
-      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
   });
 
   $effect(() => {
@@ -260,6 +247,72 @@
     };
   }
 
+  function duplicateDestinationList(
+    destinations: VolumeDestinationConfig[],
+    sourceId: string,
+    nextSourceId: string
+  ): VolumeDestinationConfig[] {
+    const normalized = destinations.map((destination) => ({
+      ...destination,
+      reservePercent: destination.reservePercent ?? DEFAULT_RESERVE_PERCENT,
+    }));
+    const matched = normalized.find((destination) => destination.sourceId === sourceId);
+    if (!matched || normalized.some((destination) => destination.sourceId === nextSourceId)) {
+      return normalized;
+    }
+    return [
+      ...normalized,
+      {
+        ...matched,
+        sourceId: nextSourceId,
+      },
+    ];
+  }
+
+  function prepareSourceMoveConfig(sourceId: string, nextPath: string): {
+    config: RootsConfig;
+    targetSource: SourceConfigEntry;
+  } {
+    if (!configDraft) {
+      throw new Error('Config not loaded');
+    }
+    const source = configDraft.sources.find((entry) => entry.id === sourceId);
+    if (!source) {
+      throw new Error(`Storage location not found: ${sourceId}`);
+    }
+    const provider = detectProviderFromPath(nextPath);
+    const targetSource: SourceConfigEntry = {
+      ...source,
+      id: generateSourceId(provider),
+      provider,
+      path: nextPath,
+      reservePercent: source.reservePercent ?? DEFAULT_RESERVE_PERCENT,
+      moveFromSourceId: source.id,
+    };
+    return {
+      targetSource,
+      config: {
+        version: configDraft.version,
+        sources: [...configDraft.sources.map((entry) => ({ ...entry })), targetSource],
+        defaultVolume: {
+          destinations: duplicateDestinationList(
+            configDraft.defaultVolume.destinations,
+            source.id,
+            targetSource.id
+          ),
+        },
+        volumes: configDraft.volumes.map((volume) => ({
+          volumeId: volume.volumeId,
+          destinations: duplicateDestinationList(volume.destinations, source.id, targetSource.id),
+        })),
+      },
+    };
+  }
+
+  function hasPendingMove(sourceId: string): boolean {
+    return Boolean(configDraft?.sources.some((source) => source.moveFromSourceId === sourceId));
+  }
+
   function sourceStatus(sourceId: string) {
     return runtime?.sources.find((entry) => entry.id === sourceId) ?? null;
   }
@@ -377,6 +430,11 @@
   function removeSource(sourceId: string): void {
     if (!configDraft || configDraft.sources.length <= 1) {
       errorMessage = 'Nearbytes needs at least one storage location.';
+      return;
+    }
+    const source = configDraft.sources.find((entry) => entry.id === sourceId);
+    if (source?.moveFromSourceId || hasPendingMove(sourceId)) {
+      errorMessage = 'Finish the folder move before removing this storage location.';
       return;
     }
     configDraft = {
@@ -586,13 +644,6 @@
     dismissedDiscoveries = [];
   }
 
-  function mountedPresentationFor(targetVolumeId: string) {
-    if (currentVolumePresentation?.volumeId === targetVolumeId) {
-      return currentVolumePresentation;
-    }
-    return null;
-  }
-
   function hasSourcePath(source: SourceConfigEntry): boolean {
     return source.path.trim() !== '';
   }
@@ -603,61 +654,41 @@
     return 2;
   }
 
-  function discoveryGroups(): Array<{
-    provider: SourceProvider;
-    items: ReconcileSourcesResponse['items'];
-  }> {
-    if (!discoveryDetails) return [];
-    const grouped = new Map<SourceProvider, ReconcileSourcesResponse['items']>();
-    for (const item of discoveryDetails.items) {
-      const current = grouped.get(item.provider) ?? ([] as ReconcileSourcesResponse['items']);
-      current.push(item);
-      grouped.set(item.provider, current);
+  function sourceSuggestionCopy(source: DiscoveredNearbytesSource): string {
+    if (source.sourceType === 'marker') {
+      return 'Nearbytes found an existing folder here automatically.';
     }
-    return Array.from(grouped.entries())
-      .map(([provider, items]) => ({
-        provider,
-        items: [...items].sort((left, right) => left.path.localeCompare(right.path)),
-      }))
-      .sort((left, right) => formatProvider(left.provider).localeCompare(formatProvider(right.provider)));
+    if (source.sourceType === 'layout') {
+      return 'Nearbytes found stored data here automatically.';
+    }
+    return 'Suggested synced folder. Add it if you want Nearbytes to use it.';
   }
 
-  function discoveryActionLabel(action: DiscoveryAction): string {
-    if (action === 'added-source') return 'Added to saved locations';
-    if (action === 'added-volume-target') return 'Sync enabled';
-    if (action === 'available-share') return 'Needs review';
-    return 'Already saved';
-  }
-
-  function discoveryKindLabel(classification: 'marker' | 'layout'): string {
-    if (classification === 'marker') return 'Nearbytes page found';
-    return 'Nearbytes data found';
-  }
-
-  function shortVolumeId(value: string): string {
-    if (value.length <= 18) return value;
-    return `${value.slice(0, 10)}...${value.slice(-6)}`;
-  }
-
-  async function openDiscoverySource(item: ReconcileSourcesResponse['items'][number]) {
-    if (!item.configuredSourceId) return;
-    await openSourceFolder(item.configuredSourceId);
-  }
-
-  function sortedUsageVolumes(sourceId: string) {
-    const source = sourceStatus(sourceId);
-    return [...(source?.usage.volumeUsages ?? [])].sort((left, right) => {
-      const leftTotal = left.fileBytes + left.historyBytes;
-      const rightTotal = right.fileBytes + right.historyBytes;
-      if (rightTotal !== leftTotal) {
-        return rightTotal - leftTotal;
+  function discoverySummary(): string {
+    if (discoveryLoading) return 'Scanning folders...';
+    const suggestionCount = sourceSuggestionRows().length;
+    if (suggestionCount > 0) {
+      return `${countLabel(suggestionCount, 'folder')} found automatically`;
+    }
+    if (discoveryDetails && (discoveryDetails.summary.sourcesAdded > 0 || discoveryDetails.summary.volumeTargetsAdded > 0)) {
+      const parts: string[] = [];
+      if (discoveryDetails.summary.sourcesAdded > 0) {
+        parts.push(`${countLabel(discoveryDetails.summary.sourcesAdded, 'location')} added`);
       }
-      return right.fileCount + right.historyFileCount - (left.fileCount + left.historyFileCount);
-    });
+      if (discoveryDetails.summary.volumeTargetsAdded > 0) {
+        parts.push(`${countLabel(discoveryDetails.summary.volumeTargetsAdded, 'sync rule')} enabled`);
+      }
+      return parts.join(' | ');
+    }
+    if (discoveryError) return 'Automatic scan failed';
+    return 'Automatic scan is on';
   }
 
   function locationAvailability(source: SourceConfigEntry) {
     const status = sourceStatus(source.id);
+    if (source.moveFromSourceId) {
+      return { label: 'Move target', tone: 'good' as StatusTone };
+    }
     if (!source.enabled) {
       return { label: 'Turned off', tone: 'muted' as StatusTone };
     }
@@ -689,6 +720,12 @@
 
   function locationSummary(source: SourceConfigEntry): string {
     const status = sourceStatus(source.id);
+    if (source.moveFromSourceId) {
+      return `Nearbytes is moving data here from ${source.moveFromSourceId}. Both folders stay active until the move finishes.`;
+    }
+    if (hasPendingMove(source.id)) {
+      return 'Nearbytes is moving this location to a new folder. Both folders stay active until the move finishes.';
+    }
     if (!hasSourcePath(source)) {
       return 'Choose a folder to finish setting up this storage location.';
     }
@@ -762,19 +799,15 @@
     return 'This location keeps a protected full copy.';
   }
 
-  function latestDiscoveryHeadline(): string {
-    if (!discoveryDetails) return '';
-    const parts: string[] = [];
-    if (discoveryDetails.summary.sourcesAdded > 0) {
-      parts.push(`${countLabel(discoveryDetails.summary.sourcesAdded, 'location')} added`);
-    }
-    if (discoveryDetails.summary.volumeTargetsAdded > 0) {
-      parts.push(`${countLabel(discoveryDetails.summary.volumeTargetsAdded, 'sync rule')} enabled`);
-    }
-    if (parts.length === 0) {
-      return 'No new storage locations were added automatically';
-    }
-    return parts.join(' | ');
+  function applyRootsResponse(response: {
+    configPath: string | null;
+    config: RootsConfig;
+    runtime: RootsRuntimeSnapshot;
+  }): void {
+    configPath = response.configPath;
+    configDraft = cloneConfig(response.config);
+    runtime = response.runtime;
+    lastSavedSignature = serializeConfig(cloneConfig(response.config));
   }
 
   async function loadPanel() {
@@ -783,11 +816,9 @@
     successMessage = '';
     try {
       const response = await getRootsConfig();
-      configPath = response.configPath;
-      configDraft = cloneConfig(response.config);
-      runtime = response.runtime;
-      lastSavedSignature = serializeConfig(cloneConfig(response.config));
+      applyRootsResponse(response);
       autosaveStatus = 'idle';
+      void refreshDiscoverySuggestions();
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Failed to load storage locations';
     } finally {
@@ -801,10 +832,7 @@
     autosaveStatus = 'saving';
     try {
       const response = await updateRootsConfig(configDraft);
-      configPath = response.configPath;
-      configDraft = cloneConfig(response.config);
-      runtime = response.runtime;
-      lastSavedSignature = serializeConfig(cloneConfig(response.config));
+      applyRootsResponse(response);
       autosaveStatus = lastSavedSignature === expectedSignature ? 'saved' : 'pending';
       successMessage = '';
     } catch (error) {
@@ -813,18 +841,21 @@
     }
   }
 
-  async function toggleDiscovery() {
-    discoveryOpen = !discoveryOpen;
-    if (!discoveryOpen) return;
+  async function refreshDiscoverySuggestions() {
+    const runId = ++discoveryRunId;
     discoveryLoading = true;
-    errorMessage = '';
+    discoveryError = '';
     try {
       const response = await discoverSources();
+      if (runId !== discoveryRunId) return;
       discoveredSources = response.sources;
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Failed to scan folders';
+      if (runId !== discoveryRunId) return;
+      discoveryError = error instanceof Error ? error.message : 'Failed to scan folders';
     } finally {
-      discoveryLoading = false;
+      if (runId === discoveryRunId) {
+        discoveryLoading = false;
+      }
     }
   }
 
@@ -873,6 +904,57 @@
     successMessage = 'Folder updated.';
   }
 
+  async function moveSourceFolder(sourceId: string): Promise<void> {
+    if (!configDraft) return;
+    const source = configDraft.sources.find((entry) => entry.id === sourceId);
+    if (!source) return;
+    if (source.moveFromSourceId) {
+      errorMessage = 'This storage location is already finishing a move.';
+      return;
+    }
+    if (hasPendingMove(sourceId)) {
+      errorMessage = 'This storage location is already moving to another folder.';
+      return;
+    }
+
+    const selectedPath = await pickFolderPath(source.path);
+    if (!selectedPath) return;
+    const normalized = normalizeComparablePath(selectedPath);
+    if (normalizeComparablePath(source.path) === normalized) {
+      successMessage = 'Folder unchanged.';
+      return;
+    }
+    const duplicate = configDraft.sources.find(
+      (entry) => entry.id !== sourceId && normalizeComparablePath(entry.path) === normalized
+    );
+    if (duplicate) {
+      errorMessage = 'That folder is already in your saved locations.';
+      return;
+    }
+
+    movingSourceId = sourceId;
+    errorMessage = '';
+    successMessage = '';
+    autosaveStatus = 'saving';
+    try {
+      const prepared = prepareSourceMoveConfig(sourceId, selectedPath);
+      const saved = await updateRootsConfig(prepared.config);
+      applyRootsResponse(saved);
+      autosaveStatus = 'saved';
+      successMessage = 'Move started. Nearbytes is copying data to the new folder.';
+
+      const consolidated = await consolidateRoot(sourceId, prepared.targetSource.id);
+      applyRootsResponse(consolidated);
+      autosaveStatus = 'saved';
+      successMessage = 'Folder moved.';
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Failed to move folder';
+      autosaveStatus = 'error';
+    } finally {
+      movingSourceId = null;
+    }
+  }
+
   function addDiscoveredSource(source: DiscoveredNearbytesSource) {
     if (!configDraft) return;
     const normalized = normalizeComparablePath(source.path);
@@ -904,61 +986,9 @@
     }
   }
 
-  async function startMerge(sourceId: string) {
-    mergeSourceId = sourceId;
-    mergeCandidates = [];
-    mergeTargetId = '';
-    mergeMessage = '';
-    mergeLoading = true;
-    try {
-      const response = await getRootConsolidationPlan(sourceId);
-      mergeCandidates = response.plan.candidates.filter((candidate) => candidate.eligible);
-      if (mergeCandidates.length > 0) {
-        mergeTargetId = mergeCandidates[0].id;
-        mergeMessage = `Move ${countLabel(response.plan.source.fileCount, 'item')} from this location.`;
-      } else {
-        mergeMessage = 'No compatible destination is available right now.';
-      }
-    } catch (error) {
-      mergeMessage = error instanceof Error ? error.message : 'Failed to prepare move';
-    } finally {
-      mergeLoading = false;
-    }
-  }
-
-  function cancelMerge() {
-    mergeSourceId = null;
-    mergeCandidates = [];
-    mergeTargetId = '';
-    mergeLoading = false;
-    mergeApplying = false;
-    mergeMessage = '';
-  }
-
-  async function applyMerge() {
-    if (!mergeSourceId || mergeTargetId.trim() === '') return;
-    mergeApplying = true;
-    errorMessage = '';
-    successMessage = '';
-    try {
-      const response = await consolidateRoot(mergeSourceId, mergeTargetId);
-      configPath = response.configPath;
-      configDraft = cloneConfig(response.config);
-      runtime = response.runtime;
-      lastSavedSignature = serializeConfig(cloneConfig(response.config));
-      autosaveStatus = 'saved';
-      successMessage = 'Stored data moved.';
-      cancelMerge();
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Failed to move data';
-    } finally {
-      mergeApplying = false;
-    }
-  }
-
   function clampReserve(value: string): number {
     const parsed = Number.parseInt(value, 10);
-    if (!Number.isFinite(parsed)) return 0;
+    if (!Number.isFinite(parsed)) return DEFAULT_RESERVE_PERCENT;
     return Math.max(0, Math.min(95, parsed));
   }
 </script>
@@ -975,14 +1005,25 @@
           <p class="eyebrow">Storage locations</p>
           <h2>Choose where Nearbytes stores encrypted data</h2>
           <p class="hero-text">
-            Save the folders Nearbytes can use, then decide which ones should keep a protected copy for new spaces.
+            Nearbytes uses the folders shown here. Existing Nearbytes folders are found automatically, and you can add one yourself with the + card.
           </p>
         </div>
         <div class="hero-actions">
-          <button type="button" class="panel-btn primary" onclick={addSourceCard}>
-            <Plus size={14} strokeWidth={2} />
-            <span>Add folder</span>
+          <span class="summary-pill" class:warning={Boolean(discoveryError)}>{discoverySummary()}</span>
+          <button
+            type="button"
+            class="panel-btn subtle compact icon-btn"
+            onclick={() => void refreshDiscoverySuggestions()}
+            disabled={discoveryLoading}
+            title="Scan again"
+          >
+            <RefreshCw size={14} strokeWidth={2} />
           </button>
+          {#if dismissedSuggestionCount() > 0}
+            <button type="button" class="panel-btn subtle compact" onclick={restoreDismissedSuggestions}>
+              <span>Show hidden</span>
+            </button>
+          {/if}
           <span class="summary-pill" class:warning={autosaveStatus === 'error'}>{autosaveLabel()}</span>
         </div>
       </header>
@@ -994,93 +1035,22 @@
         <p class="panel-success">{successMessage}</p>
       {/if}
 
-      {#if discoveryDetails}
-        <section class="panel-section" bind:this={latestDiscoverySectionElement}>
-          <div class="section-head">
-            <div>
-              <p class="section-step">Latest automatic scan</p>
-              <h3>{latestDiscoveryHeadline()}</h3>
-              <p class="section-copy">
-                Nearbytes can look for existing folders in synced services and add safe matches automatically.
-              </p>
-            </div>
-            <div class="section-metrics">
-              <span class="summary-pill">{countLabel(discoveryDetails.summary.sourcesAdded, 'location')} added</span>
-              <span class="summary-pill">{countLabel(discoveryDetails.summary.volumeTargetsAdded, 'sync rule')} enabled</span>
-            </div>
-          </div>
-
-          <details class="details-card" open={focusSection === 'discovery'}>
-            <summary>Show scan details</summary>
-            {#if discoveryDetails.items.length === 0}
-              <p class="muted-copy">No Nearbytes storage locations were detected in the latest scan.</p>
-            {:else}
-              <div class="scan-group-list">
-                {#each discoveryGroups() as group (group.provider)}
-                  <section class="scan-group">
-                    <div class="scan-group-head">
-                      <p class="scan-group-title">{formatProvider(group.provider)}</p>
-                      <span class="mini-pill">{group.items.length}</span>
-                    </div>
-                    <div class="scan-card-list">
-                      {#each group.items as item (item.path)}
-                        <article class="scan-card">
-                          <div class="scan-copy">
-                            <p class="scan-path">{item.path}</p>
-                            <p class="scan-note">
-                              {discoveryKindLabel(item.classification)}
-                              {#if item.hasChannels}
-                                {' | '}History found
-                              {/if}
-                              {#if item.hasBlocks}
-                                {' | '}Files found
-                              {/if}
-                            </p>
-                            <div class="scan-badges">
-                              {#each item.actions as action (action)}
-                                <span class="mini-pill">{discoveryActionLabel(action)}</span>
-                              {/each}
-                            </div>
-                            {#if item.addedTargetVolumeIds.length > 0}
-                              <p class="scan-note">
-                                Sync was enabled for spaces {item.addedTargetVolumeIds.map(shortVolumeId).join(', ')}.
-                              </p>
-                            {/if}
-                            {#if item.unknownVolumeIds.length > 0}
-                              <p class="scan-note">
-                                Other space folders were found here: {item.unknownVolumeIds.map(shortVolumeId).join(', ')}.
-                              </p>
-                            {/if}
-                          </div>
-                          {#if item.configuredSourceId}
-                            <button type="button" class="panel-btn subtle compact" onclick={() => void openDiscoverySource(item)}>
-                              <FolderOpen size={14} strokeWidth={2} />
-                              <span>Open folder</span>
-                            </button>
-                          {/if}
-                        </article>
-                      {/each}
-                    </div>
-                  </section>
-                {/each}
-              </div>
-            {/if}
-          </details>
-        </section>
-      {/if}
-
-      <section class="panel-section" bind:this={defaultsSectionElement}>
+      <section class="panel-section">
         <div class="section-head">
           <div>
-            <p class="section-step">1. Saved storage locations</p>
-            <h3>One card per storage location</h3>
-            <p class="section-copy">Read incoming data, write fresh data, and choose whether new spaces keep a full copy here.</p>
+            <p class="section-step">Saved storage locations</p>
+            <h3>One card per folder</h3>
+            <p class="section-copy">Read incoming data, write fresh data, choose whether new spaces keep a full copy here, or move the folder.</p>
           </div>
           <div class="section-metrics">
             <span class="summary-pill">{countLabel(configDraft.sources.length, 'location')} saved</span>
             <span class="summary-pill" class:warning={!hasDurableDestination(null)}>{protectionSummary(null)}</span>
           </div>
         </div>
+
+        {#if discoveryError}
+          <p class="warning-copy">{discoveryError}</p>
+        {/if}
 
         <div class="protection-banner" class:warning={!hasDurableDestination(null)}>
           <Shield size={15} strokeWidth={2} />
@@ -1096,10 +1066,10 @@
             <article class="location-card" class:active={protectionTone(defaultDestination, source.id) === 'durable'}>
               <div class="card-head">
                 <div class="card-title">
-                  <div class="card-icon">
+                  <div class="card-icon" title={source.path || 'No folder selected yet'}>
                     <HardDrive size={16} strokeWidth={2.1} />
                   </div>
-                  <div>
+                  <div title={source.path || 'No folder selected yet'}>
                     <p class="provider-label">{formatProvider(source.provider)}</p>
                     <h4>{compactPath(source.path)}</h4>
                   </div>
@@ -1107,93 +1077,110 @@
                 <div class="card-status">
                   <span class={`status-pill tone-${availability.tone}`}>{availability.label}</span>
                   <span class={`status-pill tone-${writeState.tone}`}>{writeState.label}</span>
-                  <span class={`status-pill tone-${protectionTone(defaultDestination, source.id)}`}>{protectionLabel(defaultDestination, source.id)}</span>
+                  <span
+                    class={`status-pill tone-${protectionTone(defaultDestination, source.id)}`}
+                    title={copyHelpText(null, source)}
+                  >
+                    {protectionLabel(defaultDestination, source.id)}
+                  </span>
                 </div>
               </div>
 
               <p class="card-copy">{locationSummary(source)}</p>
 
-              <div class="button-row">
-                {#if hasSourcePath(source)}
-                  <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
-                    <FolderOpen size={14} strokeWidth={2} />
-                    <span>Open folder</span>
-                  </button>
-                {:else}
-                  <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
-                    <Search size={14} strokeWidth={2} />
-                    <span>Choose folder</span>
-                  </button>
-                {/if}
-              </div>
-
-              <div class="toggle-list">
-                <label class="toggle-row">
+              <div class="compact-toggle-row">
+                <label class="compact-icon-toggle" class:checked={source.enabled} title="Read incoming data">
                   <input
                     type="checkbox"
                     checked={source.enabled}
+                    aria-label="Read incoming data"
                     onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)}
                   />
-                  <div>
-                    <span class="toggle-title">Read incoming data</span>
-                    <span class="toggle-copy">Nearbytes can read data that appears in this folder.</span>
-                  </div>
+                  <ArrowDownToLine size={14} strokeWidth={2} />
                 </label>
-                <label class="toggle-row">
+                <label class="compact-icon-toggle" class:checked={source.writable} title="Write fresh data">
                   <input
                     type="checkbox"
                     checked={source.writable}
+                    aria-label="Write fresh data"
                     onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)}
                   />
-                  <div>
-                    <span class="toggle-title">Write fresh data</span>
-                    <span class="toggle-copy">Nearbytes may save new encrypted data to this location.</span>
-                  </div>
+                  <ArrowUpToLine size={14} strokeWidth={2} />
                 </label>
-                <label class="toggle-row large-toggle">
+                <label
+                  class="compact-icon-toggle"
+                  class:checked={keepsFullCopy(defaultDestination)}
+                  title="Keep new spaces here"
+                >
                   <input
                     type="checkbox"
                     checked={keepsFullCopy(defaultDestination)}
+                    aria-label="Keep new spaces here"
                     onchange={(event) => setKeepFullCopy(null, source.id, (event.currentTarget as HTMLInputElement).checked)}
                   />
-                  <div>
-                    <span class="toggle-title">Keep new spaces here</span>
-                    <span class="toggle-copy">Full history and file data.</span>
-                  </div>
+                  <Shield size={14} strokeWidth={2} />
                 </label>
               </div>
 
-              <p class="card-copy">{copyHelpText(null, source)}</p>
+              <div class="card-control-row">
+                <label class="field-block compact-field" title="Minimum free space to leave on this drive. Default is 5%.">
+                  <span>Keep free</span>
+                  <select
+                    class="panel-input"
+                    value={String(sourceReservePercent(source))}
+                    onchange={(event) => {
+                      const nextValue = clampReserve((event.currentTarget as HTMLSelectElement).value);
+                      updateSourceField(source.id, 'reservePercent', nextValue);
+                      if (keepsFullCopy(defaultDestination)) {
+                        updateDestinationField(null, source.id, 'reservePercent', nextValue);
+                      }
+                    }}
+                  >
+                    {#each RESERVE_OPTIONS as option}
+                      <option value={option}>{formatPercent(option)}</option>
+                    {/each}
+                  </select>
+                </label>
 
-              {#if keepsFullCopy(defaultDestination)}
-                <div class="field-grid">
-                  <label class="field-block">
-                    <span>Keep free</span>
-                    <select
-                      class="panel-input"
-                      value={String(destinationReservePercent(defaultDestination))}
-                      onchange={(event) =>
-                        updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
+                <div class="button-row">
+                  {#if hasSourcePath(source)}
+                    <button
+                      type="button"
+                      class="panel-btn subtle compact"
+                      onclick={() => void moveSourceFolder(source.id)}
+                      disabled={movingSourceId === source.id || Boolean(source.moveFromSourceId) || hasPendingMove(source.id)}
+                      title="Move this storage location to a different folder without interrupting service"
                     >
-                      {#each RESERVE_OPTIONS as option}
-                        <option value={option}>{formatPercent(option)}</option>
-                      {/each}
-                    </select>
-                  </label>
-                  <label class="field-block">
-                    <span>If space runs low</span>
-                    <select
-                      class="panel-input"
-                      value={defaultDestination?.fullPolicy ?? 'block-writes'}
-                      onchange={(event) =>
-                        updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
+                      <ArrowRightLeft size={14} strokeWidth={2} />
+                      <span>{movingSourceId === source.id ? 'Moving...' : 'Move folder'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="panel-btn subtle compact"
+                      onclick={() => openSourceFolder(source.id)}
+                      title={source.path || 'Open folder'}
                     >
-                      <option value="block-writes">Never delete this protected copy</option>
-                      <option value="drop-older-blocks">Delete blocks here after another protected copy exists</option>
-                    </select>
-                  </label>
+                      <FolderOpen size={14} strokeWidth={2} />
+                      <span>Open</span>
+                    </button>
+                  {:else}
+                    <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
+                      <Search size={14} strokeWidth={2} />
+                      <span>Choose folder</span>
+                    </button>
+                  {/if}
+                  {#if canRemoveAnySource()}
+                    <ArmedActionButton
+                      class="panel-btn subtle compact danger"
+                      icon={Trash2}
+                      text="Remove"
+                      armed={true}
+                      autoDisarmMs={3000}
+                      onPress={() => removeSource(source.id)}
+                    />
+                  {/if}
                 </div>
-              {/if}
+              </div>
 
               <div class="fact-row">
                 <span>{status?.availableBytes !== undefined ? `${formatSize(status.availableBytes)} free` : 'Free space unknown'}</span>
@@ -1203,187 +1190,50 @@
               {#if status?.lastWriteFailure}
                 <p class="warning-copy">Last write problem: {status.lastWriteFailure.message}</p>
               {/if}
-
-              <details class="details-card">
-                <summary>Advanced location settings</summary>
-                {#if hasSourcePath(source)}
-                  <div class="button-row">
-                    <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
-                      <Search size={14} strokeWidth={2} />
-                      <span>Use different folder</span>
-                    </button>
-                  </div>
-                  <p class="muted-copy compact-note">This does not move data already stored here.</p>
-                  <p class="mono-copy">{source.path}</p>
-                {/if}
-                <div class="field-grid">
-                  <label class="field-block">
-                    <span>Keep free</span>
-                    <select
-                      class="panel-input"
-                      value={String(sourceReservePercent(source))}
-                      onchange={(event) =>
-                        updateSourceField(source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
-                    >
-                      {#each RESERVE_OPTIONS as option}
-                        <option value={option}>{formatPercent(option)}</option>
-                      {/each}
-                    </select>
-                  </label>
-                  <label class="field-block">
-                    <span>If this location fills up</span>
-                    <select
-                      class="panel-input"
-                      value={source.opportunisticPolicy}
-                      onchange={(event) =>
-                        updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
-                    >
-                      <option value="block-writes">Stop writing new data here</option>
-                      <option value="drop-older-blocks">Delete blocks already protected somewhere else</option>
-                    </select>
-                  </label>
-                </div>
-
-                {#if sortedUsageVolumes(source.id).length > 0}
-                  <div class="usage-block">
-                    <p class="subheading">Spaces stored here</p>
-                    <div class="usage-list">
-                      {#each sortedUsageVolumes(source.id) as usage (usage.volumeId)}
-                        {@const mountedPresentation = mountedPresentationFor(usage.volumeId)}
-                        <div class="usage-row">
-                          <div class="usage-main">
-                            <VolumeIdentity
-                              compact={true}
-                              label={mountedPresentation ? mountedPresentation.label : shortVolumeId(usage.volumeId)}
-                              secondary={mountedPresentation ? shortVolumeId(usage.volumeId) : ''}
-                              title={usage.volumeId}
-                              filePayload={mountedPresentation?.filePayload ?? ''}
-                              fileMimeType={mountedPresentation?.fileMimeType ?? ''}
-                              fileName={mountedPresentation?.fileName ?? ''}
-                            />
-                          </div>
-                          <div class="usage-meta">
-                            <span>{formatSize(usage.fileBytes + usage.historyBytes)} total</span>
-                            {#if usage.fileBytes > 0}
-                              <span>{formatSize(usage.fileBytes)} files</span>
-                            {/if}
-                            {#if usage.historyBytes > 0}
-                              <span>{formatSize(usage.historyBytes)} history</span>
-                            {/if}
-                          </div>
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-
-                <div class="danger-block">
-                  <p class="subheading">Move or remove this location</p>
-                  <div class="button-row">
-                    <button
-                      type="button"
-                      class="panel-btn subtle compact"
-                      onclick={() => startMerge(source.id)}
-                      disabled={configDraft.sources.length < 2 || !hasSourcePath(source)}
-                    >
-                      <ArrowRightLeft size={14} strokeWidth={2} />
-                      <span>Move stored data elsewhere</span>
-                    </button>
-                    {#if canRemoveAnySource()}
-                      <ArmedActionButton
-                        class="panel-btn subtle compact danger"
-                        icon={Trash2}
-                        text="Remove location"
-                        armed={true}
-                        autoDisarmMs={3000}
-                        onPress={() => removeSource(source.id)}
-                      />
-                    {/if}
-                  </div>
-
-                  {#if mergeSourceId === source.id}
-                    <div class="merge-box">
-                      {#if mergeLoading}
-                        <p class="muted-copy">Checking where this data can be moved...</p>
-                      {:else if mergeCandidates.length === 0}
-                        <p class="muted-copy">{mergeMessage}</p>
-                      {:else}
-                        <p class="muted-copy">{mergeMessage}</p>
-                        <select class="panel-input" bind:value={mergeTargetId}>
-                          {#each mergeCandidates as candidate (candidate.id)}
-                            <option value={candidate.id}>{candidate.path}</option>
-                          {/each}
-                        </select>
-                        <div class="button-row">
-                          <button type="button" class="panel-btn subtle compact" onclick={cancelMerge}>Cancel</button>
-                          <button
-                            type="button"
-                            class="panel-btn primary compact"
-                            onclick={applyMerge}
-                            disabled={mergeApplying || mergeTargetId.trim() === ''}
-                          >
-                            <span>{mergeApplying ? 'Moving...' : 'Move data'}</span>
-                          </button>
-                        </div>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              </details>
             </article>
           {/each}
-        </div>
-      </section>
-
-      <section class="panel-section" bind:this={manualDiscoverySectionElement}>
-        <div class="section-head">
-          <div>
-            <p class="section-step">2. Find existing Nearbytes folders</p>
-            <h3>Scan Dropbox, iCloud, OneDrive, and other folders for Nearbytes data</h3>
-            <p class="section-copy">
-              Use this when you already have Nearbytes data somewhere else and want to add it to your saved locations.
-            </p>
-          </div>
-          <div class="section-metrics">
-            <button type="button" class="panel-btn subtle compact" onclick={toggleDiscovery} disabled={discoveryLoading}>
-              <Search size={14} strokeWidth={2} />
-              <span>{discoveryOpen ? 'Hide results' : 'Scan now'}</span>
-            </button>
-            {#if dismissedSuggestionCount() > 0}
-              <button type="button" class="panel-btn subtle compact" onclick={restoreDismissedSuggestions}>
-                <span>Show hidden</span>
-              </button>
-            {/if}
-          </div>
-        </div>
-
-        {#if discoveryOpen}
-          {#if discoveryLoading}
-            <p class="muted-copy">Scanning folders...</p>
-          {:else if sourceSuggestionRows().length === 0}
-            <p class="muted-copy">No new Nearbytes folders were found.</p>
-          {:else}
-            <div class="scan-card-list">
-              {#each sourceSuggestionRows() as row (row.source.path)}
-                <article class="scan-card">
-                  <div class="scan-copy">
+          {#each sourceSuggestionRows() as row (row.source.path)}
+            <article class="location-card suggestion-card">
+              <div class="card-head">
+                <div class="card-title">
+                  <div class="card-icon" title={row.source.path}>
+                    <Search size={16} strokeWidth={2.1} />
+                  </div>
+                  <div title={row.source.path}>
                     <p class="provider-label">{formatProvider(row.source.provider)}</p>
-                    <p class="scan-path">{row.source.path}</p>
+                    <h4>{compactPath(row.source.path)}</h4>
                   </div>
-                  <div class="button-row">
-                    <button type="button" class="panel-btn subtle compact" onclick={() => addDiscoveredSource(row.source)}>
-                      <Plus size={14} strokeWidth={2} />
-                      <span>Add location</span>
-                    </button>
-                    <button type="button" class="panel-btn subtle compact danger" onclick={() => dismissDiscovery(row.source)}>
-                      <span>Hide</span>
-                    </button>
-                  </div>
-                </article>
-              {/each}
+                </div>
+                <div class="card-status">
+                  <span class="status-pill tone-muted">Found automatically</span>
+                </div>
+              </div>
+
+              <p class="card-copy">{sourceSuggestionCopy(row.source)}</p>
+
+              <div class="button-row">
+                <button type="button" class="panel-btn subtle compact" onclick={() => addDiscoveredSource(row.source)}>
+                  <Plus size={14} strokeWidth={2} />
+                  <span>Use folder</span>
+                </button>
+                <button type="button" class="panel-btn subtle compact danger" onclick={() => dismissDiscovery(row.source)}>
+                  <span>Hide</span>
+                </button>
+              </div>
+            </article>
+          {/each}
+
+          <article class="location-card add-card">
+            <button type="button" class="add-card-button" onclick={addSourceCard} title="Add a storage location manually">
+              <Plus size={20} strokeWidth={2.1} />
+            </button>
+            <div class="usage-main">
+              <p class="provider-label">Manual</p>
+              <h4>Add a folder</h4>
             </div>
-          {/if}
-        {/if}
+            <p class="card-copy">Choose a folder yourself if Nearbytes did not find it automatically.</p>
+          </article>
+        </div>
       </section>
 
       {#if configPath}
@@ -1398,17 +1248,28 @@
           <p class="eyebrow">This space</p>
           <h2>Choose which locations keep a protected copy</h2>
           <p class="hero-text">
-            Turn on at least one writable location below. These rules apply only to the current space.
+            Turn on at least one writable location below. Existing Nearbytes folders are found automatically, and you can add one yourself with the + card.
           </p>
         </div>
         <div class="hero-actions">
-          <button type="button" class="panel-btn primary" onclick={addSourceCard}>
-            <Plus size={14} strokeWidth={2} />
-            <span>Add folder</span>
-          </button>
           <span class="summary-pill" class:warning={autosaveStatus === 'error'}>{autosaveLabel()}</span>
           {#if volumeId}
             <span class="summary-pill" class:warning={!hasDurableDestination(volumeId)}>{protectionSummary(volumeId)}</span>
+          {/if}
+          <span class="summary-pill" class:warning={Boolean(discoveryError)}>{discoverySummary()}</span>
+          <button
+            type="button"
+            class="panel-btn subtle compact icon-btn"
+            onclick={() => void refreshDiscoverySuggestions()}
+            disabled={discoveryLoading}
+            title="Scan again"
+          >
+            <RefreshCw size={14} strokeWidth={2} />
+          </button>
+          {#if dismissedSuggestionCount() > 0}
+            <button type="button" class="panel-btn subtle compact" onclick={restoreDismissedSuggestions}>
+              <span>Show hidden</span>
+            </button>
           {/if}
         </div>
       </header>
@@ -1427,6 +1288,10 @@
           <Shield size={15} strokeWidth={2} />
           <span>{protectionHint(volumeId)}</span>
         </div>
+
+        {#if discoveryError}
+          <p class="warning-copy">{discoveryError}</p>
+        {/if}
 
         <section class="panel-section">
           <div class="section-head">
@@ -1473,7 +1338,7 @@
                   </div>
                 </div>
 
-                <label class="toggle-row large-toggle">
+                <label class="inline-toggle">
                   <input
                     type="checkbox"
                     checked={keepsFullCopy(destination)}
@@ -1517,137 +1382,80 @@
                   </div>
                 {/if}
 
-                <details class="details-card">
-                  <summary>Location settings</summary>
-                  <p class="muted-copy">These settings apply to all spaces, not just the one currently open.</p>
-
-                  <div class="button-row">
-                    <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)} disabled={!hasSourcePath(source)}>
-                      <FolderOpen size={14} strokeWidth={2} />
-                      <span>Open folder</span>
-                    </button>
-                    <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
-                      <Search size={14} strokeWidth={2} />
-                      <span>{hasSourcePath(source) ? 'Use different folder' : 'Choose folder'}</span>
-                    </button>
-                  </div>
-                  {#if hasSourcePath(source)}
-                    <p class="muted-copy compact-note">Using a different folder does not move data already stored here.</p>
-                    <p class="mono-copy">{source.path}</p>
-                  {/if}
-
-                  <div class="toggle-list">
-                    <label class="toggle-row">
-                      <input
-                        type="checkbox"
-                        checked={source.enabled}
-                        onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)}
-                      />
-                      <div>
-                        <span class="toggle-title">Read incoming data</span>
-                        <span class="toggle-copy">Nearbytes can read data that appears in this folder.</span>
-                      </div>
-                    </label>
-                    <label class="toggle-row">
-                      <input
-                        type="checkbox"
-                        checked={source.writable}
-                        onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)}
-                      />
-                      <div>
-                        <span class="toggle-title">Write fresh data</span>
-                        <span class="toggle-copy">Nearbytes may save new encrypted data to this location.</span>
-                      </div>
-                    </label>
-                  </div>
-
-                  <div class="field-grid">
-                    <label class="field-block">
-                      <span>Keep free</span>
-                      <select
-                        class="panel-input"
-                        value={String(sourceReservePercent(source))}
-                        onchange={(event) =>
-                          updateSourceField(source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
-                      >
-                        {#each RESERVE_OPTIONS as option}
-                          <option value={option}>{formatPercent(option)}</option>
-                        {/each}
-                      </select>
-                    </label>
-                    <label class="field-block">
-                      <span>If this location fills up</span>
-                      <select
-                        class="panel-input"
-                        value={source.opportunisticPolicy}
-                        onchange={(event) =>
-                          updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
-                      >
-                        <option value="block-writes">Stop writing new data here</option>
-                        <option value="drop-older-blocks">Delete blocks already protected somewhere else</option>
-                      </select>
-                    </label>
-                  </div>
-
+                <div class="button-row">
+                  <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)} disabled={!hasSourcePath(source)}>
+                    <FolderOpen size={14} strokeWidth={2} />
+                    <span>Open</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="panel-btn subtle compact"
+                    onclick={() => void (hasSourcePath(source) ? moveSourceFolder(source.id) : chooseSourceFolder(source.id))}
+                    disabled={movingSourceId === source.id || Boolean(source.moveFromSourceId) || hasPendingMove(source.id)}
+                    title={hasSourcePath(source) ? 'Move this storage location without interrupting service' : 'Choose folder'}
+                  >
+                    <ArrowRightLeft size={14} strokeWidth={2} />
+                    <span>{movingSourceId === source.id ? 'Moving...' : hasSourcePath(source) ? 'Move folder' : 'Choose folder'}</span>
+                  </button>
                   {#if canRemoveAnySource()}
                     <ArmedActionButton
                       class="panel-btn subtle compact danger"
                       icon={Trash2}
-                      text="Remove location"
+                      text="Remove"
                       armed={true}
                       autoDisarmMs={3000}
                       onPress={() => removeSource(source.id)}
                     />
                   {/if}
-                </details>
+                </div>
+
+                <div class="fact-row">
+                  <span>{locationSummary(source)}</span>
+                </div>
               </article>
             {/each}
-          </div>
-        </section>
-
-        <section class="panel-section" bind:this={manualDiscoverySectionElement}>
-          <div class="section-head">
-            <div>
-              <p class="section-step">Scan for folders</p>
-              <h3>Add an existing Nearbytes folder to this space</h3>
-              <p class="section-copy">
-                If this space already exists in another synced folder, you can add that location here.
-              </p>
-            </div>
-            <div class="section-metrics">
-              <button type="button" class="panel-btn subtle compact" onclick={toggleDiscovery} disabled={discoveryLoading}>
-                <Search size={14} strokeWidth={2} />
-                <span>{discoveryOpen ? 'Hide results' : 'Scan now'}</span>
-              </button>
-            </div>
-          </div>
-          {#if discoveryOpen}
-            {#if discoveryLoading}
-              <p class="muted-copy">Scanning folders...</p>
-            {:else if sourceSuggestionRows().length === 0}
-              <p class="muted-copy">No new Nearbytes folders were found.</p>
-            {:else}
-              <div class="scan-card-list">
-                {#each sourceSuggestionRows() as row (row.source.path)}
-                  <article class="scan-card">
-                    <div class="scan-copy">
+            {#each sourceSuggestionRows() as row (row.source.path)}
+              <article class="rule-card suggestion-card">
+                <div class="card-head">
+                  <div class="card-title">
+                    <div class="card-icon" title={row.source.path}>
+                      <Search size={16} strokeWidth={2.1} />
+                    </div>
+                    <div title={row.source.path}>
                       <p class="provider-label">{formatProvider(row.source.provider)}</p>
-                      <p class="scan-path">{row.source.path}</p>
+                      <h4>{compactPath(row.source.path)}</h4>
                     </div>
-                    <div class="button-row">
-                      <button type="button" class="panel-btn subtle compact" onclick={() => addDiscoveredSource(row.source)}>
-                        <Plus size={14} strokeWidth={2} />
-                        <span>Add location</span>
-                      </button>
-                      <button type="button" class="panel-btn subtle compact danger" onclick={() => dismissDiscovery(row.source)}>
-                        <span>Hide</span>
-                      </button>
-                    </div>
-                  </article>
-                {/each}
+                  </div>
+                  <div class="card-status">
+                    <span class="status-pill tone-muted">Found automatically</span>
+                  </div>
+                </div>
+
+                <p class="card-copy">{sourceSuggestionCopy(row.source)}</p>
+
+                <div class="button-row">
+                  <button type="button" class="panel-btn subtle compact" onclick={() => addDiscoveredSource(row.source)}>
+                    <Plus size={14} strokeWidth={2} />
+                    <span>Add location</span>
+                  </button>
+                  <button type="button" class="panel-btn subtle compact danger" onclick={() => dismissDiscovery(row.source)}>
+                    <span>Hide</span>
+                  </button>
+                </div>
+              </article>
+            {/each}
+
+            <article class="rule-card add-card">
+              <button type="button" class="add-card-button" onclick={addSourceCard} title="Add a storage location manually">
+                <Plus size={20} strokeWidth={2.1} />
+              </button>
+              <div class="usage-main">
+                <p class="provider-label">Manual</p>
+                <h4>Add a folder</h4>
               </div>
-            {/if}
-          {/if}
+              <p class="card-copy">Choose a folder yourself if Nearbytes did not find it automatically.</p>
+            </article>
+          </div>
         </section>
       {/if}
     {/if}
@@ -1859,7 +1667,7 @@
   .card-title > div,
   .card-head,
   .card-status,
-  .toggle-row > div,
+  .inline-toggle > div,
   .usage-main,
   .field-block {
     min-width: 0;
@@ -1969,6 +1777,13 @@
     padding: 0 0.66rem;
   }
 
+  .panel-btn.icon-btn,
+  :global(.panel-btn.icon-btn) {
+    width: 30px;
+    min-width: 30px;
+    padding: 0;
+  }
+
   .panel-btn.danger,
   :global(.panel-btn.danger) {
     border-color: rgba(248, 113, 113, 0.24);
@@ -2019,29 +1834,66 @@
     gap: 0.68rem;
   }
 
-  .toggle-row {
-    display: grid;
-    grid-template-columns: auto 1fr;
+  .compact-toggle-row,
+  .card-control-row {
+    display: flex;
+    flex-wrap: wrap;
     gap: 0.65rem;
-    align-items: start;
-    padding: 0.72rem 0.78rem;
-    border-radius: 12px;
-    border: 1px solid rgba(96, 165, 250, 0.14);
-    background: rgba(12, 23, 41, 0.54);
+    align-items: center;
   }
 
-  .toggle-row input {
+  .card-control-row {
+    justify-content: space-between;
+    align-items: end;
+  }
+
+  .compact-icon-toggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 10px;
+    border: 1px solid rgba(96, 165, 250, 0.14);
+    background: rgba(10, 18, 31, 0.6);
+    color: rgba(191, 219, 254, 0.82);
+    cursor: pointer;
+  }
+
+  .compact-icon-toggle.checked {
+    border-color: rgba(45, 212, 191, 0.26);
+    background: rgba(8, 56, 49, 0.42);
+    color: var(--teal);
+  }
+
+  .compact-icon-toggle input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .compact-field {
+    min-width: 112px;
+    max-width: 148px;
+  }
+
+  .inline-toggle {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.55rem;
+    align-items: start;
+  }
+
+  .inline-toggle input {
     margin-top: 0.22rem;
     width: 17px;
     height: 17px;
     accent-color: #14b8a6;
   }
 
-  .toggle-row.large-toggle {
-    background: rgba(13, 26, 47, 0.72);
-  }
-
-  .toggle-row > div {
+  .inline-toggle > div {
     display: grid;
     gap: 0.12rem;
   }
@@ -2065,11 +1917,9 @@
     gap: 0.5rem 1rem;
   }
 
-  .fact-row span,
-  .usage-meta span {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
+  .fact-row span {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .subheading {
@@ -2130,6 +1980,41 @@
 
   .details-card[open] summary::before {
     content: '-';
+  }
+
+  .suggestion-card {
+    background: rgba(8, 18, 33, 0.56);
+  }
+
+  .add-card {
+    place-items: center;
+    align-content: center;
+    text-align: center;
+    background: rgba(8, 18, 33, 0.42);
+    border-style: dashed;
+  }
+
+  .add-card-button {
+    width: 46px;
+    height: 46px;
+    border-radius: 16px;
+    border: 1px dashed rgba(103, 232, 249, 0.28);
+    background: rgba(12, 24, 43, 0.72);
+    color: rgba(241, 245, 249, 0.94);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition:
+      transform 120ms ease,
+      border-color 120ms ease,
+      background 120ms ease;
+  }
+
+  .add-card-button:hover {
+    transform: translateY(-1px);
+    border-color: rgba(153, 246, 228, 0.42);
+    background: rgba(14, 32, 56, 0.88);
   }
 
   .scan-card {

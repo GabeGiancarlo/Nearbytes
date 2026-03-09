@@ -14,6 +14,7 @@ export interface SourceConfigEntry {
   readonly writable: boolean;
   readonly reservePercent: number;
   readonly opportunisticPolicy: StorageFullPolicy;
+  readonly moveFromSourceId?: string;
 }
 
 export interface VolumeDestinationConfig {
@@ -56,6 +57,7 @@ const sourceConfigEntrySchema = z.object({
   writable: z.boolean().default(true),
   reservePercent: z.number().int().min(0).max(95).default(5),
   opportunisticPolicy: fullPolicySchema.default('drop-older-blocks'),
+  moveFromSourceId: z.string().trim().min(1).optional(),
 });
 
 const volumeDestinationSchema = z.object({
@@ -169,8 +171,21 @@ export function parseRootsConfig(value: unknown): RootsConfig {
       writable: source.writable,
       reservePercent: source.reservePercent,
       opportunisticPolicy: source.opportunisticPolicy,
+      moveFromSourceId: source.moveFromSourceId?.trim() || undefined,
     } satisfies SourceConfigEntry;
   });
+
+  for (const source of normalizedSources) {
+    if (!source.moveFromSourceId) {
+      continue;
+    }
+    if (!sourceIds.has(source.moveFromSourceId)) {
+      throw new Error(`Pending move source not found: ${source.moveFromSourceId}`);
+    }
+    if (source.moveFromSourceId === source.id) {
+      throw new Error(`Source ${source.id} cannot move from itself`);
+    }
+  }
 
   const normalizedDefault: DefaultVolumePolicy = {
     destinations: normalizeDestinationList(parsed.defaultVolume.destinations, sourceIds),
