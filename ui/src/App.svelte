@@ -1134,13 +1134,7 @@
     if (!joinedChatIdentity) {
       return false;
     }
-    if (!joinedChatIdentity.publicKey || !joinedPublishedIdentity) {
-      return true;
-    }
-    return (
-      joinedPublishedIdentity.record.profile.displayName !== joinedChatIdentity.displayName.trim() ||
-      (joinedPublishedIdentity.record.profile.bio ?? '') !== joinedChatIdentity.bio.trim()
-    );
+    return configuredIdentityNeedsPublish(joinedChatIdentity);
   });
 
   const viewFiles = $derived.by(() => {
@@ -1228,7 +1222,7 @@
   const workspaceSplit = $derived.by(() => activeMount?.workspaceSplit ?? 56);
   const showSplitWorkspace = $derived.by(() => showFilesWorkspace && showChatWorkspace);
   const workspacePanelsTemplate = $derived.by(() =>
-    showSplitWorkspace ? `minmax(0, 1fr) 14px minmax(320px, ${100 - workspaceSplit}%)` : '1fr'
+    showSplitWorkspace ? `minmax(0, 1fr) 14px minmax(240px, ${100 - workspaceSplit}%)` : '1fr'
   );
   const fileManagerTemplate = $derived.by(
     () => (showPreviewPane ? `minmax(300px, ${fileManagerSplit}%) 14px minmax(360px, 1fr)` : '1fr')
@@ -1344,7 +1338,7 @@
     event.preventDefault();
     const rect = container.getBoundingClientRect();
     const minLeft = 360;
-    const minRight = 320;
+    const minRight = 240;
 
     const updateSplit = (clientX: number) => {
       const clamped = Math.min(rect.width - minRight, Math.max(minLeft, clientX - rect.left));
@@ -2297,9 +2291,26 @@
     showIdentityManager = true;
   }
 
-  async function publishSelectedChatIdentity(): Promise<ConfiguredIdentity | null> {
-    if (!auth || !selectedChatIdentity) {
-      identityManagerError = 'Choose an identity first.';
+  function configuredIdentityNeedsPublish(identity: ConfiguredIdentity): boolean {
+    if (!identity.publicKey) {
+      return true;
+    }
+    const publishedIdentity = publishedIdentityByPublicKey.get(identity.publicKey);
+    if (!publishedIdentity) {
+      return true;
+    }
+    return (
+      publishedIdentity.record.profile.displayName !== identity.displayName.trim() ||
+      (publishedIdentity.record.profile.bio ?? '') !== identity.bio.trim()
+    );
+  }
+
+  async function ensureChatIdentityPublished(
+    identity: ConfiguredIdentity,
+    options: { announceSuccess?: boolean; openManagerOnError?: boolean } = {}
+  ): Promise<ConfiguredIdentity | null> {
+    if (!auth) {
+      identityManagerError = 'Open a volume before publishing an identity.';
       identityManagerMessage = '';
       return null;
     }
@@ -2308,45 +2319,68 @@
       identityManagerMessage = '';
       return null;
     }
-    if (selectedChatIdentity.address.trim() === '') {
+    if (identity.address.trim() === '') {
       identityManagerError = 'Identity secret is required.';
       identityManagerMessage = '';
-      showIdentityManager = true;
+      if (options.openManagerOnError) {
+        showIdentityManager = true;
+      }
       return null;
     }
-    if (selectedChatIdentity.displayName.trim() === '') {
+    if (identity.displayName.trim() === '') {
       identityManagerError = 'Display name is required before publishing.';
       identityManagerMessage = '';
-      showIdentityManager = true;
+      if (options.openManagerOnError) {
+        showIdentityManager = true;
+      }
       return null;
     }
-    if (!selectedChatIdentityNeedsPublish && selectedChatIdentity.publicKey) {
-      return selectedChatIdentity;
+    if (!configuredIdentityNeedsPublish(identity) && identity.publicKey) {
+      return identity;
     }
 
     identityManagerLoading = true;
     identityManagerError = '';
-    identityManagerMessage = '';
+    if (options.announceSuccess) {
+      identityManagerMessage = '';
+    }
     try {
-      const published = await publishIdentity(auth, buildIdentitySecret(selectedChatIdentity), {
-        displayName: selectedChatIdentity.displayName.trim(),
-        bio: selectedChatIdentity.bio.trim() || undefined,
+      const published = await publishIdentity(auth, buildIdentitySecret(identity), {
+        displayName: identity.displayName.trim(),
+        bio: identity.bio.trim() || undefined,
       });
-      updateConfiguredChatIdentity(selectedChatIdentity.id, {
+      updateConfiguredChatIdentity(identity.id, {
         publicKey: published.published.authorPublicKey,
       });
       await handleChatMutated();
-      identityManagerMessage = `Published ${selectedChatIdentity.displayName.trim()} to this volume.`;
+      if (options.announceSuccess) {
+        identityManagerMessage = `Published ${identity.displayName.trim()} to this volume.`;
+      }
       return {
-        ...selectedChatIdentity,
+        ...identity,
         publicKey: published.published.authorPublicKey,
       };
     } catch (error) {
       identityManagerError = error instanceof Error ? error.message : 'Failed to publish identity';
+      if (options.openManagerOnError) {
+        showIdentityManager = true;
+      }
       return null;
     } finally {
       identityManagerLoading = false;
     }
+  }
+
+  async function publishSelectedChatIdentity(): Promise<ConfiguredIdentity | null> {
+    if (!selectedChatIdentity) {
+      identityManagerError = 'Choose an identity first.';
+      identityManagerMessage = '';
+      return null;
+    }
+    return ensureChatIdentityPublished(selectedChatIdentity, {
+      announceSuccess: true,
+      openManagerOnError: true,
+    });
   }
 
   async function joinCurrentVolumeChat(): Promise<ConfiguredIdentity | null> {
@@ -3981,6 +4015,11 @@
               activeIdentity={joinedChatIdentity}
               identityNeedsPublish={joinedChatIdentityNeedsPublish}
               onOpenIdentityManager={openIdentityManagerForChat}
+              onEnsureIdentityPublished={async (identity) =>
+                (await ensureChatIdentityPublished(identity, {
+                  announceSuccess: false,
+                  openManagerOnError: false,
+                })) !== null}
               onPreviewAttachment={previewChatAttachment}
               onChatMutated={handleChatMutated}
               externalRefreshVersion={chatRefreshVersion}

@@ -1,9 +1,11 @@
 <script lang="ts">
   import {
     listChat,
+    publishIdentity,
     sendChatMessage,
     type Auth,
     type ChatAttachment,
+    type IdentityProfile,
     type VolumeChatState,
   } from '../lib/api.js';
   import {
@@ -31,6 +33,7 @@
     activeIdentity = null,
     identityNeedsPublish = false,
     onOpenIdentityManager = undefined,
+    onEnsureIdentityPublished = undefined,
     onPreviewAttachment = undefined,
     onChatMutated = undefined,
     externalRefreshVersion = 0,
@@ -42,6 +45,7 @@
     activeIdentity?: ConfiguredIdentity | null;
     identityNeedsPublish?: boolean;
     onOpenIdentityManager?: (() => void) | undefined;
+    onEnsureIdentityPublished?: ((identity: ConfiguredIdentity) => Promise<boolean>) | undefined;
     onPreviewAttachment?: ((attachment: ChatAttachment) => void) | undefined;
     onChatMutated?: (() => Promise<void> | void) | undefined;
     externalRefreshVersion?: number;
@@ -173,6 +177,15 @@
     sending = true;
     try {
       errorMessage = '';
+      if (identityNeedsPublish) {
+        const publishSucceeded = onEnsureIdentityPublished
+          ? await onEnsureIdentityPublished(activeIdentity)
+          : await publishIdentityFromChat(activeIdentity);
+        if (!publishSucceeded) {
+          errorMessage = 'The current profile could not be published to this volume.';
+          return;
+        }
+      }
       await sendChatMessage(auth, buildIdentitySecret(activeIdentity), {
         body: body === '' ? undefined : body,
         attachment: pendingAttachment ?? undefined,
@@ -186,6 +199,30 @@
     } finally {
       sending = false;
     }
+  }
+
+  async function publishIdentityFromChat(identity: ConfiguredIdentity): Promise<boolean> {
+    if (!auth) {
+      return false;
+    }
+    const displayName = identity.displayName.trim();
+    if (displayName === '') {
+      return false;
+    }
+    const publishedProfile = identityByPublicKey.get(identity.publicKey)?.record.profile;
+    const profile: IdentityProfile = {
+      displayName,
+      bio: identity.bio.trim() || undefined,
+    };
+    if (
+      publishedProfile &&
+      publishedProfile.displayName === profile.displayName &&
+      (publishedProfile.bio ?? '') === (profile.bio ?? '')
+    ) {
+      return true;
+    }
+    await publishIdentity(auth, buildIdentitySecret(identity), profile);
+    return true;
   }
 
   async function handleDrop(event: DragEvent) {
