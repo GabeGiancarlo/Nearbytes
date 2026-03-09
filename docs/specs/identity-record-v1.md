@@ -17,6 +17,11 @@ This specification does not define:
 3. per-field privacy controls;
 4. encrypted private profile data.
 
+Relationship note:
+
+1. canonical publication of `nb.identity.record.v1` is defined in `identity-channel-v1.md`;
+2. foreign-volume materialization of the same public profile is defined in `identity-snapshot-v1.md`.
+
 Introductory note (non-normative):
 
 1. An identity secret is private user input, exactly like a volume secret.

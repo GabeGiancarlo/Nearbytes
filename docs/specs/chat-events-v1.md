@@ -29,6 +29,9 @@ Introductory model (non-normative):
 1. Nearbytes file-system events are defined in `file-events-v2.md`.
 2. Public sender profiles are defined in `identity-record-v1.md`.
 3. Source-bound file references are defined in `nb-src-ref-v1.md` and `nb-src-refs-v1.md`.
+4. Generic application-carried outer events are defined in `app-records-v1.md`.
+5. Canonical identity publication is defined in `identity-channel-v1.md`.
+6. Local volume materialization of identity state is defined in `identity-snapshot-v1.md`.
 
 ## 3. Outer Volume Event Types
 
@@ -45,11 +48,11 @@ Replay rule:
 2. chat replay MUST ignore file-system event types;
 3. all event types share the same deterministic ordering rules of the enclosing volume log.
 
-## 4. `DECLARE_IDENTITY`
+## 4. `DECLARE_IDENTITY` (Legacy Compatibility)
 
 Purpose:
 
-1. publish an identity record into the active volume.
+1. preserve compatibility with older chat-capable volumes that embedded identity records directly in the volume log.
 
 Required outer fields:
 
@@ -120,11 +123,11 @@ Interpretation:
 2. recipients who can open the same source volume MAY later import the referenced file;
 3. the attachment is a reference, not a duplicated blob.
 
-## 7. `CHAT_MESSAGE`
+## 7. `CHAT_MESSAGE` (Legacy Compatibility)
 
 Purpose:
 
-1. append a sender-authenticated chat entry into the active volume.
+1. preserve compatibility with older chat-capable volumes that emitted chat messages as their own outer event type.
 
 Required outer fields:
 
@@ -143,8 +146,10 @@ Rules:
 
 Chat clients reconstruct chat state by scanning the shared volume log and selecting:
 
-1. valid `DECLARE_IDENTITY` events for identity state;
-2. valid `CHAT_MESSAGE` events for message history.
+1. valid `DECLARE_IDENTITY` events for legacy identity state;
+2. valid `CHAT_MESSAGE` events for legacy message history;
+3. valid `APP_RECORD` events carrying `nb.identity.snapshot.v1` for current identity state;
+4. valid `APP_RECORD` events carrying `nb.chat.message.v1` for current message history.
 
 Ordering rule:
 

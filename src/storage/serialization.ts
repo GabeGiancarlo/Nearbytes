@@ -21,6 +21,7 @@ export function serializeEvent(event: SignedEvent): SerializedEvent {
     deletedAt?: number;
     renamedAt?: number;
     authorPublicKey?: string;
+    protocol?: string;
     record?: string;
     message?: string;
     publishedAt?: number;
@@ -55,6 +56,9 @@ export function serializeEvent(event: SignedEvent): SerializedEvent {
   if (event.payload.authorPublicKey !== undefined) {
     payload.authorPublicKey = event.payload.authorPublicKey;
   }
+  if (event.payload.protocol !== undefined) {
+    payload.protocol = event.payload.protocol;
+  }
   if (event.payload.record !== undefined) {
     payload.record = event.payload.record;
   }
@@ -83,7 +87,8 @@ export function deserializeEvent(data: SerializedEvent): SignedEvent {
     data.payload.type !== EventType.DELETE_FILE &&
     data.payload.type !== EventType.RENAME_FILE &&
     data.payload.type !== EventType.DECLARE_IDENTITY &&
-    data.payload.type !== EventType.CHAT_MESSAGE
+    data.payload.type !== EventType.CHAT_MESSAGE &&
+    data.payload.type !== EventType.APP_RECORD
   ) {
     throw new Error(`Invalid event type: ${data.payload.type}`);
   }
@@ -118,6 +123,9 @@ export function deserializeEvent(data: SerializedEvent): SignedEvent {
   if (data.payload.authorPublicKey !== undefined && typeof data.payload.authorPublicKey !== 'string') {
     throw new Error('Invalid authorPublicKey: must be a string');
   }
+  if (data.payload.protocol !== undefined && typeof data.payload.protocol !== 'string') {
+    throw new Error('Invalid protocol: must be a string');
+  }
   if (data.payload.record !== undefined && typeof data.payload.record !== 'string') {
     throw new Error('Invalid record: must be a string');
   }
@@ -139,6 +147,7 @@ export function deserializeEvent(data: SerializedEvent): SignedEvent {
       deletedAt: data.payload.deletedAt,
       renamedAt: data.payload.renamedAt,
       authorPublicKey: data.payload.authorPublicKey,
+      protocol: data.payload.protocol,
       record: data.payload.record,
       message: data.payload.message,
       publishedAt: data.payload.publishedAt,
@@ -171,6 +180,7 @@ export function serializeEventPayload(payload: EventPayload): Uint8Array {
     payload.toFileName !== undefined ||
     payload.renamedAt !== undefined ||
     payload.authorPublicKey !== undefined ||
+    payload.protocol !== undefined ||
     payload.record !== undefined ||
     payload.message !== undefined ||
     payload.publishedAt !== undefined;
@@ -184,7 +194,9 @@ export function serializeEventPayload(payload: EventPayload): Uint8Array {
           ? 2
           : payload.type === EventType.DECLARE_IDENTITY
             ? 3
-            : 4;
+            : payload.type === EventType.CHAT_MESSAGE
+              ? 4
+              : 5;
   const fileNameBytes = new TextEncoder().encode(payload.fileName);
   const fileNameLength = new Uint8Array(4);
   const fileNameLengthView = new DataView(fileNameLength.buffer);
@@ -253,6 +265,8 @@ export function deserializeEventPayload(data: Uint8Array): EventPayload {
             ? EventType.DECLARE_IDENTITY
             : eventTypeByte === 4
               ? EventType.CHAT_MESSAGE
+              : eventTypeByte === 5
+                ? EventType.APP_RECORD
           : null;
   if (!type) {
     throw new Error(`Invalid event payload: unknown event type ${eventTypeByte}`);

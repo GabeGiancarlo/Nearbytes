@@ -60,8 +60,9 @@ export function createSignature(bytes: Uint8Array): Signature {
  * CREATE_FILE: Adds a file to the volume
  * DELETE_FILE: Removes a file from the volume
  * RENAME_FILE: Renames a logical filename within the volume
- * DECLARE_IDENTITY: Publishes an identity-signed profile record into the volume
- * CHAT_MESSAGE: Publishes an identity-signed chat message into the volume
+ * DECLARE_IDENTITY: Legacy outer event for identity records
+ * CHAT_MESSAGE: Legacy outer event for chat messages
+ * APP_RECORD: Generic outer event for canonical JSON application records
  */
 export enum EventType {
   CREATE_FILE = 'CREATE_FILE',
@@ -69,6 +70,7 @@ export enum EventType {
   RENAME_FILE = 'RENAME_FILE',
   DECLARE_IDENTITY = 'DECLARE_IDENTITY',
   CHAT_MESSAGE = 'CHAT_MESSAGE',
+  APP_RECORD = 'APP_RECORD',
 }
 
 /**
@@ -105,6 +107,15 @@ export enum EventType {
  * - authorPublicKey: Signer identity public key hex
  * - message: Canonical JSON string encoding of nb.chat.message.v1
  * - publishedAt: Event publication timestamp
+ *
+ * For APP_RECORD events:
+ * - fileName: Reserved, MUST be empty
+ * - hash: Must be empty hash (all zeros)
+ * - encryptedKey: Must be empty
+ * - authorPublicKey: Nested signer identity/public key hex
+ * - protocol: Nested canonical JSON protocol id (must equal nested p field)
+ * - record: Canonical JSON string encoding of the nested app record
+ * - publishedAt: Event publication timestamp
  */
 export interface EventPayload {
   readonly type: EventType;
@@ -137,11 +148,15 @@ export interface EventPayload {
    */
   readonly renamedAt?: number;
   /**
-   * Identity public key hex for DECLARE_IDENTITY and CHAT_MESSAGE events
+   * Identity/public key hex for DECLARE_IDENTITY, CHAT_MESSAGE, and APP_RECORD events
    */
   readonly authorPublicKey?: string;
   /**
-   * Canonical JSON string encoding of nb.identity.record.v1
+   * Nested app record protocol id for APP_RECORD events
+   */
+  readonly protocol?: string;
+  /**
+   * Canonical JSON string encoding of nested record data
    */
   readonly record?: string;
   /**
@@ -179,6 +194,7 @@ export interface SerializedEvent {
     readonly deletedAt?: number;
     readonly renamedAt?: number;
     readonly authorPublicKey?: string;
+    readonly protocol?: string;
     readonly record?: string;
     readonly message?: string;
     readonly publishedAt?: number;
