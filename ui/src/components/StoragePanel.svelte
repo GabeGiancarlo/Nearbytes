@@ -939,7 +939,7 @@
                         <div class="scan-copy">
                           <p class="scan-path">{item.path}</p>
                           <div class="source-facts compact-detail-facts">
-                            <span>{item.classification === 'marker' ? 'Marker' : 'Layout'}</span>
+                            <span>{item.classification === 'marker' ? 'Intro page' : 'Layout'}</span>
                             {#if item.hasChannels}
                               <span>Channels</span>
                             {/if}

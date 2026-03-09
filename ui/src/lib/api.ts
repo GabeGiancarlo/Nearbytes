@@ -919,7 +919,7 @@ export async function openRootInFileManager(rootId: string): Promise<void> {
 }
 
 /**
- * Scans local synced directories for `.nearbytes` marker folders.
+ * Scans local synced directories for Nearbytes marker locations.
  */
 export async function discoverSources(params?: {
   maxDepth?: number;

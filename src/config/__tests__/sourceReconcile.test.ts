@@ -4,6 +4,7 @@ import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RootsConfig } from '../roots.js';
 import { reconcileDiscoveredSources } from '../sourceReconcile.js';
+import { NEARBYTES_MARKER_FILE } from '../sourceDiscovery.js';
 
 describe('source reconciliation', () => {
   const previousScanDirs = process.env.NEARBYTES_SOURCE_SCAN_DIRS;
@@ -65,7 +66,7 @@ describe('source reconciliation', () => {
 
     await mkdir(mainRoot, { recursive: true });
     await mkdir(path.join(sharedRoot, 'channels', unknownVolumeId), { recursive: true });
-    await writeFile(path.join(sharedRoot, '.nearbytes'), 'marker\n', 'utf8');
+    await writeFile(path.join(sharedRoot, NEARBYTES_MARKER_FILE), '<html></html>\n', 'utf8');
     process.env.NEARBYTES_SOURCE_SCAN_DIRS = sharedRoot;
 
     const result = await reconcileDiscoveredSources({

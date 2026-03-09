@@ -72,7 +72,7 @@ export async function startApiRuntime(options: ApiRuntimeOptions = {}): Promise<
   if (markerFailures.length > 0) {
     for (const failure of markerFailures) {
       logger.warn(
-        `Warning: failed to ensure .nearbytes marker for source ${failure.rootId} (${failure.path}): ${failure.error}`
+        `Warning: failed to ensure Nearbytes.html marker for source ${failure.rootId} (${failure.path}): ${failure.error}`
       );
     }
   }

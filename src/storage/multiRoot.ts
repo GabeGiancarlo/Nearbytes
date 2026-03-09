@@ -7,7 +7,7 @@ import {
   type SourceConfigEntry,
   type VolumeDestinationConfig,
 } from '../config/roots.js';
-import { ensureNearbytesMarker } from '../config/sourceDiscovery.js';
+import { ensureNearbytesMarker, NEARBYTES_MARKER_FILES } from '../config/sourceDiscovery.js';
 import { StorageError } from '../types/errors.js';
 import type { StorageBackend } from '../types/storage.js';
 import { FilesystemStorageBackend } from './filesystem.js';
@@ -892,7 +892,7 @@ export class MultiRootStorageBackend implements StorageBackend {
     const historyByVolume = new Map<string, { bytes: number; files: number }>();
 
     for (const file of files) {
-      if (file.relativePath === '.nearbytes') {
+      if (NEARBYTES_MARKER_FILES.includes(file.relativePath as (typeof NEARBYTES_MARKER_FILES)[number])) {
         continue;
       }
       totalBytes += file.size;
@@ -1132,7 +1132,7 @@ async function listRootFiles(rootPath: string): Promise<RootFileEntry[]> {
     }
 
     for (const entry of entries) {
-      if (entry.name === '.nearbytes') {
+      if (NEARBYTES_MARKER_FILES.includes(entry.name as (typeof NEARBYTES_MARKER_FILES)[number])) {
         continue;
       }
 

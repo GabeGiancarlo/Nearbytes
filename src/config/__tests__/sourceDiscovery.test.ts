@@ -8,6 +8,7 @@ import {
   discoverNearbytesSources,
   ensureNearbytesMarker,
   inspectNearbytesRoot,
+  NEARBYTES_LEGACY_MARKER_FILE,
   NEARBYTES_MARKER_FILE,
 } from '../sourceDiscovery.js';
 
@@ -48,7 +49,7 @@ describe('source discovery', () => {
 
     const markerPath = path.join(root, NEARBYTES_MARKER_FILE);
     const markerPayload = await readFile(markerPath, 'utf8');
-    expect(markerPayload).toContain('nearbytes-root-marker');
+    expect(markerPayload).toContain('Nearbytes storage location');
 
     const second = await ensureNearbytesMarker(root);
     expect(second).toBe(false);
@@ -105,6 +106,19 @@ describe('source discovery', () => {
     expect(inspection?.hasChannels).toBe(false);
     expect(inspection?.hasBlocks).toBe(false);
     expect(inspection?.volumeIds).toEqual([]);
+
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('detects legacy hidden marker files for compatibility', async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), 'nearbytes-source-legacy-marker-'));
+    const root = path.join(tempDir, 'legacy-root');
+    await mkdir(root, { recursive: true });
+    await writeFile(path.join(root, NEARBYTES_LEGACY_MARKER_FILE), 'legacy-marker\n', 'utf8');
+
+    const inspection = await inspectNearbytesRoot(root);
+    expect(inspection).not.toBeNull();
+    expect(inspection?.markerFile).toBe(path.join(root, NEARBYTES_LEGACY_MARKER_FILE));
 
     await rm(tempDir, { recursive: true, force: true });
   });

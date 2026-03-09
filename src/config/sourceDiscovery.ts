@@ -53,7 +53,10 @@ interface QueueEntry {
 const DEFAULT_MAX_DEPTH = 4;
 const DEFAULT_MAX_DIRECTORIES = 4000;
 const CHANNEL_DIRECTORY_REGEX = /^[a-f0-9]{64,200}$/i;
-export const NEARBYTES_MARKER_FILE = '.nearbytes';
+export const NEARBYTES_MARKER_FILE = 'Nearbytes.html';
+export const NEARBYTES_LEGACY_MARKER_FILE = '.nearbytes';
+export const NEARBYTES_MARKER_FILES = [NEARBYTES_MARKER_FILE, NEARBYTES_LEGACY_MARKER_FILE] as const;
+export const NEARBYTES_HOME_URL = 'https://anymatix.github.io/nearbytes/';
 const DEFAULT_NEARBYTES_DIRECTORY = 'nearbytes';
 const SKIP_DIRECTORY_NAMES = new Set([
   '.git',
@@ -106,7 +109,6 @@ export async function discoverNearbytesRoots(options?: {
       discovered.push({
         ...root,
         path: canonicalDir,
-        markerFile: path.join(canonicalDir, NEARBYTES_MARKER_FILE),
         provider: candidate.provider,
         autoUpdate: true,
       });
@@ -159,7 +161,7 @@ export async function discoverNearbytesSources(options?: {
 }
 
 /**
- * Ensures `.nearbytes` marker files exist for all configured roots.
+ * Ensures Nearbytes marker files exist for all configured roots.
  * Best-effort: returns per-root status and never throws.
  */
 export async function ensureNearbytesMarkers(sources: readonly SourceConfigEntry[]): Promise<MarkerEnsureResult[]> {
@@ -192,18 +194,18 @@ export async function ensureNearbytesMarkers(sources: readonly SourceConfigEntry
 }
 
 /**
- * Ensures `.nearbytes` exists in a root directory.
+ * Ensures `Nearbytes.html` exists in a root directory.
  * Returns true if created now, false if already present.
  */
 export async function ensureNearbytesMarker(rootPath: string): Promise<boolean> {
   const markerPath = path.join(rootPath, NEARBYTES_MARKER_FILE);
   await fs.mkdir(rootPath, { recursive: true });
 
-  if (await hasMarkerFile(rootPath)) {
+  if (await hasNamedMarkerFile(rootPath, NEARBYTES_MARKER_FILE)) {
     return false;
   }
 
-  await fs.writeFile(markerPath, 'nearbytes-root-marker\n', 'utf8');
+  await fs.writeFile(markerPath, buildNearbytesMarkerHtml(), 'utf8');
   return true;
 }
 
@@ -214,9 +216,9 @@ export async function inspectNearbytesRoot(rootPath: string): Promise<NearbytesR
     return null;
   }
 
-  const markerFile = path.join(resolvedRoot, NEARBYTES_MARKER_FILE);
   const channelsPath = path.join(resolvedRoot, 'channels');
   const blocksPath = path.join(resolvedRoot, 'blocks');
+  const markerFile = (await resolveMarkerFile(resolvedRoot)) ?? path.join(resolvedRoot, NEARBYTES_MARKER_FILE);
   const hasMarker = await hasMarkerFile(resolvedRoot);
   const hasChannels = await isDirectory(channelsPath);
   const hasBlocks = await isDirectory(blocksPath);
@@ -340,7 +342,7 @@ async function scanForNearbytesRoots(
       if (SKIP_DIRECTORY_NAMES.has(entry.name)) {
         continue;
       }
-      if (entry.name.startsWith('.') && entry.name !== '.nearbytes') {
+      if (entry.name.startsWith('.') && entry.name !== NEARBYTES_LEGACY_MARKER_FILE) {
         continue;
       }
       queue.push({
@@ -354,13 +356,109 @@ async function scanForNearbytesRoots(
 }
 
 async function hasMarkerFile(dirPath: string): Promise<boolean> {
+  for (const markerFile of NEARBYTES_MARKER_FILES) {
+    if (await hasNamedMarkerFile(dirPath, markerFile)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function hasNamedMarkerFile(dirPath: string, markerFile: string): Promise<boolean> {
   try {
-    const markerPath = path.join(dirPath, NEARBYTES_MARKER_FILE);
+    const markerPath = path.join(dirPath, markerFile);
     const stats = await fs.stat(markerPath);
     return stats.isFile();
   } catch {
     return false;
   }
+}
+
+async function resolveMarkerFile(dirPath: string): Promise<string | null> {
+  for (const markerFile of NEARBYTES_MARKER_FILES) {
+    if (await hasNamedMarkerFile(dirPath, markerFile)) {
+      return path.join(dirPath, markerFile);
+    }
+  }
+  return null;
+}
+
+function buildNearbytesMarkerHtml(): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nearbytes storage location</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #07111f;
+        --panel: rgba(10, 19, 36, 0.92);
+        --line: rgba(148, 163, 184, 0.2);
+        --text: #e2e8f0;
+        --muted: rgba(226, 232, 240, 0.72);
+        --accent: #67e8f9;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top left, rgba(34, 211, 238, 0.14), transparent 28%),
+          linear-gradient(180deg, #0a1222 0%, var(--bg) 100%);
+        color: var(--text);
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+      }
+      main {
+        width: min(760px, calc(100vw - 2rem));
+        padding: 1.6rem;
+        border-radius: 28px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        box-shadow: 0 24px 60px rgba(2, 6, 23, 0.42);
+      }
+      h1 { margin: 0 0 0.9rem; font-size: clamp(2rem, 5vw, 3rem); }
+      p { margin: 0.7rem 0 0; color: var(--muted); line-height: 1.65; }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 600;
+      }
+      code {
+        display: inline-block;
+        margin-top: 0.8rem;
+        padding: 0.22rem 0.45rem;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #dbeafe;
+        font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Nearbytes storage location</h1>
+      <p>
+        This folder is being used by Nearbytes as a shared storage location for encrypted blocks and
+        append-only space history.
+      </p>
+      <p>
+        You can leave this file in place. Nearbytes uses it to discover the location automatically.
+      </p>
+      <p>
+        Learn more at <a href="${NEARBYTES_HOME_URL}">${NEARBYTES_HOME_URL}</a>.
+      </p>
+      <p>
+        On macOS, if you have just copied Nearbytes into Applications, you may need:
+      </p>
+      <code>xattr -dr com.apple.quarantine "/Applications/Nearbytes.app"</code>
+    </main>
+  </body>
+</html>
+`;
 }
 
 async function resolveCanonicalDirectoryPath(targetPath: string): Promise<string | null> {

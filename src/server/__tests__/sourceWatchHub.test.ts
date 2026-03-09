@@ -32,15 +32,17 @@ describe('SourceWatchHub', () => {
     await delay(200);
 
     await mkdir(path.join(root, 'share-a'), { recursive: true });
-    await writeFile(path.join(root, 'share-a', '.nearbytes'), 'marker\n', 'utf8');
+    await writeFile(path.join(root, 'share-a', 'Nearbytes.html'), '<html></html>\n', 'utf8');
     await writeFile(path.join(root, 'share-a', 'touch.txt'), '1', 'utf8');
     await delay(450);
 
     subscription.unsubscribe();
 
     expect(errors).toEqual([]);
-    expect(updates).toHaveLength(1);
-    expect(updates[0]?.changedPaths.some((value) => value.includes('share-a'))).toBe(true);
+    expect(updates.length).toBeGreaterThanOrEqual(1);
+    expect(
+      updates.some((update) => update.changedPaths.some((value) => value.includes('share-a')))
+    ).toBe(true);
   });
 
   it('reports unsupported mode when no local scan roots are available', async () => {

@@ -299,9 +299,9 @@ describe('Nearbytes API (multi-root)', () => {
     expect(bodyText).toBe('split-root-content');
   });
 
-  it('discovers .nearbytes marker sources in configured scan paths', async () => {
-    const markerPath = path.join(backupRoot, '.nearbytes');
-    await fs.writeFile(markerPath, 'nearbytes-source', 'utf8');
+  it('discovers Nearbytes.html marker sources in configured scan paths', async () => {
+    const markerPath = path.join(backupRoot, 'Nearbytes.html');
+    await fs.writeFile(markerPath, '<html></html>', 'utf8');
     const originalScanPaths = process.env.NEARBYTES_SOURCE_SCAN_DIRS;
     process.env.NEARBYTES_SOURCE_SCAN_DIRS = tempDir;
 
@@ -355,7 +355,7 @@ describe('Nearbytes API (multi-root)', () => {
     }
   });
 
-  it('recreates .nearbytes marker after deletion for configured sources', async () => {
+  it('recreates Nearbytes.html marker after deletion for configured sources', async () => {
     const openRes = await request(app).post('/open').send({ secret: SECRET }).expect(200);
     const token = typedBody<OpenResponseBody>(openRes).token as string;
 
@@ -365,7 +365,7 @@ describe('Nearbytes API (multi-root)', () => {
       .attach('file', Buffer.from('marker-seed'), 'marker-seed.txt')
       .expect(200);
 
-    const markerPath = path.join(mainRoot, '.nearbytes');
+    const markerPath = path.join(mainRoot, 'Nearbytes.html');
     await fs.stat(markerPath);
     await fs.rm(markerPath, { force: true });
 
