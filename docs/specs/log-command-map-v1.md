@@ -2,7 +2,9 @@
 
 Status: draft normative specification.
 
-This document is the normative map from known interpreted log commands or log-carried payload families to their governing specification.
+This document is the lookup table between known interpreted Nearbytes commands or carried log payloads and the normative specifications that govern them. Its purpose is simple: every known command or protocol family should have one clear spec home.
+
+It does not redefine those commands. It only maps them to the documents that do.
 
 ## 1. File-System Commands
 

@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the multi-file bundle form of source-bound references. It is the default transport for Nearbytes copy/paste and for shared-source workflows where the importer can open the source volume and choose any destination volume at paste time.
+
+Its scope is bundle structure and grouped import behavior for source-bound references. It is not recipient-bound sharing.
+
 ## 1. Scope
 
 This specification defines:

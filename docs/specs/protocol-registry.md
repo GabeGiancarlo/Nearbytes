@@ -2,6 +2,10 @@
 
 Status: draft normative registry for protocol identifiers and versioning.
 
+This document is the registry of protocol identifiers used across the Nearbytes specifications. It defines how protocol IDs are named, how major versions mark compatibility boundaries, and which IDs are currently reserved or active.
+
+Its scope is naming and versioning discipline, not the payload rules of each individual protocol.
+
 ## 1. Naming Rule
 
 Protocol identifiers MUST use:

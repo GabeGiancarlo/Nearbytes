@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines how chat messages live inside a Nearbytes log. It covers the sender-signed message payload, the allowed outer event forms that can carry chat and identity state, and the attachment model for file references.
+
+Its scope is basic message transport and replay inside a shared volume or channel. It does not define richer chat product features such as reactions, threads, or moderation.
+
 ## 1. Scope
 
 This specification defines:

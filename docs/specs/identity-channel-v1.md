@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the canonical public channel owned by a Nearbytes identity keypair. It explains where signed public profile updates live, how they are appended, and how readers decide which update is the current one.
+
+Its scope is the identity's own channel. It does not define how other volumes cache or mirror that information.
+
 ## 1. Scope
 
 This specification defines:

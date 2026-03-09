@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the user-level file operations that Nearbytes clients perform above the append-only log. It says what commands like upload, rename, copy, paste, and reference export mean, and which lower-level events or reference formats they are expected to use.
+
+Its scope is command semantics and default behavior, not UI design.
+
 ## 1. Scope
 
 This specification defines the Nearbytes-native file command surface above the append-only event log.

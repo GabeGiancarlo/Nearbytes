@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the signed public profile object for a Nearbytes identity. It is the portable statement a sender makes about their public-facing name and profile data, signed by that sender's identity key.
+
+Its scope is the record format and its validation rules. It does not define discovery, trust policy, or private profile data.
+
 ## 1. Scope
 
 This specification defines:

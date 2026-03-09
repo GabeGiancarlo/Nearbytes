@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the record copied into a foreign volume when that volume needs a local, replayable view of an identity. A snapshot carries readable public profile data plus a precise reference back to the canonical identity-channel event it came from.
+
+Its scope is this local materialization format. It is not the canonical identity log itself.
+
 ## 1. Scope
 
 This specification defines a portable snapshot+reference record used to materialize identity state into a foreign volume while preserving a link back to the canonical identity channel.

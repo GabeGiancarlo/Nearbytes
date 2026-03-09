@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the small content descriptors that point to encrypted file content in Nearbytes. It answers the question: what ciphertext object, or manifest of ciphertext objects, represents this file?
+
+Its scope is content addressing and manifest structure. It does not define sharing capsules or recipient binding.
+
 ## 1. Scope
 
 This document defines:

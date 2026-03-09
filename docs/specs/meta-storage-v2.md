@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines how Nearbytes stores, discovers, retains, and prunes encrypted events and blocks across configured storage roots. It is the storage-routing and durability layer above raw filesystems and below higher-level features.
+
+Its scope is metadata-driven placement and retention policy. It does not define cryptographic content formats or secret handling.
+
 ## 1. Scope
 
 This specification defines the meta-level storage model for Nearbytes:

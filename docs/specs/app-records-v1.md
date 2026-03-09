@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the generic outer log event used for non-filesystem application data in Nearbytes. Use it when a channel needs to carry structured records such as chat messages, identity updates, or future app-level payloads without inventing a new outer event type each time.
+
+Its scope is only the shared outer envelope and replay contract. It does not define the inner schemas of specific application protocols.
+
 ## 1. Scope
 
 This specification defines:

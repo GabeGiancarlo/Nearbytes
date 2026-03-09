@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the multi-file transport bundle for recipient-bound file references. It is the wrapper that carries one or more `nb.ref.v1` entries through clipboard, chat, or other transport layers.
+
+Its scope is bundle structure and import semantics for grouped recipient-bound references. It is not a new cryptographic primitive beyond the nested single-file references.
+
 ## 1. Scope
 
 This specification defines:

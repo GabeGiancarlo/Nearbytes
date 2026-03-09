@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the recipient-bound encrypted single-file reference used when a sender wants one chosen recipient context to be able to import a file. It covers the wrapped-key capsule, the bound content descriptor, and the import semantics that turn that reference back into a file entry.
+
+Its scope is a single recipient-bound reference object. It does not carry ciphertext blocks and it is not the multi-file transport wrapper.
+
 ## 1. Scope
 
 This specification defines:

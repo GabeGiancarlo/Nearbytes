@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the single-file source-bound reference used when import depends on access to the source volume rather than a preselected recipient. It is designed for Nearbytes copy/paste and other shared-source workflows where the destination is chosen later.
+
+Its scope is the source-bound single-file transport object and its import behavior. It is not recipient-bound sharing.
+
 ## 1. Scope
 
 This specification defines:

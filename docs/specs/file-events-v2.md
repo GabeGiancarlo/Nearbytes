@@ -2,6 +2,10 @@
 
 Status: draft normative specification.
 
+This document defines the low-level filesystem event model for Nearbytes. It is the replay contract that turns an append-only log into the current file map.
+
+Its scope is the event layer itself: file creation, deletion, rename, and replay semantics. It does not define higher-level command orchestration or standalone folder objects.
+
 ## 1. Scope
 
 This specification defines:
