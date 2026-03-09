@@ -9,9 +9,8 @@
     hasDesktopDirectoryPicker,
     openRootInFileManager,
     type DiscoveryAction,
-    type ReconcileSourcesResponse,
-    updateRootsConfig,
     type DiscoveredNearbytesSource,
+    type ReconcileSourcesResponse,
     type RootConsolidationCandidate,
     type RootsConfig,
     type RootsRuntimeSnapshot,
@@ -20,19 +19,11 @@
     type StorageFullPolicy,
     type VolumeDestinationConfig,
     type VolumePolicyEntry,
+    updateRootsConfig,
   } from '../lib/api.js';
   import ArmedActionButton from './ArmedActionButton.svelte';
   import VolumeIdentity from './VolumeIdentity.svelte';
-  import {
-    ArrowRightLeft,
-    FolderOpen,
-    HardDrive,
-    Plus,
-    Search,
-    Shield,
-    Trash2,
-    WandSparkles,
-  } from 'lucide-svelte';
+  import { ArrowRightLeft, FolderOpen, HardDrive, Plus, Search, Shield, Trash2 } from 'lucide-svelte';
 
   let {
     mode = 'volume',
@@ -56,6 +47,8 @@
     focusSection?: 'discovery' | 'defaults' | null;
   }>();
 
+  type StatusTone = 'good' | 'warn' | 'muted';
+
   const DISMISSED_DISCOVERY_KEY = 'nearbytes-source-discovery-dismissed-v1';
   const RESERVE_OPTIONS = [0, 5, 10, 15, 20, 25, 30];
   const DEFAULT_RESERVE_PERCENT = 5;
@@ -73,7 +66,6 @@
   let configDraft = $state<RootsConfig | null>(null);
   let runtime = $state<RootsRuntimeSnapshot | null>(null);
   let loading = $state(true);
-  let saving = $state(false);
   let errorMessage = $state('');
   let successMessage = $state('');
   let discoveryOpen = $state(false);
@@ -90,8 +82,10 @@
   let lastSavedSignature = $state('');
   let lastRefreshToken = $state(0);
   let lastFocusSection = $state<'discovery' | 'defaults' | null>(null);
-  let discoveryDetailsElement = $state<HTMLElement | null>(null);
+  let latestDiscoverySectionElement = $state<HTMLElement | null>(null);
+  let manualDiscoverySectionElement = $state<HTMLElement | null>(null);
   let defaultsSectionElement = $state<HTMLElement | null>(null);
+
   onMount(() => {
     void loadPanel();
   });
@@ -106,7 +100,10 @@
     if (!focusSection || focusSection === lastFocusSection) return;
     lastFocusSection = focusSection;
     void tick().then(() => {
-      const target = focusSection === 'discovery' ? discoveryDetailsElement : defaultsSectionElement;
+      const target =
+        focusSection === 'discovery'
+          ? latestDiscoverySectionElement ?? manualDiscoverySectionElement
+          : defaultsSectionElement;
       target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   });
@@ -147,7 +144,7 @@
     try {
       localStorage.setItem(DISMISSED_DISCOVERY_KEY, JSON.stringify(values));
     } catch {
-      // ignore
+      // Ignore local storage failures.
     }
   }
 
@@ -202,12 +199,12 @@
     if (provider === 'mega') return 'MEGA';
     if (provider === 'icloud') return 'Apple/iCloud';
     if (provider === 'onedrive') return 'OneDrive';
-    return 'Local';
+    return 'Local folder';
   }
 
   function compactPath(value: string): string {
     const normalized = value.trim().replace(/\\/g, '/');
-    if (normalized === '') return 'New source';
+    if (normalized === '') return 'Choose a folder';
     const parts = normalized.split('/').filter((part) => part.length > 0);
     return parts.at(-1) ?? normalized;
   }
@@ -228,18 +225,16 @@
     return `${value >= 100 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
   }
 
+  function countLabel(count: number, singular: string, plural = `${singular}s`): string {
+    return `${count} ${count === 1 ? singular : plural}`;
+  }
+
   function sourceReservePercent(source: SourceConfigEntry): number {
     return Number.isFinite(source.reservePercent) ? source.reservePercent : DEFAULT_RESERVE_PERCENT;
   }
 
   function destinationReservePercent(destination: VolumeDestinationConfig | null): number {
     return Number.isFinite(destination?.reservePercent) ? destination!.reservePercent : DEFAULT_RESERVE_PERCENT;
-  }
-
-  function volumeShortLabel(value: string | null): string {
-    if (!value) return 'New space';
-    if (value.length <= 18) return value;
-    return `${value.slice(0, 10)}...${value.slice(-6)}`;
   }
 
   function generateSourceId(provider: SourceProvider): string {
@@ -445,12 +440,17 @@
     );
   }
 
-  function hasDurableDestination(targetVolumeId: string | null): boolean {
-    if (!configDraft) return false;
-    return configDraft.sources.some((source) => isDurableDestination(destinationFor(targetVolumeId, source.id), source.id));
+  function durableLocationCount(targetVolumeId: string | null): number {
+    if (!configDraft) return 0;
+    return configDraft.sources.filter((source) => isDurableDestination(destinationFor(targetVolumeId, source.id), source.id))
+      .length;
   }
 
-  function protectionTone(destination: VolumeDestinationConfig | null, sourceId: string): 'durable' | 'replica' | 'events' | 'off' {
+  function hasDurableDestination(targetVolumeId: string | null): boolean {
+    return durableLocationCount(targetVolumeId) > 0;
+  }
+
+  function protectionTone(destination: VolumeDestinationConfig | null, sourceId: string): 'durable' | 'replica' | 'off' {
     if (!destination || !destination.enabled) return 'off';
     if (isDurableDestination(destination, sourceId)) return 'durable';
     if (keepsFullCopy(destination)) return 'replica';
@@ -459,21 +459,17 @@
 
   function protectionLabel(destination: VolumeDestinationConfig | null, sourceId: string): string {
     const tone = protectionTone(destination, sourceId);
-    if (tone === 'durable') return 'Protected here';
+    if (tone === 'durable') return 'Protected copy';
     if (tone === 'replica') return 'Spare copy';
-    return 'Off';
-  }
-
-  function volumeBadgeText(targetVolumeId: string | null): string {
-    return hasDurableDestination(targetVolumeId) ? 'Protected somewhere' : 'Needs one protected copy';
+    return 'Not keeping a copy';
   }
 
   function autosaveLabel(): string {
-    if (autosaveStatus === 'saving') return 'Saving…';
+    if (autosaveStatus === 'saving') return 'Saving...';
     if (autosaveStatus === 'saved') return 'Saved';
     if (autosaveStatus === 'error') return 'Save failed';
-    if (autosaveStatus === 'pending') return 'Autosave';
-    return 'Autosave';
+    if (autosaveStatus === 'pending') return 'Saving soon';
+    return 'Saved automatically';
   }
 
   function canRemoveAnySource(): boolean {
@@ -544,32 +540,6 @@
 
   function canReuseOtherGuaranteedCopies(destination: VolumeDestinationConfig | null): boolean {
     return keepsFullCopy(destination) && destination?.fullPolicy === 'drop-older-blocks';
-  }
-
-  function fullPolicyLabel(destination: VolumeDestinationConfig | null): string {
-    return canReuseOtherGuaranteedCopies(destination)
-      ? 'Prefer another protected copy'
-      : 'Keep this copy';
-  }
-
-  function protectedCopyHint(targetVolumeId: string | null): string {
-    if (hasDurableDestination(targetVolumeId)) {
-      return 'Suggestion: you can keep one spare copy on a second location if you want quicker recovery.';
-    }
-    return 'Suggestion: turn on “Keep a full copy” for at least one writable location.';
-  }
-
-  function setReuseOtherGuaranteedCopies(
-    targetVolumeId: string | null,
-    sourceId: string,
-    reuse: boolean
-  ): void {
-    updateDestinationField(
-      targetVolumeId,
-      sourceId,
-      'fullPolicy',
-      reuse ? 'drop-older-blocks' : 'block-writes'
-    );
   }
 
   function sourceSuggestionRows(): Array<{
@@ -653,10 +623,15 @@
   }
 
   function discoveryActionLabel(action: DiscoveryAction): string {
-    if (action === 'added-source') return 'Location added';
+    if (action === 'added-source') return 'Added to saved locations';
     if (action === 'added-volume-target') return 'Sync enabled';
     if (action === 'available-share') return 'Needs review';
-    return 'Already known';
+    return 'Already saved';
+  }
+
+  function discoveryKindLabel(classification: 'marker' | 'layout'): string {
+    if (classification === 'marker') return 'Nearbytes page found';
+    return 'Nearbytes data found';
   }
 
   function shortVolumeId(value: string): string {
@@ -681,6 +656,127 @@
     });
   }
 
+  function locationAvailability(source: SourceConfigEntry) {
+    const status = sourceStatus(source.id);
+    if (!source.enabled) {
+      return { label: 'Turned off', tone: 'muted' as StatusTone };
+    }
+    if (!hasSourcePath(source)) {
+      return { label: 'Choose a folder', tone: 'warn' as StatusTone };
+    }
+    if (status?.exists === false) {
+      return { label: 'Folder missing', tone: 'warn' as StatusTone };
+    }
+    if (status && !status.isDirectory) {
+      return { label: 'Not a folder', tone: 'warn' as StatusTone };
+    }
+    return { label: 'Ready', tone: 'good' as StatusTone };
+  }
+
+  function locationWriteState(source: SourceConfigEntry) {
+    const status = sourceStatus(source.id);
+    if (!source.writable) {
+      return { label: 'Read only', tone: 'muted' as StatusTone };
+    }
+    if (!source.enabled) {
+      return { label: 'Writing paused', tone: 'muted' as StatusTone };
+    }
+    if (status && status.exists && !status.canWrite) {
+      return { label: 'Cannot write now', tone: 'warn' as StatusTone };
+    }
+    return { label: 'Can save new data', tone: 'good' as StatusTone };
+  }
+
+  function locationSummary(source: SourceConfigEntry): string {
+    const status = sourceStatus(source.id);
+    if (!hasSourcePath(source)) {
+      return 'Choose a folder to finish setting up this storage location.';
+    }
+    if (!source.enabled) {
+      return 'Nearbytes will ignore this location until you turn it back on.';
+    }
+    if (status?.exists === false) {
+      return 'This folder is not available right now. Your rules stay saved, but Nearbytes cannot use it.';
+    }
+    if (status && !status.isDirectory) {
+      return 'This path exists, but it is not a folder.';
+    }
+    if (source.writable && status?.canWrite === false) {
+      return 'Nearbytes can read this location, but it cannot save new data here right now.';
+    }
+    if (source.writable) {
+      return 'Nearbytes can read this location and save new encrypted data here.';
+    }
+    return 'Nearbytes can read this location, but it will not save new data here.';
+  }
+
+  function usageSummary(sourceId: string): string {
+    const totalBytes = sourceStatus(sourceId)?.usage.totalBytes ?? 0;
+    if (totalBytes <= 0) {
+      return 'No Nearbytes data is stored here yet.';
+    }
+    return `Nearbytes is using ${formatSize(totalBytes)} in this location.`;
+  }
+
+  function protectionSummary(targetVolumeId: string | null): string {
+    const count = durableLocationCount(targetVolumeId);
+    if (count === 0) return 'Choose at least one protected copy';
+    if (count === 1) return '1 protected copy ready';
+    return `${count} protected copies ready`;
+  }
+
+  function protectionHint(targetVolumeId: string | null): string {
+    if (hasDurableDestination(targetVolumeId)) {
+      return targetVolumeId
+        ? 'This space already has at least one writable protected copy.'
+        : 'New spaces will start with at least one writable protected copy.';
+    }
+    return targetVolumeId
+      ? 'Turn on "Keep a full copy" for at least one writable location below.'
+      : 'Every new space needs at least one writable location that keeps a protected copy.';
+  }
+
+  function copyHelpText(targetVolumeId: string | null, source: SourceConfigEntry): string {
+    const destination = destinationFor(targetVolumeId, source.id);
+    const status = sourceStatus(source.id);
+    if (!keepsFullCopy(destination)) {
+      return targetVolumeId
+        ? 'This space is not being kept here.'
+        : 'New spaces will not keep a full copy here.';
+    }
+    if (!source.enabled) {
+      return 'This rule is saved, but the location itself is turned off.';
+    }
+    if (!source.writable) {
+      return 'This rule is saved, but Nearbytes cannot keep a protected copy here until writing is allowed.';
+    }
+    if (status?.exists === false) {
+      return 'This rule is saved, but the folder is not available right now.';
+    }
+    if (status && status.exists && !status.canWrite) {
+      return 'This rule is saved, but Nearbytes cannot write to this folder right now.';
+    }
+    if (canReuseOtherGuaranteedCopies(destination)) {
+      return 'This is a spare full copy. If space runs low, Nearbytes may reuse it only after another protected copy exists.';
+    }
+    return 'This location keeps a protected full copy.';
+  }
+
+  function latestDiscoveryHeadline(): string {
+    if (!discoveryDetails) return '';
+    const parts: string[] = [];
+    if (discoveryDetails.summary.sourcesAdded > 0) {
+      parts.push(`${countLabel(discoveryDetails.summary.sourcesAdded, 'location')} added`);
+    }
+    if (discoveryDetails.summary.volumeTargetsAdded > 0) {
+      parts.push(`${countLabel(discoveryDetails.summary.volumeTargetsAdded, 'sync rule')} enabled`);
+    }
+    if (parts.length === 0) {
+      return 'No new storage locations were added automatically';
+    }
+    return parts.join(' | ');
+  }
+
   async function loadPanel() {
     loading = true;
     errorMessage = '';
@@ -693,7 +789,7 @@
       lastSavedSignature = serializeConfig(cloneConfig(response.config));
       autosaveStatus = 'idle';
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Failed to load location settings';
+      errorMessage = error instanceof Error ? error.message : 'Failed to load storage locations';
     } finally {
       loading = false;
     }
@@ -701,7 +797,6 @@
 
   async function autosavePanel(expectedSignature: string) {
     if (!configDraft) return;
-    saving = true;
     errorMessage = '';
     autosaveStatus = 'saving';
     try {
@@ -710,17 +805,11 @@
       configDraft = cloneConfig(response.config);
       runtime = response.runtime;
       lastSavedSignature = serializeConfig(cloneConfig(response.config));
-      if (lastSavedSignature === expectedSignature) {
-        autosaveStatus = 'saved';
-      } else {
-        autosaveStatus = 'pending';
-      }
+      autosaveStatus = lastSavedSignature === expectedSignature ? 'saved' : 'pending';
       successMessage = '';
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Failed to save';
       autosaveStatus = 'error';
-    } finally {
-      saving = false;
     }
   }
 
@@ -751,14 +840,14 @@
       if (!selectedPath) return;
       const normalized = normalizeComparablePath(selectedPath);
       if (configDraft.sources.some((entry) => normalizeComparablePath(entry.path) === normalized)) {
-        successMessage = 'Already added.';
+        successMessage = 'That folder is already saved.';
         return;
       }
       configDraft = {
         ...configDraft,
         sources: [...configDraft.sources, createSource(selectedPath)],
       };
-      successMessage = 'Added location.';
+      successMessage = 'Storage location added.';
       return;
     }
     configDraft = {
@@ -777,25 +866,25 @@
       (entry) => entry.id !== sourceId && normalizeComparablePath(entry.path) === normalized
     );
     if (duplicate) {
-      errorMessage = 'That folder is already in the list.';
+      errorMessage = 'That folder is already in your saved locations.';
       return;
     }
     updateSourceField(sourceId, 'path', selectedPath);
-    successMessage = 'Folder selected.';
+    successMessage = 'Folder updated.';
   }
 
   function addDiscoveredSource(source: DiscoveredNearbytesSource) {
     if (!configDraft) return;
     const normalized = normalizeComparablePath(source.path);
     if (configDraft.sources.some((entry) => normalizeComparablePath(entry.path) === normalized)) {
-      successMessage = 'Already added.';
+      successMessage = 'That folder is already saved.';
       return;
     }
     configDraft = {
       ...configDraft,
       sources: [...configDraft.sources, createSource(source.path)],
     };
-    successMessage = `Added location from ${formatProvider(source.provider)}.`;
+    successMessage = `Added ${formatProvider(source.provider)} location.`;
   }
 
   function dismissDiscovery(source: DiscoveredNearbytesSource) {
@@ -811,7 +900,7 @@
       await openRootInFileManager(sourceId);
       successMessage = 'Opened folder.';
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Failed to open';
+      errorMessage = error instanceof Error ? error.message : 'Failed to open folder';
     }
   }
 
@@ -826,9 +915,9 @@
       mergeCandidates = response.plan.candidates.filter((candidate) => candidate.eligible);
       if (mergeCandidates.length > 0) {
         mergeTargetId = mergeCandidates[0].id;
-        mergeMessage = `Move ${response.plan.source.fileCount} item(s).`;
+        mergeMessage = `Move ${countLabel(response.plan.source.fileCount, 'item')} from this location.`;
       } else {
-        mergeMessage = 'No compatible location.';
+        mergeMessage = 'No compatible destination is available right now.';
       }
     } catch (error) {
       mergeMessage = error instanceof Error ? error.message : 'Failed to prepare move';
@@ -858,10 +947,10 @@
       runtime = response.runtime;
       lastSavedSignature = serializeConfig(cloneConfig(response.config));
       autosaveStatus = 'saved';
-      successMessage = 'Moved.';
+      successMessage = 'Stored data moved.';
       cancelMerge();
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Failed to move';
+      errorMessage = error instanceof Error ? error.message : 'Failed to move data';
     } finally {
       mergeApplying = false;
     }
@@ -876,31 +965,31 @@
 
 {#if loading}
   <section class="storage-panel panel-surface" class:global-mode={mode === 'global'} class:volume-mode={mode === 'volume'}>
-    <p class="storage-message">Loading...</p>
+    <p class="storage-message">Loading storage locations...</p>
   </section>
 {:else if configDraft}
   <section class="storage-panel panel-surface" class:global-mode={mode === 'global'} class:volume-mode={mode === 'volume'}>
     {#if mode === 'global'}
-      <div class="panel-head">
-        <div>
-          <p class="panel-eyebrow">Locations</p>
-          <h2>Storage locations</h2>
-          <p class="panel-caption">Nearbytes reads from these folders. Writable ones can also receive new encrypted data.</p>
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Storage locations</p>
+          <h2>Choose where Nearbytes stores encrypted data</h2>
+          <p class="hero-text">
+            Save the folders Nearbytes can use, then decide which ones should keep a protected copy for new spaces.
+          </p>
         </div>
-        <div class="panel-actions">
+        <div class="hero-actions">
           <button type="button" class="panel-btn subtle" onclick={toggleDiscovery} disabled={discoveryLoading}>
             <Search size={14} strokeWidth={2} />
-            <span>{discoveryOpen ? 'Hide scan' : 'Find folders'}</span>
+            <span>{discoveryOpen ? 'Hide scan' : 'Scan for folders'}</span>
           </button>
-          <button type="button" class="panel-btn subtle" onclick={addSourceCard}>
+          <button type="button" class="panel-btn primary" onclick={addSourceCard}>
             <Plus size={14} strokeWidth={2} />
             <span>Add folder</span>
           </button>
-          <span class="summary-badge" class:warning={autosaveStatus === 'error'} title="Changes are saved automatically.">
-            {autosaveLabel()}
-          </span>
+          <span class="summary-pill" class:warning={autosaveStatus === 'error'}>{autosaveLabel()}</span>
         </div>
-      </div>
+      </header>
 
       {#if errorMessage}
         <p class="panel-error">{errorMessage}</p>
@@ -908,106 +997,408 @@
       {#if successMessage}
         <p class="panel-success">{successMessage}</p>
       {/if}
-      {#if configPath}
-        <p class="panel-path">{configPath}</p>
-      {/if}
 
       {#if discoveryDetails}
-        <section class="panel-cluster discovery-details-cluster" bind:this={discoveryDetailsElement}>
-          <div class="cluster-head">
+        <section class="panel-section" bind:this={latestDiscoverySectionElement}>
+          <div class="section-head">
             <div>
-              <p class="cluster-title">Discovery details</p>
-              <p class="cluster-caption">Latest automatic location scan and the changes it applied.</p>
+              <p class="section-step">Latest automatic scan</p>
+              <h3>{latestDiscoveryHeadline()}</h3>
+              <p class="section-copy">
+                Nearbytes can look for existing folders in synced services and add safe matches automatically.
+              </p>
             </div>
-            <span class="summary-badge" title="Latest automatic discovery summary.">
-              {discoveryDetails.summary.sourcesAdded} location(s) · {discoveryDetails.summary.volumeTargetsAdded} sync rule(s)
-            </span>
+            <div class="section-metrics">
+              <span class="summary-pill">{countLabel(discoveryDetails.summary.sourcesAdded, 'location')} added</span>
+              <span class="summary-pill">{countLabel(discoveryDetails.summary.volumeTargetsAdded, 'sync rule')} enabled</span>
+            </div>
           </div>
-          {#if discoveryDetails.items.length === 0}
-            <p class="storage-message">No Nearbytes storage locations were detected in the latest scan.</p>
-          {:else}
-            <div class="discovery-detail-groups">
-              {#each discoveryGroups() as group (group.provider)}
-                <div class="discovery-detail-group">
-                  <div class="detail-group-head">
-                    <p class="scan-provider">{formatProvider(group.provider)}</p>
-                    <span class="mini-badge">{group.items.length}</span>
-                  </div>
-                  <div class="discovery-grid">
-                    {#each group.items as item (item.path)}
-                      <article class="scan-card detail-scan-card">
-                        <div class="scan-copy">
-                          <p class="scan-path">{item.path}</p>
-                          <div class="source-facts compact-detail-facts">
-                            <span>{item.classification === 'marker' ? 'Intro page' : 'Layout'}</span>
-                            {#if item.hasChannels}
-                              <span>Channels</span>
+
+          <details class="details-card" open={focusSection === 'discovery'}>
+            <summary>Show scan details</summary>
+            {#if discoveryDetails.items.length === 0}
+              <p class="muted-copy">No Nearbytes storage locations were detected in the latest scan.</p>
+            {:else}
+              <div class="scan-group-list">
+                {#each discoveryGroups() as group (group.provider)}
+                  <section class="scan-group">
+                    <div class="scan-group-head">
+                      <p class="scan-group-title">{formatProvider(group.provider)}</p>
+                      <span class="mini-pill">{group.items.length}</span>
+                    </div>
+                    <div class="scan-card-list">
+                      {#each group.items as item (item.path)}
+                        <article class="scan-card">
+                          <div class="scan-copy">
+                            <p class="scan-path">{item.path}</p>
+                            <p class="scan-note">
+                              {discoveryKindLabel(item.classification)}
+                              {#if item.hasChannels}
+                                {' | '}History found
+                              {/if}
+                              {#if item.hasBlocks}
+                                {' | '}Files found
+                              {/if}
+                            </p>
+                            <div class="scan-badges">
+                              {#each item.actions as action (action)}
+                                <span class="mini-pill">{discoveryActionLabel(action)}</span>
+                              {/each}
+                            </div>
+                            {#if item.addedTargetVolumeIds.length > 0}
+                              <p class="scan-note">
+                                Sync was enabled for spaces {item.addedTargetVolumeIds.map(shortVolumeId).join(', ')}.
+                              </p>
                             {/if}
-                            {#if item.hasBlocks}
-                              <span>Blocks</span>
+                            {#if item.unknownVolumeIds.length > 0}
+                              <p class="scan-note">
+                                Other space folders were found here: {item.unknownVolumeIds.map(shortVolumeId).join(', ')}.
+                              </p>
                             {/if}
                           </div>
-                          <div class="detail-action-list">
-                            {#each item.actions as action (action)}
-                              <span class="mini-badge">{discoveryActionLabel(action)}</span>
-                            {/each}
-                          </div>
-                          {#if item.addedTargetVolumeIds.length > 0}
-                            <p class="detail-copy">
-                              Enabled for spaces {item.addedTargetVolumeIds.map(shortVolumeId).join(', ')}.
-                            </p>
-                          {/if}
-                          {#if item.unknownVolumeIds.length > 0}
-                            <p class="detail-copy">
-                              Other space directories detected: {item.unknownVolumeIds.map(shortVolumeId).join(', ')}.
-                            </p>
-                          {/if}
-                        </div>
-                        {#if item.configuredSourceId}
-                          <div class="scan-actions">
+                          {#if item.configuredSourceId}
                             <button type="button" class="panel-btn subtle compact" onclick={() => void openDiscoverySource(item)}>
-                              <span>Open</span>
+                              <FolderOpen size={14} strokeWidth={2} />
+                              <span>Open folder</span>
                             </button>
-                          </div>
-                        {/if}
-                      </article>
-                    {/each}
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {/if}
+                          {/if}
+                        </article>
+                      {/each}
+                    </div>
+                  </section>
+                {/each}
+              </div>
+            {/if}
+          </details>
         </section>
       {/if}
 
-      {#if discoveryOpen}
-        <section class="panel-cluster scan-cluster">
-          <div class="cluster-head">
-            <div>
-              <p class="cluster-title">Discovered folders</p>
-              <p class="cluster-caption">Marker-based discovery stays separate from your saved locations list.</p>
-            </div>
+      <section class="panel-section">
+        <div class="section-head">
+          <div>
+            <p class="section-step">1. Saved storage locations</p>
+            <h3>Add folders and decide whether Nearbytes may use them</h3>
+            <p class="section-copy">
+              Nearbytes reads from every location that is turned on. A writable location may also receive new encrypted data.
+            </p>
+          </div>
+          <div class="section-metrics">
+            <span class="summary-pill">{countLabel(configDraft.sources.length, 'location')} saved</span>
+          </div>
+        </div>
+
+        <div class="card-grid">
+          {#each configDraft.sources as source (source.id)}
+            {@const status = sourceStatus(source.id)}
+            {@const availability = locationAvailability(source)}
+            {@const writeState = locationWriteState(source)}
+            <article class="location-card">
+              <div class="card-head">
+                <div class="card-title">
+                  <div class="card-icon">
+                    <HardDrive size={16} strokeWidth={2.1} />
+                  </div>
+                  <div>
+                    <p class="provider-label">{formatProvider(source.provider)}</p>
+                    <h4>{compactPath(source.path)}</h4>
+                    <p class="path-copy">{source.path || 'No folder selected yet'}</p>
+                  </div>
+                </div>
+                <div class="card-status">
+                  <span class={`status-pill tone-${availability.tone}`}>{availability.label}</span>
+                  <span class={`status-pill tone-${writeState.tone}`}>{writeState.label}</span>
+                </div>
+              </div>
+
+              <p class="card-copy">{locationSummary(source)}</p>
+
+              <div class="button-row">
+                <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
+                  <Search size={14} strokeWidth={2} />
+                  <span>{hasSourcePath(source) ? 'Change folder' : 'Choose folder'}</span>
+                </button>
+                <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)} disabled={!hasSourcePath(source)}>
+                  <FolderOpen size={14} strokeWidth={2} />
+                  <span>Open folder</span>
+                </button>
+              </div>
+
+              <div class="toggle-list">
+                <label class="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={source.enabled}
+                    onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)}
+                  />
+                  <div>
+                    <span class="toggle-title">Use this location</span>
+                    <span class="toggle-copy">Nearbytes can read existing data here.</span>
+                  </div>
+                </label>
+                <label class="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={source.writable}
+                    onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)}
+                  />
+                  <div>
+                    <span class="toggle-title">Allow new data here</span>
+                    <span class="toggle-copy">Nearbytes may save new encrypted data to this location.</span>
+                  </div>
+                </label>
+              </div>
+
+              <div class="fact-row">
+                <span>{status?.availableBytes !== undefined ? `${formatSize(status.availableBytes)} free` : 'Free space unknown'}</span>
+                <span>{usageSummary(source.id)}</span>
+              </div>
+
+              {#if status?.lastWriteFailure}
+                <p class="warning-copy">Last write problem: {status.lastWriteFailure.message}</p>
+              {/if}
+
+              <details class="details-card">
+                <summary>Advanced location settings</summary>
+                <div class="field-grid">
+                  <label class="field-block">
+                    <span>Keep this much free space</span>
+                    <select
+                      class="panel-input"
+                      value={String(sourceReservePercent(source))}
+                      onchange={(event) =>
+                        updateSourceField(source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
+                    >
+                      {#each RESERVE_OPTIONS as option}
+                        <option value={option}>{formatPercent(option)}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label class="field-block">
+                    <span>If the drive still fills up</span>
+                    <select
+                      class="panel-input"
+                      value={source.opportunisticPolicy}
+                      onchange={(event) =>
+                        updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
+                    >
+                      <option value="block-writes">Stop saving new data here</option>
+                      <option value="drop-older-blocks">Reuse copies protected elsewhere</option>
+                    </select>
+                  </label>
+                </div>
+
+                {#if sortedUsageVolumes(source.id).length > 0}
+                  <div class="usage-block">
+                    <p class="subheading">Spaces stored here</p>
+                    <div class="usage-list">
+                      {#each sortedUsageVolumes(source.id) as usage (usage.volumeId)}
+                        {@const mountedPresentation = mountedPresentationFor(usage.volumeId)}
+                        <div class="usage-row">
+                          <div class="usage-main">
+                            <VolumeIdentity
+                              compact={true}
+                              label={mountedPresentation ? mountedPresentation.label : shortVolumeId(usage.volumeId)}
+                              secondary={mountedPresentation ? shortVolumeId(usage.volumeId) : ''}
+                              title={usage.volumeId}
+                              filePayload={mountedPresentation?.filePayload ?? ''}
+                              fileMimeType={mountedPresentation?.fileMimeType ?? ''}
+                              fileName={mountedPresentation?.fileName ?? ''}
+                            />
+                          </div>
+                          <div class="usage-meta">
+                            <span>{formatSize(usage.fileBytes + usage.historyBytes)} total</span>
+                            {#if usage.fileBytes > 0}
+                              <span>{formatSize(usage.fileBytes)} files</span>
+                            {/if}
+                            {#if usage.historyBytes > 0}
+                              <span>{formatSize(usage.historyBytes)} history</span>
+                            {/if}
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+
+                <div class="danger-block">
+                  <p class="subheading">Move or remove this location</p>
+                  <div class="button-row">
+                    <button
+                      type="button"
+                      class="panel-btn subtle compact"
+                      onclick={() => startMerge(source.id)}
+                      disabled={configDraft.sources.length < 2 || !hasSourcePath(source)}
+                    >
+                      <ArrowRightLeft size={14} strokeWidth={2} />
+                      <span>Move stored data elsewhere</span>
+                    </button>
+                    {#if canRemoveAnySource()}
+                      <ArmedActionButton
+                        class="panel-btn subtle compact danger"
+                        icon={Trash2}
+                        text="Remove location"
+                        armed={true}
+                        autoDisarmMs={3000}
+                        onPress={() => removeSource(source.id)}
+                      />
+                    {/if}
+                  </div>
+
+                  {#if mergeSourceId === source.id}
+                    <div class="merge-box">
+                      {#if mergeLoading}
+                        <p class="muted-copy">Checking where this data can be moved...</p>
+                      {:else if mergeCandidates.length === 0}
+                        <p class="muted-copy">{mergeMessage}</p>
+                      {:else}
+                        <p class="muted-copy">{mergeMessage}</p>
+                        <select class="panel-input" bind:value={mergeTargetId}>
+                          {#each mergeCandidates as candidate (candidate.id)}
+                            <option value={candidate.id}>{candidate.path}</option>
+                          {/each}
+                        </select>
+                        <div class="button-row">
+                          <button type="button" class="panel-btn subtle compact" onclick={cancelMerge}>Cancel</button>
+                          <button
+                            type="button"
+                            class="panel-btn primary compact"
+                            onclick={applyMerge}
+                            disabled={mergeApplying || mergeTargetId.trim() === ''}
+                          >
+                            <span>{mergeApplying ? 'Moving...' : 'Move data'}</span>
+                          </button>
+                        </div>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              </details>
+            </article>
+          {/each}
+        </div>
+      </section>
+
+      <section class="panel-section" bind:this={defaultsSectionElement}>
+        <div class="section-head">
+          <div>
+            <p class="section-step">2. Default protection for new spaces</p>
+            <h3>Choose which locations keep a protected copy by default</h3>
+            <p class="section-copy">
+              These rules apply when you open a new space. You can still save different rules for a specific space later.
+            </p>
+          </div>
+          <div class="section-metrics">
+            <span class="summary-pill" class:warning={!hasDurableDestination(null)}>{protectionSummary(null)}</span>
+          </div>
+        </div>
+
+        <div class="protection-banner" class:warning={!hasDurableDestination(null)}>
+          <Shield size={15} strokeWidth={2} />
+          <span>{protectionHint(null)}</span>
+        </div>
+
+        <div class="rule-grid">
+          {#each configDraft.sources as source (source.id)}
+            {@const destination = destinationFor(null, source.id)}
+            <article class="rule-card" class:active={protectionTone(destination, source.id) === 'durable'}>
+              <div class="card-head">
+                <div class="card-title">
+                  <div>
+                    <p class="provider-label">{formatProvider(source.provider)}</p>
+                    <h4>{compactPath(source.path)}</h4>
+                    <p class="path-copy">{source.path || 'No folder selected yet'}</p>
+                  </div>
+                </div>
+                <span class={`status-pill tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
+              </div>
+
+              <label class="toggle-row large-toggle">
+                <input
+                  type="checkbox"
+                  checked={keepsFullCopy(destination)}
+                  onchange={(event) => setKeepFullCopy(null, source.id, (event.currentTarget as HTMLInputElement).checked)}
+                />
+                <div>
+                  <span class="toggle-title">Keep a full copy of new spaces here</span>
+                  <span class="toggle-copy">This includes encrypted history and file data for new spaces.</span>
+                </div>
+              </label>
+
+              <p class="card-copy">{copyHelpText(null, source)}</p>
+
+              {#if keepsFullCopy(destination)}
+                <div class="field-grid">
+                  <label class="field-block">
+                    <span>Keep this much free space</span>
+                    <select
+                      class="panel-input"
+                      value={String(destinationReservePercent(destination))}
+                      onchange={(event) =>
+                        updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
+                    >
+                      {#each RESERVE_OPTIONS as option}
+                        <option value={option}>{formatPercent(option)}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label class="field-block">
+                    <span>If this protected copy is taking too much space</span>
+                    <select
+                      class="panel-input"
+                      value={destination?.fullPolicy ?? 'block-writes'}
+                      onchange={(event) =>
+                        updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
+                    >
+                      <option value="block-writes">Keep this copy</option>
+                      <option value="drop-older-blocks">Use another protected copy first</option>
+                    </select>
+                  </label>
+                </div>
+              {/if}
+            </article>
+          {/each}
+        </div>
+      </section>
+
+      <section class="panel-section" bind:this={manualDiscoverySectionElement}>
+        <div class="section-head">
+          <div>
+            <p class="section-step">3. Find existing Nearbytes folders</p>
+            <h3>Scan Dropbox, iCloud, OneDrive, and other folders for Nearbytes data</h3>
+            <p class="section-copy">
+              Use this when you already have Nearbytes data somewhere else and want to add it to your saved locations.
+            </p>
+          </div>
+          <div class="section-metrics">
+            <button type="button" class="panel-btn subtle compact" onclick={toggleDiscovery} disabled={discoveryLoading}>
+              <Search size={14} strokeWidth={2} />
+              <span>{discoveryOpen ? 'Hide results' : 'Scan now'}</span>
+            </button>
             {#if dismissedSuggestionCount() > 0}
               <button type="button" class="panel-btn subtle compact" onclick={restoreDismissedSuggestions}>
                 <span>Show hidden</span>
               </button>
             {/if}
           </div>
+        </div>
+
+        {#if discoveryOpen}
           {#if discoveryLoading}
-            <p class="storage-message">Scanning...</p>
+            <p class="muted-copy">Scanning folders...</p>
           {:else if sourceSuggestionRows().length === 0}
-            <p class="storage-message">No new folders found.</p>
+            <p class="muted-copy">No new Nearbytes folders were found.</p>
           {:else}
-            <div class="discovery-grid">
+            <div class="scan-card-list">
               {#each sourceSuggestionRows() as row (row.source.path)}
                 <article class="scan-card">
                   <div class="scan-copy">
-                    <p class="scan-provider">{formatProvider(row.source.provider)}</p>
+                    <p class="provider-label">{formatProvider(row.source.provider)}</p>
                     <p class="scan-path">{row.source.path}</p>
                   </div>
-                  <div class="scan-actions">
+                  <div class="button-row">
                     <button type="button" class="panel-btn subtle compact" onclick={() => addDiscoveredSource(row.source)}>
-                      <span>Add</span>
+                      <Plus size={14} strokeWidth={2} />
+                      <span>Add location</span>
                     </button>
                     <button type="button" class="panel-btn subtle compact danger" onclick={() => dismissDiscovery(row.source)}>
                       <span>Hide</span>
@@ -1017,317 +1408,39 @@
               {/each}
             </div>
           {/if}
-        </section>
-      {/if}
-
-      <section class="panel-cluster" bind:this={defaultsSectionElement}>
-        <div class="cluster-head">
-          <div>
-            <p class="cluster-title">Saved locations</p>
-            <p class="cluster-caption">At least one location must remain connected.</p>
-          </div>
-          <span class="summary-badge" title="Saved locations Nearbytes can read from or write to.">
-            {configDraft.sources.length} connected
-          </span>
-        </div>
-
-        <div class="source-grid">
-          {#each configDraft.sources as source (source.id)}
-            {@const status = sourceStatus(source.id)}
-            <article class="source-card">
-              <div class="source-card-head">
-                <div class="source-mark">
-                  <HardDrive size={16} strokeWidth={2.1} />
-                </div>
-                <div class="source-copy">
-                  <p class="source-provider">{formatProvider(source.provider)}</p>
-                  <h3>{compactPath(source.path)}</h3>
-                  <p class="source-path">{source.path || 'Choose a folder'}</p>
-                </div>
-                <div class="source-badges">
-                  <span class="mini-badge" class:safe={source.enabled} class:muted={!source.enabled}>{source.enabled ? 'On' : 'Off'}</span>
-                  <span class="mini-badge" class:safe={source.writable} class:muted={!source.writable}>{source.writable ? 'Write' : 'Read only'}</span>
-                </div>
-              </div>
-
-              {#if hasSourcePath(source)}
-                <div class="source-location-block">
-                  <span class="source-location-label">Folder</span>
-                  <p class="source-location-value" title={source.path}>{source.path}</p>
-                </div>
-              {:else}
-                <button type="button" class="panel-btn subtle choose-folder-btn" onclick={() => chooseSourceFolder(source.id)}>
-                  <Search size={14} strokeWidth={2} />
-                  <span>Choose folder</span>
-                </button>
-              {/if}
-
-              <div class="field-grid two-up">
-                <label class="field-block compact-field">
-                  <span>Keep free</span>
-                  <select
-                    class="panel-input"
-                    title="Nearbytes leaves this percentage of disk space free before it starts reclaiming spare encrypted data."
-                    value={String(sourceReservePercent(source))}
-                    onchange={(event) =>
-                      updateSourceField(source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
-                  >
-                    {#each RESERVE_OPTIONS as option}
-                      <option value={option}>{formatPercent(option)}</option>
-                    {/each}
-                  </select>
-                </label>
-                <label class="field-block compact-field">
-                  <span>If space is still tight</span>
-                  <select
-                    class="panel-input"
-                    title="If this disk is still full after Nearbytes has already reclaimed spare unprotected data, “Stop new data” preserves the protected copies already here and writes nothing new. “Reuse protected copies elsewhere” allows this location to free data only when another protected copy already exists somewhere else."
-                    value={source.opportunisticPolicy}
-                    onchange={(event) =>
-                      updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
-                  >
-                    <option value="block-writes">Stop new data</option>
-                    <option value="drop-older-blocks">Reuse protected copies elsewhere</option>
-                  </select>
-                </label>
-              </div>
-
-              <div class="source-facts">
-                <span>{status?.exists ? 'Ready' : 'Missing'}</span>
-                <span>{source.enabled ? 'In use' : 'Ignored'}</span>
-                <span>{source.writable ? 'Writable' : 'Read only'}</span>
-                <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
-              </div>
-
-              <div class="usage-strip">
-                <span>Nearbytes {formatSize(status?.usage.totalBytes ?? 0)}</span>
-                <span>Files {formatSize(status?.usage.blockBytes ?? 0)}</span>
-                <span>History {formatSize(status?.usage.channelBytes ?? 0)}</span>
-              </div>
-
-              {#if sortedUsageVolumes(source.id).length > 0}
-                <details class="usage-details">
-                  <summary
-                    class="usage-details-summary"
-                    title="Show which spaces are using space in this location. Entries are sorted by total Nearbytes size."
-                  >
-                    <span>Stored spaces</span>
-                    <span class="mini-badge">{sortedUsageVolumes(source.id).length}</span>
-                  </summary>
-                  <div class="usage-volume-list">
-                    {#each sortedUsageVolumes(source.id) as usage (usage.volumeId)}
-                      {@const mountedPresentation = mountedPresentationFor(usage.volumeId)}
-                      <div class="usage-volume-row">
-                        <div class="usage-volume-copy">
-                          <VolumeIdentity
-                            compact={true}
-                            label={mountedPresentation ? mountedPresentation.label : volumeShortLabel(usage.volumeId)}
-                            secondary={mountedPresentation ? volumeShortLabel(usage.volumeId) : ''}
-                            title={usage.volumeId}
-                            filePayload={mountedPresentation?.filePayload ?? ''}
-                            fileMimeType={mountedPresentation?.fileMimeType ?? ''}
-                            fileName={mountedPresentation?.fileName ?? ''}
-                          />
-                        </div>
-                        <div class="usage-volume-stats">
-                          <span>{formatSize(usage.fileBytes + usage.historyBytes)} total</span>
-                          {#if usage.fileBytes > 0}
-                            <span>{formatSize(usage.fileBytes)} files</span>
-                          {/if}
-                          {#if usage.historyBytes > 0}
-                            <span>{formatSize(usage.historyBytes)} history</span>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                </details>
-              {/if}
-
-              <div class="source-actions">
-                <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
-                  <FolderOpen size={14} strokeWidth={2} />
-                  <span>Open</span>
-                </button>
-                <label class="toggle-chip strong compact-inline-toggle">
-                  <input type="checkbox" checked={source.enabled} onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)} />
-                  <span>Use location</span>
-                </label>
-                <label class="toggle-chip compact-inline-toggle">
-                  <input type="checkbox" checked={source.writable} onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)} />
-                  <span>Can write</span>
-                </label>
-                <button type="button" class="panel-btn subtle compact" onclick={() => startMerge(source.id)} disabled={configDraft.sources.length < 2}>
-                  <ArrowRightLeft size={14} strokeWidth={2} />
-                  <span>Move into...</span>
-                </button>
-                {#if canRemoveAnySource()}
-                  <ArmedActionButton
-                    class="panel-btn subtle compact danger"
-                    icon={Trash2}
-                    text="Remove"
-                    armed={true}
-                    autoDisarmMs={3000}
-                    onPress={() => removeSource(source.id)}
-                  />
-                {/if}
-              </div>
-
-              {#if mergeSourceId === source.id}
-                <div class="merge-box">
-                  {#if mergeLoading}
-                    <p class="storage-message">Finding a compatible location...</p>
-                  {:else if mergeCandidates.length === 0}
-                    <p class="storage-message">{mergeMessage}</p>
-                  {:else}
-                    <p class="merge-copy">Move this folder's stored data into another saved location, then remove it.</p>
-                    <select class="panel-input" bind:value={mergeTargetId}>
-                      {#each mergeCandidates as candidate (candidate.id)}
-                        <option value={candidate.id}>{candidate.path}</option>
-                      {/each}
-                    </select>
-                    <div class="merge-actions">
-                      <button type="button" class="panel-btn subtle compact" onclick={cancelMerge}>Cancel</button>
-                      <button type="button" class="panel-btn primary compact" onclick={applyMerge} disabled={mergeApplying || mergeTargetId.trim() === ''}>
-                        <span>{mergeApplying ? 'Moving...' : 'Move'}</span>
-                      </button>
-                    </div>
-                  {/if}
-                </div>
-              {/if}
-            </article>
-          {/each}
-        </div>
-      </section>
-
-      <section class="panel-cluster">
-        <div class="cluster-head">
-          <div>
-            <p class="cluster-title">Defaults for newly opened spaces</p>
-            <p class="cluster-caption">Used only when a space does not have its own saved keep rule yet.</p>
-          </div>
-          <span
-            class="summary-badge"
-            class:warning={!hasDurableDestination(null)}
-            title="A protected copy means Nearbytes will keep one full copy of the space in at least one writable location."
-          >
-            {volumeBadgeText(null)}
-          </span>
-        </div>
-        <p class="panel-tip">
-          <WandSparkles size={13} strokeWidth={2} />
-          <span>{protectedCopyHint(null)}</span>
-        </p>
-
-        <div class="destination-grid">
-          {#each configDraft.sources as source (source.id)}
-            {@const destination = destinationFor(null, source.id)}
-            {@const status = sourceStatus(source.id)}
-            <article class="destination-card" class:safe={protectionTone(destination, source.id) === 'durable'}>
-              <div class="destination-head">
-                <div>
-                  <p class="source-provider">{formatProvider(source.provider)}</p>
-                  <h3>{compactPath(source.path)}</h3>
-                  <p class="source-path">{source.path || 'Choose a folder'}</p>
-                </div>
-                <span
-                  class={`mini-badge tone-${protectionTone(destination, source.id)}`}
-                  title={keepsFullCopy(destination)
-                    ? canReuseOtherGuaranteedCopies(destination)
-                      ? 'This location keeps a spare full copy. If space runs tight, Nearbytes may drop it only after another protected full copy exists elsewhere.'
-                      : 'This location keeps a protected full copy. Nearbytes will not reclaim it automatically.'
-                    : 'This location is not currently keeping this space.'}
-                >
-                  {protectionLabel(destination, source.id)}
-                </span>
-              </div>
-
-              <div class="compact-toggle-stack">
-                <label class="toggle-chip strong large">
-                  <input
-                    type="checkbox"
-                    checked={keepsFullCopy(destination)}
-                    onchange={(event) => setKeepFullCopy(null, source.id, (event.currentTarget as HTMLInputElement).checked)}
-                  />
-                  <span title="Keep the full encrypted history and file blocks for this space in this location. Turning this on in more than one location may duplicate the same encrypted data.">Keep a full copy</span>
-                </label>
-              </div>
-
-              <div class="field-grid two-up compact-fields">
-                <label class="field-block compact-field">
-                  <span>Keep free</span>
-                  <select class="panel-input" disabled={!keepsFullCopy(destination)} title="Nearbytes leaves this percentage of disk space free before it starts reclaiming spare encrypted data." value={String(destination?.reservePercent ?? DEFAULT_RESERVE_PERCENT)} onchange={(event) => updateDestinationField(null, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
-                    {#each RESERVE_OPTIONS as option}
-                      <option value={option}>{formatPercent(option)}</option>
-                    {/each}
-                  </select>
-                </label>
-                <label class="field-block compact-field">
-                  <span>When full</span>
-                  <select
-                    class="panel-input"
-                    disabled={!keepsFullCopy(destination)}
-                    title="If this disk is still full after Nearbytes has already reclaimed spare unprotected data, “Keep this copy” stops placing new data here to preserve this full copy. “Prefer another protected copy” allows this location to free this full copy, but only after another protected full copy exists elsewhere."
-                    value={destination?.fullPolicy ?? 'block-writes'}
-                    onchange={(event) =>
-                      updateDestinationField(null, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
-                  >
-                    <option value="block-writes">Keep this copy</option>
-                    <option value="drop-older-blocks">Prefer another protected copy</option>
-                  </select>
-                </label>
-              </div>
-
-              <p class="card-help">
-                {#if keepsFullCopy(destination)}
-                  {#if canReuseOtherGuaranteedCopies(destination)}
-                    This location keeps a spare copy and may yield only after another protected copy exists.
-                  {:else}
-                    This location keeps a protected copy that Nearbytes will not reclaim automatically.
-                  {/if}
-                {:else}
-                  This location is not keeping this space yet.
-                {/if}
-              </p>
-
-              <div class="source-facts">
-                <span>{source.enabled ? 'Location on' : 'Location off'}</span>
-                <span>{source.writable ? 'Can write' : 'Read only'}</span>
-                <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
-              </div>
-            </article>
-          {/each}
-        </div>
-      </section>
-    {:else}
-      <div class="panel-actions compact-actions">
-        <button type="button" class="panel-btn subtle compact" onclick={toggleDiscovery} disabled={discoveryLoading}>
-          <Search size={14} strokeWidth={2} />
-          <span>{discoveryOpen ? 'Hide scan' : 'Find folders'}</span>
-        </button>
-        <button type="button" class="panel-btn subtle compact" onclick={addSourceCard}>
-          <Plus size={14} strokeWidth={2} />
-          <span>Add folder</span>
-        </button>
-        <span class="summary-badge" class:warning={autosaveStatus === 'error'} title="Changes are saved automatically.">
-          {autosaveLabel()}
-        </span>
-        {#if volumeId}
-          <span
-            class="summary-badge"
-            class:warning={!hasDurableDestination(volumeId)}
-            title="A protected copy means Nearbytes will keep one full copy of this space in at least one writable location."
-          >
-            {volumeBadgeText(volumeId)}
-          </span>
         {/if}
-      </div>
-      {#if volumeId}
-        <p class="panel-tip">
-          <WandSparkles size={13} strokeWidth={2} />
-          <span>{protectedCopyHint(volumeId)}</span>
-        </p>
+      </section>
+
+      {#if configPath}
+        <details class="details-card minor-details">
+          <summary>Configuration file</summary>
+          <p class="mono-copy">{configPath}</p>
+        </details>
       {/if}
+    {:else}
+      <header class="hero compact-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">This space</p>
+          <h2>Choose which locations keep a protected copy</h2>
+          <p class="hero-text">
+            Turn on at least one writable location below. These rules apply only to the current space.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button type="button" class="panel-btn subtle" onclick={toggleDiscovery} disabled={discoveryLoading}>
+            <Search size={14} strokeWidth={2} />
+            <span>{discoveryOpen ? 'Hide scan' : 'Scan for folders'}</span>
+          </button>
+          <button type="button" class="panel-btn primary" onclick={addSourceCard}>
+            <Plus size={14} strokeWidth={2} />
+            <span>Add folder</span>
+          </button>
+          <span class="summary-pill" class:warning={autosaveStatus === 'error'}>{autosaveLabel()}</span>
+          {#if volumeId}
+            <span class="summary-pill" class:warning={!hasDurableDestination(volumeId)}>{protectionSummary(volumeId)}</span>
+          {/if}
+        </div>
+      </header>
 
       {#if errorMessage}
         <p class="panel-error">{errorMessage}</p>
@@ -1336,167 +1449,225 @@
         <p class="panel-success">{successMessage}</p>
       {/if}
 
-      {#if discoveryOpen}
-        <section class="panel-cluster scan-cluster compact-scan">
-          <div class="cluster-head">
-            <div>
-              <p class="cluster-title">Discovered folders</p>
-              <p class="cluster-caption">Add a found folder right here without leaving this sheet.</p>
-            </div>
-          </div>
-          {#if discoveryLoading}
-            <p class="storage-message">Scanning...</p>
-          {:else if sourceSuggestionRows().length === 0}
-            <p class="storage-message">No new folders found.</p>
-          {:else}
-            <div class="discovery-grid">
-              {#each sourceSuggestionRows() as row (row.source.path)}
-                <article class="scan-card">
-                  <div class="scan-copy">
-                    <p class="scan-provider">{formatProvider(row.source.provider)}</p>
-                    <p class="scan-path">{row.source.path}</p>
-                  </div>
-                  <div class="scan-actions">
-                    <button type="button" class="panel-btn subtle compact" onclick={() => addDiscoveredSource(row.source)}>
-                      <span>Add</span>
-                    </button>
-                    <button type="button" class="panel-btn subtle compact danger" onclick={() => dismissDiscovery(row.source)}>
-                      <span>Hide</span>
-                    </button>
-                  </div>
-                </article>
-              {/each}
-            </div>
-          {/if}
-        </section>
-      {/if}
-
       {#if !volumeId}
         <p class="storage-message">Open this space first, then choose which locations keep a full copy.</p>
       {:else}
-        <div class="destination-grid compact-destination-grid">
-          {#each configDraft.sources as source (source.id)}
-            {@const destination = destinationFor(volumeId, source.id)}
-            {@const status = sourceStatus(source.id)}
-            <article class="destination-card compact-destination-card" class:safe={protectionTone(destination, source.id) === 'durable'}>
-              <div class="destination-head">
-                <div>
-                  <p class="source-provider">{formatProvider(source.provider)}</p>
-                  <h3>{compactPath(source.path)}</h3>
-                  <p class="source-path">{source.path || 'Choose a folder'}</p>
-                </div>
-                <span
-                  class={`mini-badge tone-${protectionTone(destination, source.id)}`}
-                  title={keepsFullCopy(destination)
-                    ? canReuseOtherGuaranteedCopies(destination)
-                      ? 'This location keeps a spare full copy. If space runs tight, Nearbytes may drop it only after another protected full copy exists elsewhere.'
-                      : 'This location keeps a protected full copy. Nearbytes will not reclaim it automatically.'
-                    : 'This location is not currently keeping this space.'}
-                >
-                  {protectionLabel(destination, source.id)}
-                </span>
-              </div>
-
-              <label class="field-block compact-field">
-                <span>Folder</span>
-                {#if hasSourcePath(source)}
-                  <div class="source-location-block compact">
-                    <p class="source-location-value" title={source.path}>{source.path}</p>
-                  </div>
-                {:else}
-                  <button type="button" class="panel-btn subtle compact choose-folder-btn" onclick={() => chooseSourceFolder(source.id)}>
-                    <Search size={14} strokeWidth={2} />
-                    <span>Choose folder</span>
-                  </button>
-                {/if}
-              </label>
-
-              <label class="toggle-chip strong large">
-                <input
-                  type="checkbox"
-                  checked={keepsFullCopy(destination)}
-                  onchange={(event) => setKeepFullCopy(volumeId, source.id, (event.currentTarget as HTMLInputElement).checked)}
-                />
-                <span title="Keep the full encrypted history and file blocks for this space in this location. Turning this on in more than one location may duplicate the same encrypted data.">Keep a full copy</span>
-              </label>
-
-              <label class="field-block compact-field">
-                <span>Keep free</span>
-                <select class="panel-input" disabled={!keepsFullCopy(destination)} title="Nearbytes leaves this percentage of disk space free before it starts reclaiming spare encrypted data." value={String(destinationReservePercent(destination))} onchange={(event) => updateDestinationField(volumeId, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}>
-                  {#each RESERVE_OPTIONS as option}
-                    <option value={option}>{formatPercent(option)}</option>
-                  {/each}
-                </select>
-              </label>
-
-              <label class="field-block compact-field">
-                <span>When full</span>
-                <select
-                  class="panel-input"
-                  disabled={!keepsFullCopy(destination)}
-                  title="If this disk is still full after Nearbytes has already reclaimed spare unprotected data, “Keep this copy” stops placing new data here to preserve this full copy. “Prefer another protected copy” allows this location to free this full copy, but only after another protected full copy exists elsewhere."
-                  value={destination?.fullPolicy ?? 'block-writes'}
-                  onchange={(event) =>
-                    updateDestinationField(volumeId, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
-                >
-                  <option value="block-writes">Keep this copy</option>
-                  <option value="drop-older-blocks">Prefer another protected copy</option>
-                </select>
-              </label>
-
-              <p class="card-help">
-                {#if keepsFullCopy(destination)}
-                  {#if canReuseOtherGuaranteedCopies(destination)}
-                    This location keeps a spare copy and may yield only after another protected copy exists.
-                  {:else}
-                    This location keeps a protected copy that Nearbytes will not reclaim automatically.
-                  {/if}
-                {:else}
-                  This location is not keeping this space yet.
-                {/if}
-              </p>
-
-              <div class="source-facts">
-                <span>{status?.availableBytes !== undefined ? formatSize(status.availableBytes) : 'n/a free'}</span>
-                <span>{source.enabled ? 'Location on' : 'Location off'}</span>
-                <span>{source.writable ? 'Can write' : 'Read only'}</span>
-              </div>
-
-              <div class="source-actions compact-source-actions">
-                <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)}>
-                  <FolderOpen size={14} strokeWidth={2} />
-                  <span>Open</span>
-                </button>
-                {#if canRemoveAnySource()}
-                  <ArmedActionButton
-                    class="panel-btn subtle compact danger"
-                    icon={Trash2}
-                    text="Remove"
-                    armed={true}
-                    autoDisarmMs={3000}
-                    onPress={() => removeSource(source.id)}
-                  />
-                {/if}
-              </div>
-            </article>
-          {/each}
-          <button type="button" class="add-source-card" onclick={addSourceCard}>
-            <Plus size={18} strokeWidth={2} />
-            <span>Add folder</span>
-          </button>
+        <div class="protection-banner" class:warning={!hasDurableDestination(volumeId)}>
+          <Shield size={15} strokeWidth={2} />
+          <span>{protectionHint(volumeId)}</span>
         </div>
 
-        {#if explicitVolumePolicy(volumeId)}
-          <div class="detail-head-actions">
-            <ArmedActionButton
-              class="panel-btn subtle compact danger"
-              icon={Trash2}
-              text="Forget saved space rule"
-              armed={true}
-              autoDisarmMs={3000}
-              onPress={() => removeVolumePolicy(volumeId)}
-            />
+        <section class="panel-section">
+          <div class="section-head">
+            <div>
+              <p class="section-step">Saved rule for this space</p>
+              <h3>{explicitVolumePolicy(volumeId) ? 'This space has its own rule' : 'This space is currently using the default rule'}</h3>
+              <p class="section-copy">
+                {#if explicitVolumePolicy(volumeId)}
+                  Changes below are saved only for this space. Remove the custom rule to use the default rule again.
+                {:else}
+                  The switches below start from your default rule. Changing them will create a saved rule for this space only.
+                {/if}
+              </p>
+            </div>
+            {#if explicitVolumePolicy(volumeId)}
+              <ArmedActionButton
+                class="panel-btn subtle compact danger"
+                icon={Trash2}
+                text="Use default rules again"
+                armed={true}
+                autoDisarmMs={3000}
+                onPress={() => removeVolumePolicy(volumeId)}
+              />
+            {/if}
           </div>
+
+          <div class="rule-grid">
+            {#each configDraft.sources as source (source.id)}
+              {@const destination = destinationFor(volumeId, source.id)}
+              {@const availability = locationAvailability(source)}
+              {@const writeState = locationWriteState(source)}
+              <article class="rule-card" class:active={protectionTone(destination, source.id) === 'durable'}>
+                <div class="card-head">
+                  <div class="card-title">
+                    <div>
+                      <p class="provider-label">{formatProvider(source.provider)}</p>
+                      <h4>{compactPath(source.path)}</h4>
+                      <p class="path-copy">{source.path || 'No folder selected yet'}</p>
+                    </div>
+                  </div>
+                  <div class="card-status">
+                    <span class={`status-pill tone-${availability.tone}`}>{availability.label}</span>
+                    <span class={`status-pill tone-${writeState.tone}`}>{writeState.label}</span>
+                    <span class={`status-pill tone-${protectionTone(destination, source.id)}`}>{protectionLabel(destination, source.id)}</span>
+                  </div>
+                </div>
+
+                <label class="toggle-row large-toggle">
+                  <input
+                    type="checkbox"
+                    checked={keepsFullCopy(destination)}
+                    onchange={(event) => setKeepFullCopy(volumeId, source.id, (event.currentTarget as HTMLInputElement).checked)}
+                  />
+                  <div>
+                    <span class="toggle-title">Keep a full copy of this space here</span>
+                    <span class="toggle-copy">This includes encrypted history and file data for the current space.</span>
+                  </div>
+                </label>
+
+                <p class="card-copy">{copyHelpText(volumeId, source)}</p>
+
+                {#if keepsFullCopy(destination)}
+                  <div class="field-grid">
+                    <label class="field-block">
+                      <span>Keep this much free space</span>
+                      <select
+                        class="panel-input"
+                        value={String(destinationReservePercent(destination))}
+                        onchange={(event) =>
+                          updateDestinationField(volumeId, source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
+                      >
+                        {#each RESERVE_OPTIONS as option}
+                          <option value={option}>{formatPercent(option)}</option>
+                        {/each}
+                      </select>
+                    </label>
+                    <label class="field-block">
+                      <span>If this protected copy is taking too much space</span>
+                      <select
+                        class="panel-input"
+                        value={destination?.fullPolicy ?? 'block-writes'}
+                        onchange={(event) =>
+                          updateDestinationField(volumeId, source.id, 'fullPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
+                      >
+                        <option value="block-writes">Keep this copy</option>
+                        <option value="drop-older-blocks">Use another protected copy first</option>
+                      </select>
+                    </label>
+                  </div>
+                {/if}
+
+                <details class="details-card">
+                  <summary>Manage this storage location</summary>
+                  <p class="muted-copy">These settings apply to all spaces, not just the one currently open.</p>
+
+                  <div class="button-row">
+                    <button type="button" class="panel-btn subtle compact" onclick={() => chooseSourceFolder(source.id)}>
+                      <Search size={14} strokeWidth={2} />
+                      <span>{hasSourcePath(source) ? 'Change folder' : 'Choose folder'}</span>
+                    </button>
+                    <button type="button" class="panel-btn subtle compact" onclick={() => openSourceFolder(source.id)} disabled={!hasSourcePath(source)}>
+                      <FolderOpen size={14} strokeWidth={2} />
+                      <span>Open folder</span>
+                    </button>
+                  </div>
+
+                  <div class="toggle-list">
+                    <label class="toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={source.enabled}
+                        onchange={(event) => updateSourceField(source.id, 'enabled', (event.currentTarget as HTMLInputElement).checked)}
+                      />
+                      <div>
+                        <span class="toggle-title">Use this location</span>
+                        <span class="toggle-copy">Nearbytes can read existing data here.</span>
+                      </div>
+                    </label>
+                    <label class="toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={source.writable}
+                        onchange={(event) => updateSourceField(source.id, 'writable', (event.currentTarget as HTMLInputElement).checked)}
+                      />
+                      <div>
+                        <span class="toggle-title">Allow new data here</span>
+                        <span class="toggle-copy">Nearbytes may save new encrypted data to this location.</span>
+                      </div>
+                    </label>
+                  </div>
+
+                  <div class="field-grid">
+                    <label class="field-block">
+                      <span>Keep this much free space</span>
+                      <select
+                        class="panel-input"
+                        value={String(sourceReservePercent(source))}
+                        onchange={(event) =>
+                          updateSourceField(source.id, 'reservePercent', clampReserve((event.currentTarget as HTMLSelectElement).value))}
+                      >
+                        {#each RESERVE_OPTIONS as option}
+                          <option value={option}>{formatPercent(option)}</option>
+                        {/each}
+                      </select>
+                    </label>
+                    <label class="field-block">
+                      <span>If the drive still fills up</span>
+                      <select
+                        class="panel-input"
+                        value={source.opportunisticPolicy}
+                        onchange={(event) =>
+                          updateSourceField(source.id, 'opportunisticPolicy', (event.currentTarget as HTMLSelectElement).value as StorageFullPolicy)}
+                      >
+                        <option value="block-writes">Stop saving new data here</option>
+                        <option value="drop-older-blocks">Reuse copies protected elsewhere</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  {#if canRemoveAnySource()}
+                    <ArmedActionButton
+                      class="panel-btn subtle compact danger"
+                      icon={Trash2}
+                      text="Remove location"
+                      armed={true}
+                      autoDisarmMs={3000}
+                      onPress={() => removeSource(source.id)}
+                    />
+                  {/if}
+                </details>
+              </article>
+            {/each}
+          </div>
+        </section>
+
+        {#if discoveryOpen}
+          <section class="panel-section" bind:this={manualDiscoverySectionElement}>
+            <div class="section-head">
+              <div>
+                <p class="section-step">Scan for folders</p>
+                <h3>Add an existing Nearbytes folder to this space</h3>
+                <p class="section-copy">
+                  If this space already exists in another synced folder, you can add that location here.
+                </p>
+              </div>
+            </div>
+            {#if discoveryLoading}
+              <p class="muted-copy">Scanning folders...</p>
+            {:else if sourceSuggestionRows().length === 0}
+              <p class="muted-copy">No new Nearbytes folders were found.</p>
+            {:else}
+              <div class="scan-card-list">
+                {#each sourceSuggestionRows() as row (row.source.path)}
+                  <article class="scan-card">
+                    <div class="scan-copy">
+                      <p class="provider-label">{formatProvider(row.source.provider)}</p>
+                      <p class="scan-path">{row.source.path}</p>
+                    </div>
+                    <div class="button-row">
+                      <button type="button" class="panel-btn subtle compact" onclick={() => addDiscoveredSource(row.source)}>
+                        <Plus size={14} strokeWidth={2} />
+                        <span>Add location</span>
+                      </button>
+                      <button type="button" class="panel-btn subtle compact danger" onclick={() => dismissDiscovery(row.source)}>
+                        <span>Hide</span>
+                      </button>
+                    </div>
+                  </article>
+                {/each}
+              </div>
+            {/if}
+          </section>
         {/if}
       {/if}
     {/if}
@@ -1505,753 +1676,530 @@
 
 <style>
   .storage-panel {
+    --panel-border: rgba(111, 173, 252, 0.18);
+    --panel-soft-border: rgba(111, 173, 252, 0.12);
+    --panel-bg:
+      radial-gradient(circle at top left, rgba(56, 189, 248, 0.09), transparent 32%),
+      linear-gradient(180deg, rgba(8, 16, 30, 0.97), rgba(7, 12, 24, 0.95));
+    --card-bg: rgba(10, 19, 34, 0.8);
+    --card-bg-strong: rgba(12, 22, 40, 0.92);
+    --text-main: rgba(241, 245, 249, 0.96);
+    --text-soft: rgba(191, 219, 254, 0.78);
+    --text-faint: rgba(191, 219, 254, 0.62);
+    --teal: rgba(153, 246, 228, 0.96);
+    --warn: rgba(254, 240, 138, 0.96);
+    --danger: rgba(254, 202, 202, 0.96);
     display: grid;
     gap: 1rem;
-    padding: 1rem;
     width: 100%;
     min-height: 0;
-    border: 1px solid rgba(56, 189, 248, 0.18);
-    border-radius: 20px;
-    background:
-      radial-gradient(130% 130% at 0% 0%, rgba(34, 211, 238, 0.08), transparent 46%),
-      linear-gradient(180deg, rgba(8, 17, 31, 0.96), rgba(7, 14, 28, 0.94));
+    padding: 1rem;
+    overflow: auto;
+    border: 1px solid var(--panel-border);
+    border-radius: 22px;
+    background: var(--panel-bg);
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.04),
-      0 20px 44px rgba(2, 6, 23, 0.2);
+      0 18px 40px rgba(2, 6, 23, 0.18);
   }
 
-  .storage-panel.global-mode,
-  .storage-panel.volume-mode {
-    overflow: auto;
-    scrollbar-width: thin;
-  }
-
-  .panel-head,
-  .cluster-head,
-  .source-card-head,
-  .source-actions,
-  .panel-actions,
-  .chip-row,
-  .source-facts,
-  .detail-head-actions,
-  .merge-actions,
-  .scan-actions,
-  .destination-head {
+  .hero,
+  .section-head,
+  .card-head,
+  .card-status,
+  .hero-actions,
+  .button-row,
+  .section-metrics,
+  .scan-badges,
+  .scan-group-head,
+  .fact-row,
+  .usage-meta {
     display: flex;
-    align-items: center;
-    gap: 0.75rem;
     flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
   }
 
-  .panel-head,
-  .cluster-head {
+  .hero,
+  .section-head,
+  .card-head,
+  .scan-group-head {
     justify-content: space-between;
   }
 
-  .panel-eyebrow,
-  .cluster-title,
-  .source-provider,
-  .scan-provider {
+  .hero {
+    gap: 1rem;
+    padding: 1rem;
+    border-radius: 20px;
+    border: 1px solid var(--panel-soft-border);
+    background: rgba(8, 18, 34, 0.72);
+  }
+
+  .hero-copy,
+  .section-head > div:first-child,
+  .scan-copy,
+  .usage-main {
+    display: grid;
+    gap: 0.35rem;
+  }
+
+  .eyebrow,
+  .section-step,
+  .provider-label,
+  .scan-group-title {
     margin: 0;
-    font-size: 0.68rem;
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
-    letter-spacing: 0.16em;
-    color: rgba(94, 234, 212, 0.88);
+    color: rgba(110, 231, 249, 0.9);
   }
 
   h2,
   h3,
-  .panel-caption,
-  .panel-path,
-  .cluster-caption,
+  h4,
+  .hero-text,
+  .section-copy,
+  .path-copy,
   .storage-message,
-  .source-path,
-  .merge-copy,
-  .volume-card-name,
-  .volume-card-meta,
-  .detail-note,
-  .scan-path {
+  .card-copy,
+  .scan-note,
+  .scan-path,
+  .muted-copy,
+  .warning-copy,
+  .mono-copy {
     margin: 0;
+  }
+
+  h2,
+  h3,
+  h4 {
+    color: var(--text-main);
   }
 
   h2 {
-    margin-top: 0.24rem;
-    font-size: 1.2rem;
-    color: rgba(240, 249, 255, 0.96);
+    font-size: 1.32rem;
+    line-height: 1.25;
   }
 
   h3 {
-    font-size: 0.98rem;
-    color: rgba(240, 249, 255, 0.96);
+    font-size: 1rem;
+    line-height: 1.35;
   }
 
-  .panel-caption,
-  .panel-path,
-  .cluster-caption,
+  h4 {
+    font-size: 0.96rem;
+  }
+
+  .hero-text,
+  .section-copy,
+  .path-copy,
   .storage-message,
-  .source-path,
-  .merge-copy,
-  .detail-note,
+  .card-copy,
+  .scan-note,
   .scan-path,
-  .volume-card-meta {
-    font-size: 0.82rem;
-    color: rgba(186, 230, 253, 0.72);
+  .muted-copy {
+    color: var(--text-soft);
+    font-size: 0.84rem;
+    line-height: 1.45;
   }
 
-  .panel-path {
+  .warning-copy {
+    color: var(--warn);
+    font-size: 0.82rem;
+    line-height: 1.4;
+  }
+
+  .mono-copy {
     font-family: 'Monaco', 'Menlo', monospace;
-    font-size: 0.74rem;
+    font-size: 0.75rem;
+    color: var(--text-soft);
     word-break: break-all;
   }
 
-  .panel-error,
-  .panel-success {
-    margin: 0;
-    font-size: 0.82rem;
-    border-radius: 12px;
-    padding: 0.68rem 0.82rem;
-  }
-
-  .panel-error {
-    color: rgba(254, 202, 202, 0.96);
-    background: rgba(127, 29, 29, 0.28);
-    border: 1px solid rgba(248, 113, 113, 0.22);
-  }
-
-  .panel-success {
-    color: rgba(209, 250, 229, 0.96);
-    background: rgba(6, 78, 59, 0.26);
-    border: 1px solid rgba(45, 212, 191, 0.22);
-  }
-
-  .panel-tip {
-    margin: 0;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.46rem;
-    font-size: 0.78rem;
-    color: rgba(204, 251, 241, 0.9);
-    padding: 0.7rem 0.82rem;
-    border-radius: 12px;
-    border: 1px solid rgba(45, 212, 191, 0.16);
-    background: rgba(8, 56, 49, 0.2);
-  }
-
-  .panel-cluster,
-  .detail-shell {
+  .panel-section,
+  .details-card,
+  .location-card,
+  .rule-card,
+  .scan-card,
+  .scan-group {
     display: grid;
-    gap: 0.85rem;
-    padding: 0.9rem;
-    border-radius: 16px;
-    border: 1px solid rgba(56, 189, 248, 0.12);
-    background: rgba(7, 15, 28, 0.52);
+    gap: 0.9rem;
+    border-radius: 18px;
+    border: 1px solid var(--panel-soft-border);
+    background: rgba(7, 15, 29, 0.56);
   }
 
-  .summary-badge,
-  .mini-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 26px;
-    padding: 0 0.7rem;
-    border-radius: 999px;
-    border: 1px solid rgba(56, 189, 248, 0.18);
-    background: rgba(11, 21, 38, 0.72);
-    color: rgba(186, 230, 253, 0.9);
-    font-size: 0.72rem;
-    font-weight: 600;
-    white-space: nowrap;
+  .panel-section,
+  .details-card {
+    padding: 0.95rem;
   }
 
-  .summary-badge.warning,
-  .volume-card-badge.warning,
-  .mini-badge.tone-off {
-    border-color: rgba(251, 191, 36, 0.28);
-    color: rgba(254, 240, 138, 0.96);
-    background: rgba(71, 55, 18, 0.42);
+  .location-card,
+  .rule-card,
+  .scan-card,
+  .scan-group {
+    padding: 1rem;
   }
 
-  .mini-badge.safe,
-  .volume-card-badge.safe,
-  .mini-badge.tone-durable {
-    border-color: rgba(45, 212, 191, 0.28);
-    color: rgba(204, 251, 241, 0.96);
-    background: rgba(10, 58, 58, 0.44);
+  .card-grid,
+  .rule-grid,
+  .scan-card-list,
+  .scan-group-list {
+    display: grid;
+    gap: 0.9rem;
   }
 
-  .mini-badge.muted,
-  .mini-badge.tone-events,
-  .mini-badge.tone-replica {
-    border-color: rgba(96, 165, 250, 0.2);
-    color: rgba(191, 219, 254, 0.88);
-    background: rgba(15, 23, 42, 0.42);
+  .card-grid,
+  .rule-grid {
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   }
 
-  .panel-btn,
-  :global(.panel-btn) {
-    border: 1px solid rgba(56, 189, 248, 0.22);
-    background: rgba(12, 24, 43, 0.82);
-    color: rgba(226, 232, 240, 0.92);
-    border-radius: 12px;
-    min-height: 34px;
-    padding: 0 0.86rem;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.46rem;
-    font-size: 0.78rem;
-    font-weight: 600;
-    line-height: 1;
-    cursor: pointer;
-    transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+  .location-card,
+  .rule-card {
+    background: var(--card-bg);
   }
 
-  .panel-btn.compact,
-  :global(.panel-btn.compact) {
-    min-height: 30px;
-    padding: 0 0.72rem;
-    font-size: 0.74rem;
-  }
-
-  .panel-btn.icon-only,
-  :global(.panel-btn.icon-only) {
-    min-width: 30px;
-    width: 30px;
-    padding: 0;
-  }
-
-  .panel-btn:hover:not(:disabled),
-  :global(.panel-btn:hover:not(:disabled)) {
-    transform: translateY(-1px);
-    border-color: rgba(96, 165, 250, 0.34);
-    background: rgba(16, 32, 56, 0.92);
-  }
-
-  .panel-btn.primary,
-  :global(.panel-btn.primary) {
+  .rule-card.active {
     border-color: rgba(45, 212, 191, 0.26);
-    background: linear-gradient(180deg, rgba(10, 76, 70, 0.92), rgba(8, 54, 52, 0.96));
-    color: rgba(240, 253, 250, 0.98);
+    background:
+      radial-gradient(circle at top left, rgba(45, 212, 191, 0.08), transparent 36%),
+      var(--card-bg-strong);
   }
 
-  .panel-btn.danger,
-  :global(.panel-btn.danger) {
-    border-color: rgba(248, 113, 113, 0.24);
-    background: rgba(67, 20, 20, 0.62);
-    color: rgba(254, 226, 226, 0.95);
-  }
-
-  :global(.panel-btn.danger.armed) {
-    border-color: rgba(252, 165, 165, 0.84);
-    background: linear-gradient(180deg, rgba(220, 38, 38, 0.86), rgba(153, 27, 27, 0.92));
-    color: #fff5f5;
-  }
-
-  .field-block {
-    display: grid;
-    gap: 0.34rem;
-    min-width: 0;
-  }
-
-  .field-block span {
-    font-size: 0.7rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: rgba(148, 163, 184, 0.86);
-  }
-
-  .panel-input {
-    width: 100%;
-    min-height: 38px;
-    border-radius: 12px;
-    border: 1px solid rgba(56, 189, 248, 0.2);
-    background: rgba(9, 18, 33, 0.82);
-    color: rgba(226, 232, 240, 0.96);
-    padding: 0 0.8rem;
-    font-size: 0.84rem;
-    outline: none;
-  }
-
-  .panel-input:focus {
-    border-color: rgba(56, 189, 248, 0.5);
-    box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.12);
-  }
-
-  .panel-input:disabled {
-    opacity: 0.54;
-    cursor: not-allowed;
-  }
-
-  .input-with-action {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.5rem;
-    align-items: center;
-  }
-
-  .field-grid {
-    display: grid;
-    gap: 0.7rem;
-  }
-
-  .field-grid.two-up {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .source-location-block {
-    display: grid;
-    gap: 0.2rem;
-    padding: 0.72rem 0.8rem;
-    border-radius: 12px;
-    border: 1px solid rgba(56, 189, 248, 0.12);
-    background: rgba(9, 18, 33, 0.5);
-  }
-
-  .source-location-block.compact {
-    padding: 0.62rem 0.72rem;
-  }
-
-  .source-location-label {
-    font-size: 0.68rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: rgba(148, 163, 184, 0.82);
-  }
-
-  .source-location-value {
-    margin: 0;
-    font-size: 0.8rem;
-    color: rgba(226, 232, 240, 0.94);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .choose-folder-btn {
-    width: 100%;
-    justify-content: center;
-  }
-
-  .source-grid,
-  .destination-grid,
-  .discovery-grid {
-    display: grid;
-    gap: 0.85rem;
-  }
-
-  .source-grid {
-    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  }
-
-  .destination-grid {
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  }
-
-  .discovery-detail-groups {
-    display: grid;
-    gap: 0.85rem;
-  }
-
-  .discovery-detail-group {
-    display: grid;
-    gap: 0.65rem;
-  }
-
-  .detail-group-head {
+  .card-title {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.65rem;
-  }
-
-  .discovery-grid {
-    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  }
-
-  .scan-card,
-  .source-card,
-  .destination-card {
-    border-radius: 16px;
-    border: 1px solid rgba(56, 189, 248, 0.14);
-    background: rgba(8, 17, 31, 0.74);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-  }
-
-  .scan-card,
-  .source-card,
-  .destination-card {
-    padding: 0.92rem;
-  }
-
-  .scan-card,
-  .source-card,
-  .destination-card,
-  .source-copy,
-  .scan-copy {
-    display: grid;
-    gap: 0.7rem;
-  }
-
-  .scan-card {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .detail-scan-card {
-    gap: 0.75rem;
-  }
-
-  .source-card-head {
+    gap: 0.8rem;
     align-items: flex-start;
-    justify-content: space-between;
   }
 
-  .source-mark {
+  .card-icon {
     width: 34px;
     height: 34px;
     border-radius: 12px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border: 1px solid rgba(56, 189, 248, 0.2);
-    background: rgba(10, 24, 42, 0.78);
-    color: rgba(148, 163, 184, 0.96);
-    flex: 0 0 auto;
+    border: 1px solid rgba(96, 165, 250, 0.18);
+    background: rgba(14, 27, 49, 0.88);
+    color: rgba(191, 219, 254, 0.9);
   }
 
-  .source-copy {
-    min-width: 0;
-    flex: 1 1 auto;
-  }
-
-  .compact-inline-toggle {
+  .summary-pill,
+  .status-pill,
+  .mini-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     min-height: 28px;
-  }
-
-  .source-badges {
-    display: flex;
-    gap: 0.45rem;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .source-path,
-  .scan-path {
-    overflow: hidden;
-    text-overflow: ellipsis;
+    padding: 0 0.78rem;
+    border-radius: 999px;
+    border: 1px solid rgba(96, 165, 250, 0.18);
+    background: rgba(12, 23, 41, 0.84);
+    color: rgba(219, 234, 254, 0.92);
+    font-size: 0.73rem;
+    font-weight: 600;
     white-space: nowrap;
   }
 
-  .chip-row {
-    gap: 0.5rem;
+  .summary-pill.warning,
+  .status-pill.tone-warn {
+    border-color: rgba(251, 191, 36, 0.28);
+    background: rgba(72, 53, 16, 0.46);
+    color: var(--warn);
   }
 
-  .chip-row.dense {
-    gap: 0.46rem;
+  .status-pill.tone-good,
+  .status-pill.tone-durable {
+    border-color: rgba(45, 212, 191, 0.28);
+    background: rgba(9, 58, 58, 0.42);
+    color: var(--teal);
   }
 
-  .toggle-chip {
-    position: relative;
+  .status-pill.tone-muted,
+  .status-pill.tone-replica,
+  .status-pill.tone-off,
+  .mini-pill {
+    border-color: rgba(96, 165, 250, 0.18);
+    background: rgba(12, 23, 41, 0.82);
+    color: rgba(191, 219, 254, 0.88);
+  }
+
+  .panel-btn,
+  :global(.panel-btn) {
+    min-height: 36px;
+    border-radius: 12px;
+    border: 1px solid rgba(96, 165, 250, 0.22);
+    background: rgba(12, 24, 43, 0.84);
+    color: rgba(241, 245, 249, 0.94);
+    padding: 0 0.92rem;
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.48rem;
-    min-height: 30px;
-    padding: 0 0.74rem;
-    border-radius: 999px;
-    border: 1px solid rgba(56, 189, 248, 0.18);
-    background: rgba(10, 19, 34, 0.56);
-    color: rgba(226, 232, 240, 0.86);
-    font-size: 0.75rem;
+    font-size: 0.82rem;
     font-weight: 600;
     cursor: pointer;
-    user-select: none;
+    transition:
+      border-color 120ms ease,
+      transform 120ms ease,
+      background 120ms ease;
   }
 
-  .toggle-chip input {
-    accent-color: #2dd4bf;
+  .panel-btn:hover,
+  :global(.panel-btn:hover) {
+    transform: translateY(-1px);
+    border-color: rgba(125, 211, 252, 0.32);
+  }
+
+  .panel-btn:disabled,
+  :global(.panel-btn:disabled) {
+    opacity: 0.55;
+    cursor: default;
+    transform: none;
+  }
+
+  .panel-btn.primary,
+  :global(.panel-btn.primary) {
+    background: linear-gradient(135deg, rgba(14, 116, 144, 0.94), rgba(37, 99, 235, 0.9));
+    border-color: rgba(103, 232, 249, 0.24);
+  }
+
+  .panel-btn.subtle,
+  :global(.panel-btn.subtle) {
+    background: rgba(12, 24, 43, 0.68);
+  }
+
+  .panel-btn.compact,
+  :global(.panel-btn.compact) {
+    min-height: 32px;
+    padding: 0 0.72rem;
+  }
+
+  .panel-btn.danger,
+  :global(.panel-btn.danger) {
+    border-color: rgba(248, 113, 113, 0.24);
+    color: rgba(254, 226, 226, 0.94);
+  }
+
+  .panel-error,
+  .panel-success,
+  .protection-banner {
     margin: 0;
-  }
-
-  .toggle-chip.strong {
-    border-color: rgba(45, 212, 191, 0.24);
-    color: rgba(240, 253, 250, 0.96);
-  }
-
-  .toggle-chip.large {
-    min-height: 36px;
-    padding: 0.28rem 0.84rem;
-    align-items: center;
-    justify-content: flex-start;
-  }
-
-  .compact-toggle-stack {
-    display: grid;
-    gap: 0.55rem;
-  }
-
-  .source-facts {
-    font-size: 0.76rem;
-    color: rgba(186, 230, 253, 0.72);
-    justify-content: space-between;
-  }
-
-  .compact-detail-facts {
-    justify-content: flex-start;
-    gap: 0.45rem;
-  }
-
-  .detail-action-list {
     display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: flex-start;
+    border-radius: 14px;
+    padding: 0.82rem 0.94rem;
+    font-size: 0.84rem;
+    line-height: 1.45;
   }
 
-  .detail-copy {
-    margin: 0;
-    font-size: 0.75rem;
-    line-height: 1.35;
-    color: rgba(186, 230, 253, 0.74);
+  .panel-error {
+    color: var(--danger);
+    border: 1px solid rgba(248, 113, 113, 0.22);
+    background: rgba(127, 29, 29, 0.26);
   }
 
-  .compact-source-actions {
-    justify-content: flex-end;
+  .panel-success {
+    color: rgba(209, 250, 229, 0.96);
+    border: 1px solid rgba(45, 212, 191, 0.22);
+    background: rgba(6, 78, 59, 0.24);
   }
 
-  .card-help {
-    margin: 0;
-    font-size: 0.75rem;
-    line-height: 1.35;
-    color: rgba(186, 230, 253, 0.72);
+  .protection-banner {
+    color: rgba(204, 251, 241, 0.94);
+    border: 1px solid rgba(45, 212, 191, 0.18);
+    background: rgba(8, 56, 49, 0.22);
   }
 
-  .usage-strip,
-  .usage-volume-stats {
-    display: flex;
-    align-items: center;
-    gap: 0.55rem;
-    flex-wrap: wrap;
+  .protection-banner.warning {
+    color: var(--warn);
+    border-color: rgba(251, 191, 36, 0.2);
+    background: rgba(72, 53, 16, 0.3);
   }
 
-  .usage-strip {
-    font-size: 0.74rem;
-    color: rgba(191, 219, 254, 0.78);
-  }
-
-  .usage-volume-list {
+  .toggle-list,
+  .usage-list,
+  .danger-block {
     display: grid;
-    gap: 0.4rem;
-    padding-top: 0.1rem;
+    gap: 0.8rem;
   }
 
-  .usage-details {
+  .toggle-row {
     display: grid;
-    gap: 0.55rem;
-    padding-top: 0.1rem;
+    grid-template-columns: auto 1fr;
+    gap: 0.75rem;
+    align-items: start;
+    padding: 0.85rem 0.9rem;
+    border-radius: 14px;
+    border: 1px solid rgba(96, 165, 250, 0.14);
+    background: rgba(12, 23, 41, 0.54);
   }
 
-  .usage-details[open] {
-    padding-top: 0.25rem;
+  .toggle-row input {
+    margin-top: 0.22rem;
+    width: 17px;
+    height: 17px;
+    accent-color: #14b8a6;
   }
 
-  .usage-details-summary {
-    list-style: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.7rem;
-    cursor: pointer;
-    font-size: 0.76rem;
+  .toggle-row.large-toggle {
+    background: rgba(13, 26, 47, 0.72);
+  }
+
+  .toggle-row > div {
+    display: grid;
+    gap: 0.18rem;
+  }
+
+  .toggle-title {
+    color: var(--text-main);
+    font-size: 0.86rem;
     font-weight: 600;
-    color: rgba(226, 232, 240, 0.92);
-    padding: 0.58rem 0.68rem;
+  }
+
+  .toggle-copy,
+  .fact-row,
+  .usage-meta,
+  .subheading {
+    color: var(--text-soft);
+    font-size: 0.8rem;
+    line-height: 1.45;
+  }
+
+  .fact-row {
+    gap: 0.5rem 1rem;
+  }
+
+  .fact-row span,
+  .usage-meta span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .subheading {
+    margin: 0;
+    color: rgba(224, 242, 254, 0.92);
+    font-weight: 600;
+  }
+
+  .field-grid {
+    display: grid;
+    gap: 0.8rem;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
+
+  .field-block {
+    display: grid;
+    gap: 0.4rem;
+  }
+
+  .field-block > span {
+    color: rgba(224, 242, 254, 0.92);
+    font-size: 0.79rem;
+    font-weight: 600;
+  }
+
+  .panel-input {
+    min-height: 38px;
     border-radius: 12px;
-    border: 1px solid rgba(56, 189, 248, 0.12);
-    background: rgba(9, 18, 33, 0.44);
+    border: 1px solid rgba(96, 165, 250, 0.18);
+    background: rgba(10, 18, 31, 0.92);
+    color: var(--text-main);
+    padding: 0 0.8rem;
+    font-size: 0.83rem;
   }
 
-  .usage-details-summary::-webkit-details-marker {
+  .panel-input:disabled {
+    opacity: 0.55;
+  }
+
+  .details-card summary {
+    cursor: pointer;
+    color: rgba(224, 242, 254, 0.94);
+    font-size: 0.83rem;
+    font-weight: 600;
+    list-style: none;
+  }
+
+  .details-card summary::-webkit-details-marker {
     display: none;
   }
 
-  .usage-volume-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.7rem;
-    padding: 0.56rem 0.68rem;
-    border-radius: 12px;
-    border: 1px solid rgba(56, 189, 248, 0.1);
-    background: rgba(9, 18, 33, 0.48);
+  .details-card summary::before {
+    content: '+';
+    display: inline-block;
+    width: 1rem;
+    color: rgba(103, 232, 249, 0.9);
   }
 
-  .usage-volume-copy {
-    min-width: 0;
+  .details-card[open] summary::before {
+    content: '-';
+  }
+
+  .scan-card {
+    grid-template-columns: 1fr auto;
+    align-items: start;
+  }
+
+  .scan-group {
+    background: rgba(8, 18, 33, 0.62);
+  }
+
+  .usage-row {
     display: grid;
-    gap: 0.1rem;
-  }
-
-  .usage-volume-name,
-  .usage-volume-meta {
-    margin: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .usage-volume-name {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: rgba(240, 249, 255, 0.94);
-  }
-
-  .usage-volume-meta,
-  .usage-volume-stats {
-    font-size: 0.72rem;
-    color: rgba(186, 230, 253, 0.68);
+    gap: 0.35rem 0.9rem;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    padding: 0.75rem 0.85rem;
+    border-radius: 14px;
+    background: rgba(12, 23, 41, 0.5);
+    border: 1px solid rgba(96, 165, 250, 0.12);
   }
 
   .merge-box {
     display: grid;
-    gap: 0.72rem;
-    padding-top: 0.2rem;
-    border-top: 1px solid rgba(56, 189, 248, 0.1);
-  }
-
-  .volume-card {
-    display: grid;
-    gap: 0.72rem;
-    align-content: space-between;
-    min-height: 168px;
+    gap: 0.8rem;
     padding: 0.9rem;
-    text-align: left;
-    cursor: pointer;
-    transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
+    border-radius: 14px;
+    border: 1px solid rgba(96, 165, 250, 0.14);
+    background: rgba(12, 23, 41, 0.54);
   }
 
-  .volume-card:hover {
-    transform: translateY(-1px);
-    border-color: rgba(96, 165, 250, 0.26);
-    background: rgba(10, 22, 40, 0.86);
+  .minor-details {
+    background: rgba(7, 15, 29, 0.46);
   }
 
-  .volume-card.active {
-    border-color: rgba(34, 211, 238, 0.42);
-    background:
-      radial-gradient(140% 120% at 0% 0%, rgba(34, 211, 238, 0.12), transparent 44%),
-      rgba(10, 22, 40, 0.9);
-    box-shadow: 0 16px 32px rgba(2, 6, 23, 0.24);
+  .compact-hero {
+    margin-bottom: 0.1rem;
   }
 
-  .volume-card.default-card {
-    border-style: dashed;
-  }
-
-  .volume-card-copy {
-    display: grid;
-    gap: 0.28rem;
-    min-width: 0;
-  }
-
-  .volume-card-name {
-    font-size: 0.92rem;
-    font-weight: 700;
-    color: rgba(240, 249, 255, 0.96);
-  }
-
-  .volume-card-badge {
-    align-self: end;
-    justify-self: start;
-    display: inline-flex;
-    align-items: center;
-    min-height: 24px;
-    padding: 0 0.64rem;
-    border-radius: 999px;
-    border: 1px solid rgba(56, 189, 248, 0.18);
-    font-size: 0.7rem;
-    font-weight: 700;
-  }
-
-  .destination-card.safe {
-    border-color: rgba(45, 212, 191, 0.22);
-    background:
-      radial-gradient(140% 120% at 0% 0%, rgba(45, 212, 191, 0.08), transparent 48%),
-      rgba(8, 17, 31, 0.78);
-  }
-
-  .compact-destination-grid {
-    grid-template-columns: repeat(auto-fit, minmax(220px, 250px));
-  }
-
-  .compact-destination-card {
-    display: grid;
-    gap: 0.72rem;
-    align-content: start;
-    min-height: 248px;
-  }
-
-  .compact-actions {
-    justify-content: flex-end;
-  }
-
-  .add-source-card {
-    border: 1px dashed rgba(56, 189, 248, 0.24);
-    border-radius: 16px;
-    background: rgba(9, 18, 33, 0.48);
-    color: rgba(191, 219, 254, 0.84);
-    min-height: 248px;
-    display: grid;
-    align-content: center;
-    justify-items: center;
-    gap: 0.55rem;
-    cursor: pointer;
-    font-size: 0.84rem;
-    font-weight: 700;
-    transition: transform 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
-  }
-
-  .add-source-card:hover {
-    transform: translateY(-1px);
-    border-color: rgba(96, 165, 250, 0.34);
-    background: rgba(12, 24, 43, 0.72);
-  }
-
-  .card-side-note {
-    display: grid;
-    gap: 0.18rem;
-    align-content: start;
-    padding: 0.2rem 0;
-  }
-
-  .card-side-note-label {
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: rgba(186, 230, 253, 0.72);
-  }
-
-  .card-side-note-copy {
-    font-size: 0.75rem;
-    line-height: 1.3;
-    color: rgba(186, 230, 253, 0.68);
-  }
-
-  .detail-head-actions {
-    justify-content: flex-end;
-    margin-left: auto;
-  }
-
-  @media (max-width: 920px) {
-    .panel-head,
-    .cluster-head {
-      align-items: flex-start;
+  @media (max-width: 760px) {
+    .storage-panel {
+      padding: 0.85rem;
+      border-radius: 18px;
     }
 
-    .field-grid.two-up {
+    .hero,
+    .section-head,
+    .card-head,
+    .scan-card,
+    .usage-row {
       grid-template-columns: 1fr;
     }
 
-    .compact-destination-grid {
-      grid-template-columns: 1fr;
+    .hero-actions,
+    .section-metrics,
+    .card-status,
+    .button-row,
+    .usage-meta {
+      width: 100%;
+    }
+
+    .button-row > :global(*),
+    .hero-actions > * {
+      flex: 1 1 100%;
     }
   }
 </style>
