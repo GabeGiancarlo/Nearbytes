@@ -1113,6 +1113,18 @@
     return nextMounts.find((mount) => !mount.collapsed)?.id ?? nextMounts[0]?.id ?? '';
   }
 
+  function moveMountToFront(nextMounts: VolumeMount[], mountId: string): VolumeMount[] {
+    const index = nextMounts.findIndex((mount) => mount.id === mountId);
+    if (index <= 0) {
+      return nextMounts;
+    }
+    const target = nextMounts[index];
+    if (!target) {
+      return nextMounts;
+    }
+    return [target, ...nextMounts.slice(0, index), ...nextMounts.slice(index + 1)];
+  }
+
   onMount(() => {
     configuredIdentities = loadConfiguredIdentities();
     activeChatIdentityId = loadActiveIdentityId();
@@ -2175,7 +2187,7 @@
   function addMount() {
     const nextMount = createMount();
     const collapsedExisting = mounts.map((mount) => ({ ...mount, collapsed: true }));
-    mounts = [...collapsedExisting, nextMount];
+    mounts = [nextMount, ...collapsedExisting];
     activeMountId = nextMount.id;
     pendingMountId = null;
     secretPasteTargetMountId = nextMount.id;
@@ -2196,15 +2208,18 @@
     }
     pendingMountId = mountId;
     secretPasteTargetMountId = null;
-    mounts = mounts.map((mount) => ({ ...mount, collapsed: true }));
+    mounts = moveMountToFront(mounts.map((mount) => ({ ...mount, collapsed: true })), mountId);
     activeMountId = mountId;
   }
 
   function reopenMount(mountId: string) {
     pendingMountId = null;
     secretPasteTargetMountId = mountId;
-    mounts = mounts.map((mount) =>
-      mount.id === mountId ? { ...mount, collapsed: false } : { ...mount, collapsed: true }
+    mounts = moveMountToFront(
+      mounts.map((mount) =>
+        mount.id === mountId ? { ...mount, collapsed: false } : { ...mount, collapsed: true }
+      ),
+      mountId
     );
     activeMountId = mountId;
   }
@@ -2334,6 +2349,7 @@
           }
         : { ...mount, collapsed: true }
     );
+    mounts = moveMountToFront(mounts, mountId);
     activeMountId = mountId;
     address = label;
     addressPassword = '';
@@ -2350,7 +2366,7 @@
   function createCollapsedMount(): string {
     const nextMount = createMount();
     const collapsedExisting = mounts.map((mount) => ({ ...mount, collapsed: true }));
-    mounts = [...collapsedExisting, nextMount];
+    mounts = [nextMount, ...collapsedExisting];
     activeMountId = nextMount.id;
     return nextMount.id;
   }
