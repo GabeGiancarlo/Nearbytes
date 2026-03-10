@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { flip } from 'svelte/animate';
   import {
     openVolume,
     listFiles,
@@ -42,6 +43,7 @@
   import { writeNearbytesClipboardPayload } from './lib/referenceClipboard.js';
   import ArmedActionButton from './components/ArmedActionButton.svelte';
   import AudioPreview from './components/AudioPreview.svelte';
+  import MountRail from './components/MountRail.svelte';
   import StoragePanel from './components/StoragePanel.svelte';
   import SecretSeedFields from './components/SecretSeedFields.svelte';
   import VolumeChat from './components/VolumeChat.svelte';
@@ -1199,9 +1201,28 @@
   let timelineAutoFollow = true;
   let draggingMountId = $state<string | null>(null);
   let dragOverMountId = $state<string | null>(null);
+  let dragPointerId = $state<number | null>(null);
+  let dragStartX = $state(0);
+  let dragStartY = $state(0);
+  let dragOffsetX = $state(0);
+  let dragTranslateX = $state(0);
+  let dragMoved = $state(false);
+  let suppressMountClick = $state(false);
+  let dragRaf = 0;
+  let dragClientX = 0;
+  const mountNodes = new Map<string, HTMLElement>();
 
   function preferredActiveMountId(nextMounts: VolumeMount[]): string {
     return nextMounts.find((mount) => !mount.collapsed)?.id ?? nextMounts[0]?.id ?? '';
+  }
+
+  function trackMountNode(node: HTMLElement, mountId: string) {
+    mountNodes.set(mountId, node);
+    return {
+      destroy() {
+        mountNodes.delete(mountId);
+      },
+    };
   }
 
   onMount(() => {
@@ -2501,98 +2522,134 @@
   }
 
   function clearMountDragState() {
+    if (dragRaf) {
+      cancelAnimationFrame(dragRaf);
+    }
     draggingMountId = null;
     dragOverMountId = null;
+    dragPointerId = null;
+    dragTranslateX = 0;
+    dragMoved = false;
+    dragRaf = 0;
+    dragClientX = 0;
+    dragStartX = 0;
+    dragStartY = 0;
+    dragOffsetX = 0;
   }
 
-  function reorderMounts(draggedId: string, targetId: string) {
-    if (draggedId === targetId) return;
-    const fromIndex = mounts.findIndex((mount) => mount.id === draggedId);
-    const toIndex = mounts.findIndex((mount) => mount.id === targetId);
-    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
-    const next = [...mounts];
-    const [moved] = next.splice(fromIndex, 1);
-    const insertIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
-    next.splice(insertIndex, 0, moved);
-    mounts = next;
+  function moveMountToIndex(draggedId: string, targetIndex: number) {
+    const currentIndex = mounts.findIndex((mount) => mount.id === draggedId);
+    if (currentIndex < 0) return;
+    if (currentIndex === targetIndex) return;
+    const without = mounts.filter((mount) => mount.id !== draggedId);
+    const clampedIndex = Math.max(0, Math.min(without.length, targetIndex));
+    without.splice(clampedIndex, 0, mounts[currentIndex]);
+    mounts = without;
   }
 
-  function moveMountToEnd(draggedId: string) {
-    const fromIndex = mounts.findIndex((mount) => mount.id === draggedId);
-    if (fromIndex < 0 || fromIndex === mounts.length - 1) return;
-    const next = [...mounts];
-    const [moved] = next.splice(fromIndex, 1);
-    next.push(moved);
-    mounts = next;
+  function computeDropIndex(clientX: number): { index: number; overId: string | null } {
+    const orderedIds = mounts.map((mount) => mount.id).filter((id) => id !== draggingMountId);
+    for (let index = 0; index < orderedIds.length; index += 1) {
+      const id = orderedIds[index];
+      const node = mountNodes.get(id);
+      if (!node) continue;
+      const rect = node.getBoundingClientRect();
+      const midpoint = rect.left + rect.width / 2;
+      if (clientX < midpoint) {
+        return { index, overId: id };
+      }
+    }
+    return { index: orderedIds.length, overId: null };
   }
 
-  function handleMountDragStart(event: DragEvent, mountId: string) {
-    if (!event.dataTransfer) return;
+  function applyDragUpdate(clientX: number) {
+    if (!draggingMountId) return;
+    const dragNode = mountNodes.get(draggingMountId);
+    if (dragNode) {
+      const rect = dragNode.getBoundingClientRect();
+      dragTranslateX = clientX - rect.left - dragOffsetX;
+    }
+    const { index, overId } = computeDropIndex(clientX);
+    dragOverMountId = overId;
+    moveMountToIndex(draggingMountId, index);
+  }
+
+  function scheduleDragUpdate() {
+    if (dragRaf) return;
+    dragRaf = requestAnimationFrame(() => {
+      dragRaf = 0;
+      if (!draggingMountId) return;
+      applyDragUpdate(dragClientX);
+    });
+  }
+
+  function beginMountReorder(event: PointerEvent, mountId: string, isCollapsed: boolean) {
+    if (!isCollapsed) return;
+    if (event.button !== 0) return;
+    const node = mountNodes.get(mountId);
+    if (!node) return;
+    event.preventDefault();
+    dragPointerId = event.pointerId;
     draggingMountId = mountId;
     dragOverMountId = null;
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', mountId);
-    const ghost = document.createElement('div');
-    ghost.style.width = '46px';
-    ghost.style.height = '46px';
-    ghost.style.borderRadius = '12px';
-    ghost.style.background =
-      'linear-gradient(180deg, rgba(12, 25, 45, 0.92), rgba(9, 18, 34, 0.9))';
-    ghost.style.border = '1px solid rgba(56, 189, 248, 0.22)';
-    ghost.style.boxShadow = '0 10px 20px rgba(2, 6, 23, 0.35)';
-    ghost.style.position = 'absolute';
-    ghost.style.top = '-9999px';
-    ghost.style.left = '-9999px';
-    document.body.appendChild(ghost);
-    event.dataTransfer.setDragImage(ghost, 23, 23);
-    requestAnimationFrame(() => ghost.remove());
+    dragStartX = event.clientX;
+    dragStartY = event.clientY;
+    dragClientX = event.clientX;
+    const rect = node.getBoundingClientRect();
+    dragOffsetX = event.clientX - rect.left;
+    dragTranslateX = 0;
+    dragMoved = false;
+    suppressMountClick = false;
+    const captureTarget = event.currentTarget instanceof HTMLElement ? event.currentTarget : node;
+    captureTarget.setPointerCapture(event.pointerId);
   }
 
-  function handleMountDragOver(event: DragEvent, mountId: string) {
-    if (!draggingMountId || draggingMountId === mountId) return;
-    event.preventDefault();
-    dragOverMountId = mountId;
-    reorderMounts(draggingMountId, mountId);
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = 'move';
+  function handleMountPointerMove(event: PointerEvent) {
+    if (!draggingMountId || dragPointerId !== event.pointerId) return;
+    const dx = event.clientX - dragStartX;
+    const dy = event.clientY - dragStartY;
+    if (!dragMoved && Math.hypot(dx, dy) < 4) {
+      return;
     }
-  }
-
-  function handleMountDragEnter(event: DragEvent, mountId: string) {
-    if (!draggingMountId || draggingMountId === mountId) return;
     event.preventDefault();
-    dragOverMountId = mountId;
+    dragMoved = true;
+    dragClientX = event.clientX;
+    scheduleDragUpdate();
   }
 
-  function handleMountDrop(event: DragEvent, mountId: string) {
-    if (!event.dataTransfer) return;
-    event.preventDefault();
-    const draggedId = event.dataTransfer.getData('text/plain') || draggingMountId;
-    if (!draggedId) return;
-    reorderMounts(draggedId, mountId);
-    clearMountDragState();
-  }
-
-  function handleMountDragEnd() {
-    clearMountDragState();
-  }
-
-  function handleMountRowDragOver(event: DragEvent) {
-    if (!draggingMountId) return;
-    event.preventDefault();
-    dragOverMountId = null;
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = 'move';
+  function handleMountPointerUp(event: PointerEvent) {
+    if (!draggingMountId || dragPointerId !== event.pointerId) return;
+    if (dragMoved) {
+      suppressMountClick = true;
+      dragClientX = event.clientX;
+      applyDragUpdate(dragClientX);
     }
+    if (
+      event.currentTarget instanceof HTMLElement &&
+      event.currentTarget.hasPointerCapture(event.pointerId)
+    ) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    clearMountDragState();
   }
 
-  function handleMountRowDrop(event: DragEvent) {
-    if (!event.dataTransfer) return;
-    event.preventDefault();
-    const draggedId = event.dataTransfer.getData('text/plain') || draggingMountId;
-    if (!draggedId) return;
-    moveMountToEnd(draggedId);
+  function handleMountPointerCancel(event: PointerEvent) {
+    if (dragPointerId !== event.pointerId) return;
+    if (
+      event.currentTarget instanceof HTMLElement &&
+      event.currentTarget.hasPointerCapture(event.pointerId)
+    ) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
     clearMountDragState();
+  }
+
+  function handleMountClick(mountId: string) {
+    if (suppressMountClick) {
+      suppressMountClick = false;
+      return;
+    }
+    handleChipClick(mountId);
   }
 
   function mountIdFromDropTarget(target: EventTarget | null): string | null {
@@ -3751,18 +3808,18 @@
       }}
       ondrop={handleSecretFileDrop}
     >
-      <div
-        class="mounts-row"
-        class:dragging={draggingMountId !== null}
-        ondragover={handleMountRowDragOver}
-        ondrop={handleMountRowDrop}
-      >
+      <MountRail dragging={draggingMountId !== null}>
         {#each mounts as mount (mount.id)}
           {@const expanded = mount.id === activeMountId && !mount.collapsed}
           {@const isPending = pendingMountId === mount.id}
-          {#if expanded}
-            <div class="volume-chip expanded" data-mount-id={mount.id}>
-              <div class="header-dock">
+          <div class="mount-item" use:trackMountNode={mount.id} animate:flip={{ duration: 160 }}>
+            {#if expanded}
+              <div
+                class="volume-chip expanded"
+                class:drag-over={dragOverMountId === mount.id && dragMoved}
+                data-mount-id={mount.id}
+              >
+                <div class="header-dock">
                 <div class="header-dock-main editing">
                   <div class="secret-input-wrapper in-dock">
                     <SecretSeedFields
@@ -3889,72 +3946,67 @@
                   </button>
                 </div>
               </div>
-            </div>
-          {:else}
-            <div
-              class="volume-chip collapsed-shell parked"
-              class:selected={mount.id === activeMountId && mount.collapsed}
-              class:dragging={draggingMountId === mount.id}
-              class:drag-over={dragOverMountId === mount.id}
-              data-mount-id={mount.id}
-              draggable={true}
-              ondragstart={(event) => handleMountDragStart(event, mount.id)}
-              ondragenter={(event) => handleMountDragEnter(event, mount.id)}
-              ondragover={(event) => handleMountDragOver(event, mount.id)}
-              ondrop={(event) => handleMountDrop(event, mount.id)}
-              ondragend={handleMountDragEnd}
-              title="Drag to reorder"
-            >
-              <button
-                type="button"
-                class="volume-chip-select"
-                aria-label={mountLabel(mount) || 'Space entry'}
-                onclick={() => handleChipClick(mount.id)}
-                draggable={true}
-                ondragstart={(event) => handleMountDragStart(event, mount.id)}
-                ondragenter={(event) => handleMountDragEnter(event, mount.id)}
-                ondragover={(event) => handleMountDragOver(event, mount.id)}
-                ondrop={(event) => handleMountDrop(event, mount.id)}
-                ondragend={handleMountDragEnd}
+              </div>
+            {:else}
+              <div
+                class="volume-chip collapsed-shell parked"
+                class:selected={mount.id === activeMountId && mount.collapsed}
+                class:dragging={draggingMountId === mount.id && dragMoved}
+                class:drag-over={dragOverMountId === mount.id && dragMoved}
+                data-mount-id={mount.id}
+                style:transform={draggingMountId === mount.id && dragMoved ? `translate3d(${dragTranslateX}px, 0, 0)` : undefined}
               >
-                <div class="header-dock">
-                  <div class="header-dock-main">
-                    <div class="header-dock-badge" class:loading={isPending}>
-                      <div class="header-dock-badge-top">
-                        <VolumeIdentity
-                          compact={true}
-                          label={mountLabel(mount)}
-                          title={mountLabel(mount)}
-                          filePayload={mount.secretFilePayload}
-                          fileMimeType={mount.secretFileMimeType}
-                          fileName={mount.secretFileName}
-                        />
+                <button
+                  type="button"
+                  class="volume-chip-select"
+                  aria-label={mountLabel(mount) || 'Space entry'}
+                  onclick={() => handleMountClick(mount.id)}
+                  onpointerdown={(event) => beginMountReorder(event, mount.id, mount.collapsed)}
+                  onpointermove={handleMountPointerMove}
+                  onpointerup={handleMountPointerUp}
+                  onpointercancel={handleMountPointerCancel}
+                  title="Drag to reorder"
+                >
+                  <div class="header-dock">
+                    <div class="header-dock-main">
+                      <div class="header-dock-badge" class:loading={isPending}>
+                        <div class="header-dock-badge-top">
+                          <VolumeIdentity
+                            compact={true}
+                            label={mountLabel(mount)}
+                            title={mountLabel(mount)}
+                            filePayload={mount.secretFilePayload}
+                            fileMimeType={mount.secretFileMimeType}
+                            fileName={mount.secretFileName}
+                          />
+                        </div>
+                        {#if isPending}
+                          <span class="badge-meter" aria-hidden="true">
+                            <span class="badge-meter-bar"></span>
+                          </span>
+                        {/if}
                       </div>
-                      {#if isPending}
-                        <span class="badge-meter" aria-hidden="true">
-                          <span class="badge-meter-bar"></span>
-                        </span>
-                      {/if}
                     </div>
                   </div>
-                </div>
-              </button>
-              <button
-                type="button"
-                class="volume-chip-config-btn"
-                aria-label={`Edit ${mountLabel(mount) || 'space'}`}
-                title="Edit space"
-                onclick={(event) => {
-                  event.stopPropagation();
-                  reopenMount(mount.id);
-                }}
-              >
-                <Settings2 size={14} strokeWidth={2} />
-              </button>
-            </div>
-          {/if}
+                </button>
+                <button
+                  type="button"
+                  class="volume-chip-config-btn"
+                  aria-label={`Edit ${mountLabel(mount) || 'space'}`}
+                  title="Edit space"
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    reopenMount(mount.id);
+                  }}
+                >
+                  <Settings2 size={14} strokeWidth={2} />
+                </button>
+              </div>
+            {/if}
+          </div>
         {/each}
         <div
+          slot="actions"
           class="mounts-actions"
           class:visible={
             isHeaderHovering ||
@@ -4031,7 +4083,7 @@
             <Plus size={15} strokeWidth={2.2} />
           </button>
         </div>
-      </div>
+      </MountRail>
 
       {#if showChatWorkspace && showIdentityManager}
         <div class="identity-row panel-surface">
@@ -4929,64 +4981,11 @@
     filter: drop-shadow(0 14px 28px rgba(34, 211, 238, 0.12));
   }
 
-  .mounts-row {
+  .mount-item {
     display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    flex-wrap: wrap;
-    width: 100%;
-  }
-
-  .mounts-row.dragging .volume-chip {
-    cursor: grab;
-  }
-
-  .mounts-row.dragging .volume-chip.collapsed-shell.parked,
-  .mounts-row.dragging .volume-chip.collapsed-shell.parked:hover,
-  .mounts-row.dragging .volume-chip.collapsed-shell.parked:focus-within,
-  .mounts-row.dragging .volume-chip.collapsed-shell.parked.selected {
-    min-width: 46px;
-    max-width: 46px;
-    transform: translateX(0) scale(1);
-  }
-
-  .mounts-row.dragging .volume-chip.collapsed-shell.parked .header-dock {
-    padding: 0.32rem;
-  }
-
-  .mounts-row.dragging .volume-chip.collapsed-shell.parked .header-dock-badge,
-  .mounts-row.dragging .volume-chip.collapsed-shell.parked .header-dock-badge-top {
-    gap: 0;
-  }
-
-  .mounts-row.dragging .volume-chip.collapsed-shell.parked :global(.volume-identity-copy) {
-    max-width: 0;
-    opacity: 0;
-    transform: translateX(-5px);
-  }
-
-  .mounts-row.dragging .volume-chip.selected {
-    border-color: rgba(56, 189, 248, 0.22);
-    background:
-      linear-gradient(180deg, rgba(12, 25, 45, 0.9), rgba(9, 18, 34, 0.88));
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.04),
-      0 14px 32px rgba(2, 6, 23, 0.28);
-  }
-
-  .mounts-row.dragging .volume-chip.collapsed-shell.selected {
-    margin-left: 0;
-  }
-
-  .mounts-row.dragging .volume-chip.selected .header-dock-badge {
-    padding-left: 0;
-  }
-
-  .mounts-row.dragging .volume-chip.selected .header-dock-badge::before {
-    width: 0;
-    height: 0;
-    opacity: 0;
-    box-shadow: none;
+    flex: 0 0 auto;
+    align-items: stretch;
+    will-change: transform;
   }
 
   .identity-row {
@@ -5154,7 +5153,6 @@
   }
 
   .mounts-actions {
-    margin-left: auto;
     display: inline-flex;
     align-items: center;
     gap: 0.38rem;
@@ -5238,32 +5236,32 @@
     transform: translateX(-5px);
   }
 
-  .volume-chip.collapsed-shell.parked:focus-within {
+  .volume-chip.collapsed-shell.parked:focus-within:not(.dragging) {
     min-width: 132px;
     max-width: min(72vw, 420px);
   }
 
-  .volume-chip.collapsed-shell.parked:hover,
-  .volume-chip.collapsed-shell.parked.selected {
+  .volume-chip.collapsed-shell.parked:hover:not(.dragging),
+  .volume-chip.collapsed-shell.parked.selected:not(.dragging) {
     min-width: 132px;
     max-width: min(72vw, 420px);
   }
 
-  .volume-chip.collapsed-shell.parked:focus-within .header-dock,
-  .volume-chip.collapsed-shell.parked:hover .header-dock,
-  .volume-chip.collapsed-shell.parked.selected .header-dock {
+  .volume-chip.collapsed-shell.parked:focus-within:not(.dragging) .header-dock,
+  .volume-chip.collapsed-shell.parked:hover:not(.dragging) .header-dock,
+  .volume-chip.collapsed-shell.parked.selected:not(.dragging) .header-dock {
     padding: 0.26rem 0.36rem 0.26rem 0.62rem;
   }
 
-  .volume-chip.collapsed-shell.parked:hover .header-dock-badge-top,
-  .volume-chip.collapsed-shell.parked:focus-within .header-dock-badge-top,
-  .volume-chip.collapsed-shell.parked.selected .header-dock-badge-top {
+  .volume-chip.collapsed-shell.parked:hover:not(.dragging) .header-dock-badge-top,
+  .volume-chip.collapsed-shell.parked:focus-within:not(.dragging) .header-dock-badge-top,
+  .volume-chip.collapsed-shell.parked.selected:not(.dragging) .header-dock-badge-top {
     gap: 0.5rem;
   }
 
-  .volume-chip.collapsed-shell.parked:focus-within :global(.volume-identity-copy),
-  .volume-chip.collapsed-shell.parked:hover :global(.volume-identity-copy),
-  .volume-chip.collapsed-shell.parked.selected :global(.volume-identity-copy) {
+  .volume-chip.collapsed-shell.parked:focus-within:not(.dragging) :global(.volume-identity-copy),
+  .volume-chip.collapsed-shell.parked:hover:not(.dragging) :global(.volume-identity-copy),
+  .volume-chip.collapsed-shell.parked.selected:not(.dragging) :global(.volume-identity-copy) {
     max-width: 220px;
     opacity: 1;
     transform: translateX(0);
@@ -5295,21 +5293,6 @@
       0 12px 32px rgba(13, 148, 136, 0.14);
   }
 
-  .volume-chip.collapsed-shell.selected {
-    margin-left: -1rem;
-  }
-
-  .volume-chip.dragging {
-    opacity: 0.6;
-  }
-
-  .volume-chip.drag-over {
-    border-color: rgba(56, 189, 248, 0.6);
-    box-shadow:
-      inset 0 0 0 1px rgba(56, 189, 248, 0.28),
-      0 18px 34px rgba(2, 6, 23, 0.3);
-  }
-
   .volume-chip.selected .header-dock {
     padding-left: 0.72rem;
   }
@@ -5338,6 +5321,55 @@
     background: rgba(34, 211, 238, 0.18);
   }
 
+  .volume-chip.drag-over {
+    border-color: rgba(56, 189, 248, 0.6);
+    box-shadow:
+      inset 0 0 0 1px rgba(56, 189, 248, 0.28),
+      0 18px 34px rgba(2, 6, 23, 0.3);
+  }
+
+  .volume-chip.dragging {
+    opacity: 1;
+    min-width: 46px;
+    max-width: 46px;
+    margin-left: 0;
+    cursor: grabbing;
+    transition: none;
+    border-color: rgba(56, 189, 248, 0.22);
+    background:
+      linear-gradient(180deg, rgba(12, 25, 45, 0.9), rgba(9, 18, 34, 0.88));
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 14px 32px rgba(2, 6, 23, 0.28);
+    z-index: 40;
+  }
+
+  .volume-chip.dragging .header-dock {
+    padding: 0.32rem;
+  }
+
+  .volume-chip.dragging .header-dock-badge,
+  .volume-chip.dragging .header-dock-badge-top {
+    gap: 0;
+  }
+
+  .volume-chip.dragging :global(.volume-identity-copy) {
+    max-width: 0;
+    opacity: 0;
+    transform: translateX(-5px);
+  }
+
+  .volume-chip.dragging .header-dock-badge::before {
+    width: 0;
+    height: 0;
+    opacity: 0;
+    box-shadow: none;
+  }
+
+  .volume-chip.dragging .volume-chip-select {
+    cursor: grabbing;
+  }
+
   .header-dock {
     border: 0;
     background: transparent;
@@ -5361,6 +5393,7 @@
     min-width: 0;
     flex: 1 1 auto;
     cursor: pointer;
+    touch-action: pan-y;
   }
 
   .volume-chip-select:hover .header-dock {
@@ -5374,6 +5407,12 @@
   .volume-chip-select:focus-visible .header-dock {
     background: linear-gradient(180deg, rgba(14, 29, 50, 0.46), rgba(9, 21, 39, 0.26));
     box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.18);
+  }
+
+  .volume-chip.dragging .volume-chip-select:hover .header-dock,
+  .volume-chip.dragging .volume-chip-select:focus-visible .header-dock {
+    background: transparent;
+    box-shadow: none;
   }
 
   .volume-chip-config-btn {
