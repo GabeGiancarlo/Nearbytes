@@ -82,6 +82,7 @@
   const WORKSPACE_DIVIDER_WIDTH = 14;
   const WORKSPACE_FILE_PANE_MIN_WIDTH = 360;
   const WORKSPACE_CHAT_PANE_MIN_WIDTH = 180;
+  const PARKED_MOUNT_WIDTH = 46;
 
   type PreviewKind = 'none' | 'image' | 'text' | 'pdf' | 'video' | 'audio' | 'unsupported';
   type DesktopRemoteFile = {
@@ -2615,7 +2616,8 @@
     dragStartY = event.clientY;
     dragClientX = event.clientX;
     const rect = node.getBoundingClientRect();
-    dragOffsetX = event.clientX - rect.left;
+    const pointerRatio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
+    dragOffsetX = Math.max(0, Math.min(PARKED_MOUNT_WIDTH, pointerRatio * PARKED_MOUNT_WIDTH));
     dragTranslateX = 0;
     dragMoved = false;
     suppressMountClick = false;
