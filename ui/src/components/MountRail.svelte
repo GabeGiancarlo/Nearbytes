@@ -45,4 +45,14 @@
   .mount-rail.dragging {
     cursor: grabbing;
   }
+
+  .mount-rail.dragging :global(.volume-chip-select),
+  .mount-rail.dragging :global(.volume-chip-config-btn) {
+    pointer-events: none;
+  }
+
+  .mount-rail.dragging :global(.volume-chip.drag-armed .volume-chip-select),
+  .mount-rail.dragging :global(.volume-chip.dragging .volume-chip-select) {
+    pointer-events: auto;
+  }
 </style>

@@ -2616,9 +2616,12 @@
     dragStartY = event.clientY;
     dragClientX = event.clientX;
     const rect = node.getBoundingClientRect();
-    const pointerRatio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
-    dragOffsetX = Math.max(0, Math.min(PARKED_MOUNT_WIDTH, pointerRatio * PARKED_MOUNT_WIDTH));
-    dragTranslateX = 0;
+    if (rect.width > PARKED_MOUNT_WIDTH + 4) {
+      dragOffsetX = PARKED_MOUNT_WIDTH / 2;
+    } else {
+      dragOffsetX = Math.max(0, Math.min(PARKED_MOUNT_WIDTH, event.clientX - rect.left));
+    }
+    dragTranslateX = event.clientX - rect.left - dragOffsetX;
     dragMoved = false;
     suppressMountClick = false;
     const captureTarget = event.currentTarget instanceof HTMLElement ? event.currentTarget : node;
@@ -3829,7 +3832,12 @@
         {#each mounts as mount (mount.id)}
           {@const expanded = mount.id === activeMountId && !mount.collapsed}
           {@const isPending = pendingMountId === mount.id}
-          <div class="mount-item" use:trackMountNode={mount.id} animate:flip={{ duration: 160 }}>
+          <div
+            class="mount-item"
+            class:dragging={draggingMountId === mount.id}
+            use:trackMountNode={mount.id}
+            animate:flip={{ duration: 160 }}
+          >
             {#if expanded}
               <div
                 class="volume-chip expanded"
@@ -3972,7 +3980,7 @@
                 class:dragging={draggingMountId === mount.id && dragMoved}
                 class:drag-over={dragOverMountId === mount.id && dragMoved}
                 data-mount-id={mount.id}
-                style:transform={draggingMountId === mount.id && dragMoved ? `translate3d(${dragTranslateX}px, 0, 0)` : undefined}
+                style:transform={isMountReorderActive(mount.id) ? `translate3d(${dragTranslateX}px, 0, 0)` : undefined}
               >
                 <button
                   type="button"
@@ -5003,7 +5011,12 @@
     display: flex;
     flex: 0 0 auto;
     align-items: stretch;
+    position: relative;
     will-change: transform;
+  }
+
+  .mount-item.dragging {
+    z-index: 80;
   }
 
   .identity-row {
@@ -5254,32 +5267,32 @@
     transform: translateX(-5px);
   }
 
-  .volume-chip.collapsed-shell.parked:focus-within:not(.drag-armed):not(.dragging) {
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked:focus-within:not(.drag-armed):not(.dragging) {
     min-width: 132px;
     max-width: min(72vw, 420px);
   }
 
-  .volume-chip.collapsed-shell.parked:hover:not(.drag-armed):not(.dragging),
-  .volume-chip.collapsed-shell.parked.selected:not(.drag-armed):not(.dragging) {
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked:hover:not(.drag-armed):not(.dragging),
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked.selected:not(.drag-armed):not(.dragging) {
     min-width: 132px;
     max-width: min(72vw, 420px);
   }
 
-  .volume-chip.collapsed-shell.parked:focus-within:not(.drag-armed):not(.dragging) .header-dock,
-  .volume-chip.collapsed-shell.parked:hover:not(.drag-armed):not(.dragging) .header-dock,
-  .volume-chip.collapsed-shell.parked.selected:not(.drag-armed):not(.dragging) .header-dock {
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked:focus-within:not(.drag-armed):not(.dragging) .header-dock,
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked:hover:not(.drag-armed):not(.dragging) .header-dock,
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked.selected:not(.drag-armed):not(.dragging) .header-dock {
     padding: 0.26rem 0.36rem 0.26rem 0.62rem;
   }
 
-  .volume-chip.collapsed-shell.parked:hover:not(.drag-armed):not(.dragging) .header-dock-badge-top,
-  .volume-chip.collapsed-shell.parked:focus-within:not(.drag-armed):not(.dragging) .header-dock-badge-top,
-  .volume-chip.collapsed-shell.parked.selected:not(.drag-armed):not(.dragging) .header-dock-badge-top {
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked:hover:not(.drag-armed):not(.dragging) .header-dock-badge-top,
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked:focus-within:not(.drag-armed):not(.dragging) .header-dock-badge-top,
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked.selected:not(.drag-armed):not(.dragging) .header-dock-badge-top {
     gap: 0.5rem;
   }
 
-  .volume-chip.collapsed-shell.parked:focus-within:not(.drag-armed):not(.dragging) :global(.volume-identity-copy),
-  .volume-chip.collapsed-shell.parked:hover:not(.drag-armed):not(.dragging) :global(.volume-identity-copy),
-  .volume-chip.collapsed-shell.parked.selected:not(.drag-armed):not(.dragging) :global(.volume-identity-copy) {
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked:focus-within:not(.drag-armed):not(.dragging) :global(.volume-identity-copy),
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked:hover:not(.drag-armed):not(.dragging) :global(.volume-identity-copy),
+  :global(.mount-rail:not(.dragging)) .volume-chip.collapsed-shell.parked.selected:not(.drag-armed):not(.dragging) :global(.volume-identity-copy) {
     max-width: 220px;
     opacity: 1;
     transform: translateX(0);
@@ -5297,7 +5310,7 @@
     cursor: default;
   }
 
-  .volume-chip.selected {
+  .volume-chip.selected:not(.drag-armed):not(.dragging) {
     --volume-identity-label-color: rgba(236, 254, 255, 0.98);
     --volume-identity-secondary-color: rgba(165, 243, 252, 0.82);
     border-color: rgba(45, 212, 191, 0.46);
@@ -5311,16 +5324,16 @@
       0 12px 32px rgba(13, 148, 136, 0.14);
   }
 
-  .volume-chip.selected .header-dock {
+  .volume-chip.selected:not(.drag-armed):not(.dragging) .header-dock {
     padding-left: 0.72rem;
   }
 
-  .volume-chip.selected .header-dock-badge {
+  .volume-chip.selected:not(.drag-armed):not(.dragging) .header-dock-badge {
     position: relative;
     padding-left: 0.68rem;
   }
 
-  .volume-chip.selected .header-dock-badge::before {
+  .volume-chip.selected:not(.drag-armed):not(.dragging) .header-dock-badge::before {
     content: '';
     position: absolute;
     left: 0;
@@ -5335,7 +5348,7 @@
       0 0 14px rgba(34, 211, 238, 0.46);
   }
 
-  .volume-chip.selected .badge-meter {
+  .volume-chip.selected:not(.drag-armed):not(.dragging) .badge-meter {
     background: rgba(34, 211, 238, 0.18);
   }
 
@@ -5425,6 +5438,18 @@
     border-left-color: transparent;
   }
 
+  .volume-chip.drag-armed:hover .volume-chip-config-btn,
+  .volume-chip.drag-armed:focus-within .volume-chip-config-btn,
+  .volume-chip.dragging:hover .volume-chip-config-btn,
+  .volume-chip.dragging:focus-within .volume-chip-config-btn {
+    width: 0;
+    min-width: 0;
+    opacity: 0;
+    pointer-events: none;
+    transform: none;
+    border-left-color: transparent;
+  }
+
   .header-dock {
     border: 0;
     background: transparent;
@@ -5464,6 +5489,8 @@
     box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.18);
   }
 
+  .volume-chip.drag-armed .volume-chip-select:hover .header-dock,
+  .volume-chip.drag-armed .volume-chip-select:focus-visible .header-dock,
   .volume-chip.dragging .volume-chip-select:hover .header-dock,
   .volume-chip.dragging .volume-chip-select:focus-visible .header-dock {
     background: transparent;
@@ -5503,6 +5530,18 @@
     border-left-color: rgba(56, 189, 248, 0.14);
     opacity: 1;
     pointer-events: auto;
+  }
+
+  .volume-chip.drag-armed:hover .volume-chip-config-btn,
+  .volume-chip.drag-armed:focus-within .volume-chip-config-btn,
+  .volume-chip.dragging:hover .volume-chip-config-btn,
+  .volume-chip.dragging:focus-within .volume-chip-config-btn {
+    width: 0;
+    min-width: 0;
+    border-left-color: transparent;
+    opacity: 0;
+    pointer-events: none;
+    transform: none;
   }
 
   .volume-chip-config-btn:hover {
